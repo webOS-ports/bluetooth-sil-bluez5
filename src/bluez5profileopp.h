@@ -51,6 +51,7 @@ private:
 	guint mConfirmationTimeout;
 	std::string mTransferObjPath;
 	std::string mFileName;
+	std::string mStoredName;	// a free name in obexd's folder, which the file is stored under
 	std::map <BluetoothOppTransferId, uint64_t> mTransfersMap;
 };
 

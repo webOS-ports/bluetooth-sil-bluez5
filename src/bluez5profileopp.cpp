@@ -23,6 +23,9 @@
 #include "bluez5obexclient.h"
 #include "bluez5busconfig.h"
 #include "utils.h"
+#include "obexpaths.h"
+
+#include <sys/stat.h>
 
 using namespace std::placeholders;
 
@@ -36,6 +39,10 @@ const std::string BLUETOOTH_PROFILE_OPP_UUID = "00001105-0000-1000-8000-00805f9b
 
 // Below obexd's own 60 s agent timeout (obexd/src/manager.c).
 const guint CONFIRMATION_TIMEOUT_SECONDS = 50;
+
+// obexd's root folder, where it stores pushed files (obex.service: obexd -r /media/internal). The reply names a file
+// in it that does not exist yet: obexd opens the name with O_TRUNC, replacing a file of the same name.
+const std::string OPP_RECEIVE_FOLDER = "/media/internal";
 
 Bluez5ProfileOpp::Bluez5ProfileOpp(Bluez5Adapter *adapter) :
 	Bluez5ObexProfileBase(Bluez5ObexSession::Type::OPP, adapter, BLUETOOTH_PROFILE_OPP_UUID),
@@ -83,26 +90,24 @@ BluetoothOppTransferId Bluez5ProfileOpp::pushFile(const std::string &address,
 
 	BluetoothOppTransferId transferId = nextTransferId();
 
-	auto pushCallback = [this, alive = mLifetime.token(), objectPushProxy, sourcePath, transferId, callback](GAsyncResult *result) {
-		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
-		if (alive.expired())
-		{
-			callback(BLUETOOTH_ERROR_FAIL, 0, 0, false);
-			return;
-		}
+	// Finished on the proxy the call was made on: the session's, borrowed here, is freed when the session goes.
+	auto pushCallback = [this, alive = mLifetime.token(), transferId, callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
-		[[maybe_unused]] gboolean ret;
-
+		gboolean ret;
 		char *objectPath = 0;
-		ret = bluez_obex_object_push1_call_send_file_finish(objectPushProxy, &objectPath , NULL, result, &error);
-		if (error)
+
+		ret = bluez_obex_object_push1_call_send_file_finish(BLUEZ_OBEX_OBJECT_PUSH1(source), &objectPath, NULL, result, &error);
+		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+		if (alive.expired() || !ret || error || !objectPath)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
+			g_free(objectPath);
 			callback(BLUETOOTH_ERROR_FAIL, 0, 0, false);
 			return;
 		}
 
 		startTransfer(transferId, std::string(objectPath), callback, Bluez5ObexTransfer::TransferType::SENDING);
+		g_free(objectPath);	// leaked on every push
 	};
 
 	bluez_obex_object_push1_call_send_file(objectPushProxy, sourcePath.c_str(),
@@ -186,13 +191,27 @@ void Bluez5ProfileOpp::agentTransferConfirmationRequested(BluezObexAgent1 *inter
 		return;
 	}
 
-	std::string deviceAddress = destination;
+	// Stored under a free name; names starting with '.' are refused (obexd itself refuses '/', "." and "..").
+	std::string storedName = uniqueReceivedName(fileName, [](const std::string &name) {
+		struct stat st;
+		return lstat((OPP_RECEIVE_FOLDER + "/" + name).c_str(), &st) == 0;
+	});
+	if (storedName.empty())
+	{
+		reject();
+		return;
+	}
+
+	// Lower-case, as the service passes addresses and as outgoing sessions are keyed: obexd's upper-case
+	// Destination made a second session for the same device, and getProperty(CONNECTED) missed it.
+	std::string deviceAddress = convertAddressToLowerCase(destination);
 	BluetoothOppTransferId transferId = nextTransferId();
 	mInterface = interface;
 	mInvocation = invocation;
 	mPendingTransferId = transferId;
 	mTransferObjPath = arg_path;
 	mFileName = fileName;
+	mStoredName = storedName;
 
 	// Unanswered, obexd gives up after 60 s and then takes the push anyway, under the sender's name: refused here
 	// first. The observer's request stays; answering it later fails.
@@ -203,10 +222,20 @@ void Bluez5ProfileOpp::agentTransferConfirmationRequested(BluezObexAgent1 *inter
 		return G_SOURCE_REMOVE;
 	}, this);
 
-	Bluez5ObexSession *session = new Bluez5ObexSession(mAdapter->getObexClient(), Bluez5ObexSession::Type::OPP, std::string(sessionPath), deviceAddress);
-	session->watch(std::bind(&Bluez5ObexProfileBase::handleObexSessionStatus, this, deviceAddress, _1));
-	storeSession(deviceAddress, session);
-	notifySessionStatus(deviceAddress, true);
+	// Another push from a device with a session already uses that one: a second session was stored over it and
+	// leaked, and its end removed the first.
+	if (!findSession(deviceAddress))
+	{
+		Bluez5ObexSession *session = new Bluez5ObexSession(mAdapter->getObexClient(), Bluez5ObexSession::Type::OPP, std::string(sessionPath), deviceAddress);
+		if (session->isValid())
+		{
+			session->watch(std::bind(&Bluez5ObexProfileBase::handleObexSessionStatus, this, deviceAddress, _1));
+			storeSession(deviceAddress, session);
+			notifySessionStatus(deviceAddress, true);
+		}
+		else
+			delete session;	// the push goes on; only its session is not tracked
+	}
 	mTransfersMap[transferId] = 0;
 	std::string lowerCaseAddress = convertAddressToLowerCase(source);
 	getOppObserver()->transferConfirmationRequested(transferId, lowerCaseAddress, deviceAddress, device->getName(), mFileName, size);
@@ -244,7 +273,7 @@ void Bluez5ProfileOpp::supplyTransferConfirmation(BluetoothOppTransferId transfe
 		};
 
 		startTransfer(transferId, mTransferObjPath, resultCallBack, Bluez5ObexTransfer::TransferType::RECEIVING);
-		bluez_obex_agent1_complete_authorize_push(mInterface, mInvocation, mFileName.c_str());
+		bluez_obex_agent1_complete_authorize_push(mInterface, mInvocation, mStoredName.c_str());
 		mInvocation = nullptr;
 		cancelPendingConfirmation();	// only the timer and the id are left
 	}
