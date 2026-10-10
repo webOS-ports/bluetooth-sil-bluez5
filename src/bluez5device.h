@@ -66,6 +66,7 @@ public:
 									GVariant *invalidatedProperties, gpointer userData);
 
 	void setPaired (bool paired) { mPaired = paired; }
+	bool getPaired() const { return mPaired; }
 	bool setDevicePropertySync(const BluetoothProperty& property);
 	void setDevicePropertyAsync(const BluetoothProperty& property, BluetoothResultCallback callback);
 

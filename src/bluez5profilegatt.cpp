@@ -32,7 +32,7 @@ const std::string BLUETOOTH_PROFILE_GATT_UUID = "00001801-0000-1000-8000-00805f9
 
 #define CLIENT_PATH "/client"
 #define SERVER_PATH "/server"
-#define GATT_RECONN_TIMEOUT (30 * 1000)
+#define GATT_RECONN_TIMEOUT_SECONDS 30	// was (30 * 1000), given to g_timeout_add_seconds: 8 h 20 min
 #define BLUEZ5_GATT_OBJECT_CLIENT_PATH BLUEZ5_GATT_OBJECT_PATH CLIENT_PATH
 #define BLUEZ5_GATT_OBJECT_SERVER_PATH BLUEZ5_GATT_OBJECT_PATH SERVER_PATH
 
@@ -40,7 +40,6 @@ const std::string BLUETOOTH_PROFILE_GATT_UUID = "00001801-0000-1000-8000-00805f9
 Bluez5ProfileGatt::Bluez5ProfileGatt(Bluez5Adapter *adapter):
 	Bluez5ProfileBase(adapter, BLUETOOTH_PROFILE_GATT_UUID),
 	mBusId(0),
-	mLastCharId(0),
 	mConn(nullptr),
 	mAdapter(adapter),
 	mObjectManagerGattServer(nullptr)
@@ -55,6 +54,12 @@ Bluez5ProfileGatt::Bluez5ProfileGatt(Bluez5Adapter *adapter):
 Bluez5ProfileGatt::~Bluez5ProfileGatt()
 {
 	DEBUG("Bluez5ProfileGatt dtor");
+
+	// The reconnect timers run on this profile.
+	for (auto &autoConn : mAutoConnDevMap)
+		if (autoConn.second.first)
+			g_source_remove(autoConn.second.first);
+	mAutoConnDevMap.clear();
 
 	if (mObjectManagerGattServer)
 	{
@@ -617,13 +622,30 @@ void Bluez5ProfileGatt::handleAutoConnectDevRem(const std::string & address)
 	{
 		if (iter->second.first != 0)
 			g_source_remove(iter->second.first);
-		std::pair<std::string, Bluez5ProfileGatt*> userData = {devAddress, this};
-		guint autoConnectTimeoutSource = g_timeout_add_seconds(GATT_RECONN_TIMEOUT,
-							Bluez5ProfileGatt::autoConnTimeoutHandler, &userData);
-		DEBUG("autoConnectTimeoutSource %d", autoConnectTimeoutSource);
-
-		mAutoConnDevMap[devAddress] = {autoConnectTimeoutSource, iter->second.second};
+		startAutoConnTimeout(devAddress, iter->second.second);
 	}
+}
+
+namespace {
+
+struct AutoConnTimeoutData
+{
+	Bluez5ProfileGatt *profile;
+	std::string address;
+};
+
+} // namespace
+
+// The timer's data lives as long as the timer: it was a pair on the stack of the function that started it, read
+// when the timer fired, long after that function had returned.
+void Bluez5ProfileGatt::startAutoConnTimeout(const std::string &devAddress, uint16_t appId)
+{
+	guint source = g_timeout_add_seconds_full(G_PRIORITY_DEFAULT, GATT_RECONN_TIMEOUT_SECONDS,
+	                                          Bluez5ProfileGatt::autoConnTimeoutHandler,
+	                                          new AutoConnTimeoutData{this, devAddress},
+	                                          [](gpointer data) { delete static_cast<AutoConnTimeoutData*>(data); });
+	DEBUG("autoConnectTimeoutSource %u", source);
+	mAutoConnDevMap[devAddress] = {source, appId};
 }
 
 void Bluez5ProfileGatt::handleAutoConnTimeout(const std::string & address)
@@ -633,20 +655,19 @@ void Bluez5ProfileGatt::handleAutoConnTimeout(const std::string & address)
 	auto iter = mAutoConnDevMap.find(devAddress);
 	if ((iter != mAutoConnDevMap.end()) && (iter->second.first != 0))
 	{
-		mAutoConnDevMap.erase(devAddress);
-		mConnectedDevices.erase(iter->second.second);
+		uint16_t appId = iter->second.second;	// read from the erased entry before
+		mAutoConnDevMap.erase(iter);
+		mConnectedDevices.erase(appId);
 	}
 }
 
 gboolean Bluez5ProfileGatt::autoConnTimeoutHandler(gpointer user_data)
 {
 	DEBUG("%s", __FUNCTION__);
-	std::pair<std::string, Bluez5ProfileGatt*> *userData =
-		static_cast<std::pair<std::string, Bluez5ProfileGatt*>*>(user_data);
-	std::string address = userData->first;
-	Bluez5ProfileGatt *ptr = userData->second;
-	ptr->handleAutoConnTimeout(address);
-	return true;
+	auto *data = static_cast<AutoConnTimeoutData*>(user_data);
+	data->profile->handleAutoConnTimeout(data->address);
+	// Once: it repeated, and its id was dropped with the map entry, so nothing could remove it.
+	return G_SOURCE_REMOVE;
 }
 
 void Bluez5ProfileGatt::handleAutoConnectReq(const bool& autoConnection, const std::string & address, const uint16_t& appId)
@@ -725,18 +746,22 @@ void Bluez5ProfileGatt::disconnectGatt(const uint16_t &appId, const uint16_t &co
 		return;
 	}
 
-	auto isDisconnectCallback = [this, deviceInfo, deviceAddress, appId, callback](BluetoothError error)
+	// By key: the iterator was kept across the asynchronous Disconnect, in which a second disconnect erased the
+	// entry or a connect rehashed the map.
+	auto isDisconnectCallback = [this, deviceAddress, appId, callback](BluetoothError error)
 	{
 		if (error != BLUETOOTH_ERROR_NONE)
 		{
 			callback(error);
 			return;
 		}
-		mConnectedDevices.erase(deviceInfo);
+		mConnectedDevices.erase(appId);
 
 		GError *err = nullptr;
 		Bluez5Device *device = mAdapter->findDevice(deviceAddress);
-		if (device)
+		// Only a device that is not paired is removed: RemoveDevice also deletes the pairing, which every GATT
+		// disconnect from a bonded device did.
+		if (device && !device->getPaired())
 		{
 			bluez_adapter1_call_remove_device_sync(mAdapter->getAdapterProxy(), device->getObjectPath().c_str(), NULL, &err);
 			if (err)
@@ -1578,21 +1603,39 @@ void Bluez5ProfileGatt::addService(uint16_t appId, const BluetoothGattService &s
 	std::string objPath = g_dbus_object_manager_get_object_path(G_DBUS_OBJECT_MANAGER(mObjectManagerGattServer));
 	std::string serviceObjPath = objPath  + "/App" + std::to_string(appId) + "/Service" + std::to_string(serviceId);
 
-	std::vector<BluetoothUuid> BluetoothUuidList = service.getIncludedServices();
-	const char *uuidArray[BluetoothUuidList.size()+1];
-
-	int index = 0;
-	for (auto it : BluetoothUuidList)
-		uuidArray[index++] = it.toString().c_str();
-
-	if (index < sizeof(uuidArray)) uuidArray[index] = NULL;
+	// Includes holds object paths (ao): those of this application's services with the included UUIDs, which are
+	// skipped when it has none. It was given the UUIDs themselves, as pointers into temporaries freed at once, in an
+	// array on the stack sized by the client.
+	std::vector<std::string> includePaths;
+	auto app = mGattLocalApplications.find(appId);
+	if (app != mGattLocalApplications.end())
+	{
+		for (auto &included : service.getIncludedServices())
+		{
+			std::string includedUuid = included.toString();
+			for (auto &local : app->second->mGattLocalServices)
+			{
+				Bluez5GattLocalService *localService = local.second.get();
+				if (localService->mServiceInterface && localService->mServiceObject &&
+				    g_strcmp0(bluez_gatt_service1_get_uuid(localService->mServiceInterface), includedUuid.c_str()) == 0)
+				{
+					includePaths.push_back(g_dbus_object_get_object_path(localService->mServiceObject));
+					break;
+				}
+			}
+		}
+	}
+	std::vector<const char *> includes;
+	for (auto &path : includePaths)
+		includes.push_back(path.c_str());
+	includes.push_back(nullptr);
 
 	BluezObjectSkeleton *object = bluez_object_skeleton_new(serviceObjPath.c_str());
 
 	BluezGattService1 *skeletonGattService = bluez_gatt_service1_skeleton_new();
 	bluez_gatt_service1_set_uuid(skeletonGattService, uuid.toString().c_str());
 	bluez_gatt_service1_set_primary(skeletonGattService, isPrimary);
-	bluez_gatt_service1_set_includes(skeletonGattService, uuidArray);
+	bluez_gatt_service1_set_includes(skeletonGattService, includes.data());
 	bluez_object_skeleton_set_gatt_service1(object, skeletonGattService);
 	g_dbus_object_manager_server_export(mObjectManagerGattServer, G_DBUS_OBJECT_SKELETON (object));
 	g_dbus_object_manager_server_set_connection (mObjectManagerGattServer, mConn);
@@ -1708,6 +1751,12 @@ void Bluez5ProfileGatt::addCharacteristic(uint16_t appId, uint16_t serviceId, co
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
 
+	if (!mObjectManagerGattServer)	// its object path is read below; NULL made a std::string throw
+	{
+		callback(BLUETOOTH_ERROR_FAIL, -1);
+		return;
+	}
+
 	auto appIt = mGattLocalApplications.find(appId);
 	if (appIt == mGattLocalApplications.end())
 	{
@@ -1726,8 +1775,6 @@ void Bluez5ProfileGatt::addCharacteristic(uint16_t appId, uint16_t serviceId, co
 		callback(BLUETOOTH_ERROR_PARAM_INVALID, -1);
 		return;
 	}
-
-	auto &chars = srvIt->second->mCharacteristics;
 
 	BluezGattCharacteristic1 *skeletonGattChar = bluez_gatt_characteristic1_skeleton_new();
 	if (!skeletonGattChar)
@@ -1756,8 +1803,7 @@ void Bluez5ProfileGatt::addCharacteristic(uint16_t appId, uint16_t serviceId, co
 	bluez_gatt_characteristic1_set_service(skeletonGattChar, serviceObjPath.c_str());
 	bluez_gatt_characteristic1_set_uuid(skeletonGattChar, characteristic.getUuid().toString().c_str());
 
-	const char *flags[GattRemoteCharacteristic::characteristicPropertyMap.size() + 1];
-	updatePropertyFlags(characteristic, flags);
+	std::vector<const char *> flags = propertyFlags(characteristic);
 
 	BluetoothGattValue value = characteristic.getValue();
 
@@ -1790,10 +1836,8 @@ void Bluez5ProfileGatt::addCharacteristic(uint16_t appId, uint16_t serviceId, co
 		return;
 	}
 
-	for (int i = 0; i < sizeof(flags) && flags[i] != NULL; i++)
-	{
-		g_variant_builder_add(builder, "s", flags[i]);
-	}
+	for (const char *flag : flags)
+		g_variant_builder_add(builder, "s", flag);
 
 	GVariant *flagsVariant = g_variant_builder_end(builder);
 	g_variant_builder_unref(builder);
@@ -1825,20 +1869,25 @@ void Bluez5ProfileGatt::addCharacteristic(uint16_t appId, uint16_t serviceId, co
 	g_dbus_object_manager_server_export(mObjectManagerGattServer, G_DBUS_OBJECT_SKELETON (object));
 	g_dbus_object_manager_server_set_connection (mObjectManagerGattServer, mConn);
 
-	auto registerCallback = [this, callback, charId, object, &chars, skeletonGattChar](BluetoothError error)
+	// The service is looked up again when the registration is answered: it held a reference to the service's
+	// characteristics, which removing the service in the meantime freed.
+	auto registerCallback = [this, callback, appId, serviceId, charId, charObjPath, object, skeletonGattChar](BluetoothError error)
 	{
-		if (error == BLUETOOTH_ERROR_NONE)
+		Bluez5GattLocalService *localService = findLocalService(appId, serviceId);
+		if (error == BLUETOOTH_ERROR_NONE && localService)
 		{
 			DEBUG("Characterstic registered successfully");
 			std::unique_ptr<Bluez5GattLocalCharacteristic> character(new Bluez5GattLocalCharacteristic(G_DBUS_OBJECT(object)));
 			character->mInterface = skeletonGattChar;
-			chars.insert(std::make_pair(charId, std::move(character)));
-			mLastCharId = charId;
+			localService->mCharacteristics.insert(std::make_pair(charId, std::move(character)));
+			localService->mLastCharId = charId;
 			callback(BLUETOOTH_ERROR_NONE, charId);
 		}
 		else
 		{
 			ERROR("MSGID_GATT_PROFILE_ERROR", 0, "Removed application  and register application failed %d", error);
+			// Unpublished: it stayed exported, and appeared in the next registration.
+			g_dbus_object_manager_server_unexport(mObjectManagerGattServer, charObjPath.c_str());
 			g_object_unref(object);
 			g_object_unref(skeletonGattChar);
 			callback(BLUETOOTH_ERROR_FAIL, -1);
@@ -1888,12 +1937,13 @@ void Bluez5ProfileGatt::addDescriptor(uint16_t appId, uint16_t serviceId, const 
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
 
-	auto descs = getLocalDescriptorList(appId, serviceId, mLastCharId);
-
-	if (!descs)
+	Bluez5GattLocalService *localService = findLocalService(appId, serviceId);
+	id_type charId = localService ? localService->mLastCharId : 0;
+	if (!mObjectManagerGattServer || !getLocalDescriptorList(appId, serviceId, charId))
 	{
 		ERROR("MSGID_GATT_PROFILE_ERROR", 0, "Failed to get desc list");
 		callback(BLUETOOTH_ERROR_PARAM_INVALID, -1);
+		return;	// went on to register the descriptor anyway, answer again and use the NULL list
 	}
 
 	BluezGattDescriptor1 *skeletonGattDesc = bluez_gatt_descriptor1_skeleton_new();
@@ -1907,7 +1957,7 @@ void Bluez5ProfileGatt::addDescriptor(uint16_t appId, uint16_t serviceId, const 
 	uint16_t descId = nextDescId();
 	std::string objPath = g_dbus_object_manager_get_object_path(G_DBUS_OBJECT_MANAGER(mObjectManagerGattServer));
 	std::string serviceObjPath = objPath  + "/App" + std::to_string(appId) + "/Service" + std::to_string(serviceId);
-	std::string charObjPath = serviceObjPath + "/Char"+ std::to_string(mLastCharId);
+	std::string charObjPath = serviceObjPath + "/Char"+ std::to_string(charId);
 	std::string descObjPath = charObjPath + "/Desc" + std::to_string(descId);
 
 	BluezObjectSkeleton *object = bluez_object_skeleton_new(descObjPath.c_str());
@@ -1921,9 +1971,7 @@ void Bluez5ProfileGatt::addDescriptor(uint16_t appId, uint16_t serviceId, const 
 
 	BluetoothGattValue value = descriptor.getValue();
 
-	const char *flags[GattRemoteDescriptor::descriptorPermissionMap.size() + 1];
-
-	updatePermissionFlags(descriptor, flags);
+	std::vector<const char *> flags = permissionFlags(descriptor);
 
 	GVariantBuilder *dataBuilder = g_variant_builder_new (G_VARIANT_TYPE ("ay"));
 	for (auto &byteIt : value)
@@ -1947,10 +1995,8 @@ void Bluez5ProfileGatt::addDescriptor(uint16_t appId, uint16_t serviceId, const 
 		return;
 	}
 
-	for (int i = 0; i < sizeof(flags) && flags[i] != NULL; i++)
-	{
-		g_variant_builder_add(builder, "s", flags[i]);
-	}
+	for (const char *flag : flags)
+		g_variant_builder_add(builder, "s", flag);
 
 	GVariant *flagsVariant = g_variant_builder_end(builder);
 	g_variant_builder_unref(builder);
@@ -1972,9 +2018,11 @@ void Bluez5ProfileGatt::addDescriptor(uint16_t appId, uint16_t serviceId, const 
 	g_dbus_object_manager_server_export(mObjectManagerGattServer, G_DBUS_OBJECT_SKELETON (object));
 	g_dbus_object_manager_server_set_connection (mObjectManagerGattServer, mConn);
 
-	auto registerCallback = [this, callback, descId, object, descs, skeletonGattDesc](BluetoothError error)
+	auto registerCallback = [this, callback, appId, serviceId, charId, descId, descObjPath, object, skeletonGattDesc](BluetoothError error)
 	{
-		if (error == BLUETOOTH_ERROR_NONE)
+		// Looked up again, as for characteristics.
+		GattLocalDescriptorsMap *descs = getLocalDescriptorList(appId, serviceId, charId);
+		if (error == BLUETOOTH_ERROR_NONE && descs)
 		{
 			DEBUG("Descriptor registered successfully");
 			std::unique_ptr<Bluez5GattLocalDescriptor> desc(new Bluez5GattLocalDescriptor(G_DBUS_OBJECT(object)));
@@ -1985,6 +2033,7 @@ void Bluez5ProfileGatt::addDescriptor(uint16_t appId, uint16_t serviceId, const 
 		else
 		{
 			ERROR("MSGID_GATT_PROFILE_ERROR", 0, "Descriptor register failed %d", error);
+			g_dbus_object_manager_server_unexport(mObjectManagerGattServer, descObjPath.c_str());
 			if (object) g_object_unref(object);
 			if (skeletonGattDesc) g_object_unref(skeletonGattDesc);
 			callback(BLUETOOTH_ERROR_FAIL, -1);
@@ -2119,6 +2168,15 @@ void Bluez5ProfileGatt::startService(uint16_t appId, uint16_t serviceId, Bluetoo
 	if (callback) callback(BLUETOOTH_ERROR_NONE);
 }
 
+Bluez5ProfileGatt::Bluez5GattLocalService *Bluez5ProfileGatt::findLocalService(uint16_t appId, uint16_t serviceId)
+{
+	auto appIt = mGattLocalApplications.find(appId);
+	if (appIt == mGattLocalApplications.end())
+		return nullptr;
+	auto srvIt = appIt->second->mGattLocalServices.find(serviceId);
+	return srvIt == appIt->second->mGattLocalServices.end() ? nullptr : srvIt->second.get();
+}
+
 Bluez5ProfileGatt::GattLocalDescriptorsMap* Bluez5ProfileGatt::getLocalDescriptorList(uint16_t appId, uint16_t serviceId, uint16_t charId)
 {
 	auto appIt = mGattLocalApplications.find(appId);
@@ -2150,40 +2208,25 @@ Bluez5ProfileGatt::GattLocalDescriptorsMap* Bluez5ProfileGatt::getLocalDescripto
 	return &charIt->second->mDescriptors;
 }
 
-void Bluez5ProfileGatt::updatePropertyFlags(const BluetoothGattCharacteristic &characteristic, const char **propertyflags)
+// The flag names of a characteristic or descriptor. They were written into a fixed array whose terminator was
+// written only while index < sizeof(the pointer): 4 on 32 bit, so with four flags or more the array was not
+// terminated, and the loops reading it, bounded by its size in bytes, read on past its end.
+std::vector<const char *> Bluez5ProfileGatt::propertyFlags(const BluetoothGattCharacteristic &characteristic)
 {
-	if (!propertyflags)
-		return;
-
-	int index = 0;
-
+	std::vector<const char *> flags;
 	for (auto &propIt : GattRemoteCharacteristic::characteristicPropertyMap)
-	{
-		if(characteristic.isPropertySet(propIt.second))
-		{
-			propertyflags[index++] = propIt.first.c_str();
-		}
-	}
-
-	if (index < sizeof(propertyflags)) propertyflags[index] = NULL;
+		if (characteristic.isPropertySet(propIt.second))
+			flags.push_back(propIt.first.c_str());
+	return flags;
 }
 
-void Bluez5ProfileGatt::updatePermissionFlags(const BluetoothGattDescriptor &descriptor, const char **permissionflags)
+std::vector<const char *> Bluez5ProfileGatt::permissionFlags(const BluetoothGattDescriptor &descriptor)
 {
-	if (!permissionflags)
-		return;
-
-	int index = 0;
-
+	std::vector<const char *> flags;
 	for (auto &propIt : GattRemoteDescriptor::descriptorPermissionMap)
-	{
-		if(descriptor.isPermissionSet(propIt.first))
-		{
-			permissionflags[index++] = propIt.second.c_str();
-		}
-	}
-
-	if (index < sizeof(permissionflags)) permissionflags[index] = NULL;
+		if (descriptor.isPermissionSet(propIt.first))
+			flags.push_back(propIt.second.c_str());
+	return flags;
 }
 
 void Bluez5ProfileGatt::onCharacteristicPropertiesChanged(GattRemoteCharacteristic* characteristic, GVariant *changed_properties)

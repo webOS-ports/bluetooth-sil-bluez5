@@ -86,7 +86,7 @@ std::vector<unsigned char> GattRemoteCharacteristic::readValue(uint16_t offset)
 
 	GVariant *variant = g_variant_dict_end(&dict);
 
-	GVariant *value;
+	GVariant *value = nullptr;
 
 	bluez_gatt_characteristic1_call_read_value_sync(mInterface, variant, &value, NULL, &error);
 
@@ -98,6 +98,7 @@ std::vector<unsigned char> GattRemoteCharacteristic::readValue(uint16_t offset)
 	}
 
 	result = convertArrayByteGVariantToVector(value);
+	g_variant_unref(value);	// a new reference from the call: one leaked on every read
 
 	return result;
 }
@@ -158,7 +159,7 @@ std::vector<unsigned char> GattRemoteDescriptor::readValue(uint16_t offset)
 
 	GVariant *variant = g_variant_dict_end(&dict);
 
-	GVariant *value;
+	GVariant *value = nullptr;
 
 	bluez_gatt_descriptor1_call_read_value_sync(mInterface, variant, &value, NULL, &error);
 
@@ -170,6 +171,7 @@ std::vector<unsigned char> GattRemoteDescriptor::readValue(uint16_t offset)
 	}
 
 	result = convertArrayByteGVariantToVector(value);
+	g_variant_unref(value);	// a new reference from the call: one leaked on every read
 
 	return result;
 }

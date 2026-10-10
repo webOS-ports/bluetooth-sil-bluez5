@@ -123,6 +123,7 @@ public:
 	static gboolean handleRelease(BluezGattProfile1 *proxy, GDBusMethodInvocation *invocation, gpointer user_data);
 	static void handleBusAcquired(GDBusConnection *connection, const gchar *name, gpointer user_data);
 	static gboolean autoConnTimeoutHandler(gpointer user_data);
+	void startAutoConnTimeout(const std::string &devAddress, uint16_t appId);
 
 private:
 
@@ -176,6 +177,9 @@ private:
 			GDBusObject *mServiceObject;
 			GattLocalCharacteristicsMap mCharacteristics;
 			BluezGattService1 *mServiceInterface;
+			// The characteristic descriptors are added to next: the API names none. It was one id for every
+			// service of every server, so interleaved registrations put descriptors on another service's.
+			id_type mLastCharId = 0;
 	};
 
 	class BluezGattLocalApplication
@@ -193,8 +197,9 @@ private:
 	void notifyCharacteristicValueChanged(uint16_t serverId, uint16_t serviceId, BluetoothGattCharacteristic characteristic, uint16_t charId);
 	void notifyDescriptorValueChanged(uint16_t appId, uint16_t serviceId, uint16_t descId, BluetoothGattDescriptor descriptor, uint16_t charId);
 	GattLocalDescriptorsMap* getLocalDescriptorList(uint16_t appId, uint16_t serviceId, uint16_t charId);
-	void updatePropertyFlags(const BluetoothGattCharacteristic &characteristic, const char **propertyflags);
-	void updatePermissionFlags(const BluetoothGattDescriptor &descriptor, const char **permissionflags);
+	Bluez5GattLocalService *findLocalService(uint16_t appId, uint16_t serviceId);
+	static std::vector<const char *> propertyFlags(const BluetoothGattCharacteristic &characteristic);
+	static std::vector<const char *> permissionFlags(const BluetoothGattDescriptor &descriptor);
 	void handleAutoConnectDevAdd(const std::string & objPath);
 	void handleAutoConnectDevRem(const std::string & address);
 	void handleAutoConnectReq(const bool& autoConnection, const std::string& address, const uint16_t& appId);
@@ -230,7 +235,6 @@ private:
 									void *user_data);
 
 	guint mBusId;
-	id_type mLastCharId;
 	GDBusConnection *mConn;
 	Bluez5Adapter *mAdapter;
 	GDBusObjectManagerServer *mObjectManagerGattServer;
