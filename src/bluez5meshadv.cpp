@@ -83,23 +83,30 @@ mToken(0)
 
 Bluez5MeshAdv::~Bluez5MeshAdv()
 {
-	if (mMeshAdvProv)
+	/* Stops watching a name: first, so that its callbacks do not run on what is torn down */
+	if (mWatcherId)
 	{
-		g_object_unref(mMeshAdvProv);
-		mMeshAdvProv = 0;
+		g_bus_unwatch_name(mWatcherId);
+		mWatcherId = 0;
 	}
 
-	if (mMeshAdvProvAgent)
+	if (mReqExpTimerId)
 	{
-		g_object_unref(mMeshAdvProvAgent);
-		mMeshAdvProvAgent = 0;
+		g_source_remove(mReqExpTimerId);	// it fires on this object
+		mReqExpTimerId = 0;
 	}
 
-	if (mMeshApplication)
-	{
-		g_object_unref(mMeshApplication);
-		mMeshApplication = 0;
-	}
+	// The exported objects' handlers point at the helpers deleted below.
+	releaseObjectManagerServer();
+
+	// Plain C++ objects: they were given to g_object_unref, which failed G_IS_OBJECT on every adapter teardown
+	// (each service stop) and leaked them.
+	delete mMeshAdvProv;
+	mMeshAdvProv = 0;
+	delete mMeshAdvProvAgent;
+	mMeshAdvProvAgent = 0;
+	delete mMeshApplication;
+	mMeshApplication = 0;
 
 	if (mNetworkInterface)
 	{
@@ -125,9 +132,18 @@ Bluez5MeshAdv::~Bluez5MeshAdv()
 		mObjectManager = 0;
 	}
 
-	/* Stops watching a name */
-	if (mWatcherId)
-		g_bus_unwatch_name(mWatcherId);
+	if (mDbusConn)
+		g_object_unref(mDbusConn);	// a new reference from g_bus_get_sync
+}
+
+void Bluez5MeshAdv::releaseObjectManagerServer()
+{
+	if (!mObjectManagerServer)
+		return;
+
+	g_dbus_object_manager_server_set_connection(mObjectManagerServer, NULL);	// unexports everything
+	g_object_unref(mObjectManagerServer);
+	mObjectManagerServer = nullptr;
 }
 
 void Bluez5MeshAdv::getRandomBytes(unsigned char *buf)
@@ -211,7 +227,11 @@ void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const g
 {
 	GError *error = 0;
 	Bluez5MeshAdv *meshAdv = static_cast<Bluez5MeshAdv *>(userData);
+	// Kept, to unexport its objects when meshd or this object goes: they stayed exported, their handlers
+	// pointing at freed objects, and a new one could not export at the same path.
+	meshAdv->releaseObjectManagerServer();
 	GDBusObjectManagerServer * objectManagerServer = g_dbus_object_manager_server_new(BLUEZ_MESH_APP_PATH);
+	meshAdv->mObjectManagerServer = objectManagerServer;
 	GDBusObjectSkeleton *meshAppSkeleton = g_dbus_object_skeleton_new(BLUEZ_MESH_APP_PATH);
 
 	meshAdv->mMeshApplication->registerApplicationInterface(objectManagerServer, meshAppSkeleton, meshAdv);
@@ -274,9 +294,30 @@ void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const g
 	g_list_free(objects);
 }
 
+// It did nothing: the next start made a second object manager and exported a second time next to the first.
 void Bluez5MeshAdv::handleBluezMeshServiceStopped(GDBusConnection *conn, const gchar *name,
 												  gpointer userData)
 {
+	Bluez5MeshAdv *meshAdv = static_cast<Bluez5MeshAdv *>(userData);
+
+	meshAdv->releaseObjectManagerServer();
+
+	if (meshAdv->mObjectManager)
+	{
+		g_signal_handlers_disconnect_by_data(meshAdv->mObjectManager, meshAdv);
+		g_object_unref(meshAdv->mObjectManager);
+		meshAdv->mObjectManager = 0;
+	}
+	if (meshAdv->mNetworkInterface)
+	{
+		g_object_unref(meshAdv->mNetworkInterface);
+		meshAdv->mNetworkInterface = 0;
+	}
+	if (meshAdv->mMgmtInterface)
+	{
+		g_object_unref(meshAdv->mMgmtInterface);
+		meshAdv->mMgmtInterface = 0;
+	}
 }
 
 void Bluez5MeshAdv::handleObjectAdded(GDBusObjectManager *objectManager,

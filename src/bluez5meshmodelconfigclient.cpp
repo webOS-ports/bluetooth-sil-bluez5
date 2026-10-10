@@ -190,8 +190,17 @@ Bluez5MeshModel(modelId, meshProfile, meshAdv, adapter)
 {
 }
 
+// Pending requests were left with their timers, which fired on the freed client and its freed requests.
 Bluez5MeshModelConfigClient::~Bluez5MeshModelConfigClient()
 {
+	std::lock_guard<std::mutex> guard(pendingReqMutex);
+	for (auto *req : pendingRequests)
+	{
+		if (req->timer)
+			g_source_remove(req->timer);
+		delete req;
+	}
+	pendingRequests.clear();
 }
 
 BluetoothError Bluez5MeshModelConfigClient::sendData(uint16_t srcAddress, uint16_t destAddress,
@@ -480,6 +489,14 @@ void Bluez5MeshModelConfigClient::compositionReceived(uint8_t *data, uint16_t le
 
 	DEBUG("Received composion:\n");
 
+	// Every read is checked against what the node sent: a body shorter than its 11 header bytes made the
+	// unsigned length wrap, and the loop below read up to 64 KiB past it.
+	if (len < 11)
+	{
+		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Composition data too short: %u bytes", len);
+		return;
+	}
+
 	/* skip page -- We only support Page Zero */
 	data++;
 	len--;
@@ -514,7 +531,7 @@ void Bluez5MeshModelConfigClient::compositionReceived(uint8_t *data, uint16_t le
 	compositionData.setFeatures(meshFeatures);
 	std::vector<BleMeshElement> elements;
 
-	while (len) {
+	while (len >= 4) {	// location, and the SIG and vendor model counts
 		BleMeshElement element;
 		uint8_t m, v;
 

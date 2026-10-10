@@ -61,6 +61,19 @@ void Bluez5MeshAdvProvisioner::registerProvisionerInterface(GDBusObjectManagerSe
 
 }
 
+// A device UUID from mesh as hex, or empty when the array is not 16 bytes.
+static std::string uuidToHex(GVariant *bytes)
+{
+	std::vector<unsigned char> result = convertArrayByteGVariantToVector(bytes);
+	if (result.size() < 16)
+		return std::string();
+
+	char deviceUuid[16 * 2 + 1];
+	for (int i = 0; i < 16; ++i)
+		snprintf(deviceUuid + (i * 2), 3, "%2.2x", result[i]);
+	return std::string(deviceUuid);
+}
+
 gboolean Bluez5MeshAdvProvisioner::handleScanResult(BluezMeshProvisioner1 *interface,
 													GDBusMethodInvocation *invocation,
 													gint16 argRssi,
@@ -69,16 +82,13 @@ gboolean Bluez5MeshAdvProvisioner::handleScanResult(BluezMeshProvisioner1 *inter
 													gpointer userData)
 {
 	Bluez5MeshAdvProvisioner *meshAdvProvisioner = (Bluez5MeshAdvProvisioner *)userData;
-	std::vector<unsigned char> result;
-	char deviceUuid[16 * 2 + 1];
 
-	result = convertArrayByteGVariantToVector(argData);
-	for (int i = 0; i < 16; ++i)
-	{
-			sprintf(deviceUuid + (i * 2), "%2.2x", result[i]);
-	}
+	// Answered: it was not, and every scan result leaked its invocation.
+	g_dbus_method_invocation_return_value(invocation, NULL);
 
-	std::string deviceUuidS(deviceUuid);
+	std::string deviceUuidS = uuidToHex(argData);
+	if (deviceUuidS.empty())
+		return true;	// a report shorter than a UUID, forwarded from the air: it was read past its end
 	DEBUG("Device discovered : %s", deviceUuidS.c_str());
 	meshAdvProvisioner->mMesh->getMeshObserver()->scanResult(
 		convertAddressToLowerCase(meshAdvProvisioner->mAdapter->getAddress()),
@@ -94,16 +104,10 @@ gboolean Bluez5MeshAdvProvisioner::handleAddNodeComplete(BluezMeshProvisioner1 *
 														 gpointer userData)
 {
 	DEBUG("handleAddNodeComplete: count: %d", count);
-	std::vector<unsigned char> result;
-	char deviceUuid[16 * 2 + 1];
+	g_dbus_method_invocation_return_value(invocation, NULL);	// answered: it was not
 
-	result = convertArrayByteGVariantToVector(uuid);
-	for (int i = 0; i < 16; ++i)
-	{
-		sprintf(deviceUuid + (i * 2), "%2.2x", result[i]);
-	}
-
-	std::string deviceUuidS(deviceUuid);
+	// Empty when it is not 16 bytes: it was read as 16 whatever its size.
+	std::string deviceUuidS = uuidToHex(uuid);
 	Bluez5MeshAdvProvisioner *meshAdvProvisioner = (Bluez5MeshAdvProvisioner *)userData;
 	meshAdvProvisioner->mMesh->getMeshObserver()->provisionResult(BLUETOOTH_ERROR_NONE,
 																	convertAddressToLowerCase(
@@ -120,16 +124,10 @@ gboolean Bluez5MeshAdvProvisioner::handleAddNodeFailed(BluezMeshProvisioner1 *in
 													   gpointer userData)
 {
 	DEBUG("handleAddNodeFailed: %s", reason);
-	std::vector<unsigned char> result;
-	char deviceUuid[16 * 2 + 1];
+	g_dbus_method_invocation_return_value(invocation, NULL);	// answered: it was not
 
-	result = convertArrayByteGVariantToVector(uuid);
-	for (int i = 0; i < 16; ++i)
-	{
-			sprintf(deviceUuid + (i * 2), "%2.2x", result[i]);
-	}
-
-	std::string deviceUuidS(deviceUuid);
+	// Empty when it is not 16 bytes: it was read as 16 whatever its size.
+	std::string deviceUuidS = uuidToHex(uuid);
 
 	Bluez5MeshAdvProvisioner *meshAdvProvisioner = (Bluez5MeshAdvProvisioner *)userData;
 	meshAdvProvisioner->mMesh->getMeshObserver()->provisionResult(meshProvisionerError[reason],

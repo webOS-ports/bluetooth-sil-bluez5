@@ -109,6 +109,8 @@ private:
 	BluezMeshManagement1 *mMgmtInterface;
 	BluezMeshNode1 *mNodeInterface;
 	Bluez5MeshAdvProvisioner *mMeshAdvProv;
+	GDBusObjectManagerServer *mObjectManagerServer = nullptr;
+	void releaseObjectManagerServer();
 	Bluez5MeshAdvProvAgent *mMeshAdvProvAgent;
 	Bluez5MeshApplication *mMeshApplication;
 	unsigned char mUuid[16]; //Local node uuid
