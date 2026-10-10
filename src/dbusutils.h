@@ -61,6 +61,7 @@ namespace DBusUtils
 		ObjectWatch& operator = (const ObjectWatch&) = delete;
 
 		void watchInterfaceRemoved(InterfaceStatusCallback callback);
+		bool isWatching() const { return mObjectManager != nullptr; }	// false when the manager could not be made
 
 	private:
 		std::string mPath;

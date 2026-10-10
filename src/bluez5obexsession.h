@@ -68,6 +68,9 @@ public:
 
 	void watch(Bluez5ObexSessionStatusCallback callback);
 
+	// False when a proxy could not be made: the later ones stayed NULL, and the loss of the remote went unnoticed.
+	bool isValid() const { return mValid; }
+
 private:
 	Bluez5ObexClient *mClient;
 	Type mType;
@@ -80,6 +83,7 @@ private:
 	BluezObexMessageAccess1 *mMessageAccessProxy;
 	FreeDesktopDBusProperties *mPropertiesProxy;
 	bool mLostRemote;
+	bool mValid;
 	DBusUtils::ObjectWatch *mObjectWatch;
 	Bluez5ObexSessionStatusCallback mStatusCallback;
 };

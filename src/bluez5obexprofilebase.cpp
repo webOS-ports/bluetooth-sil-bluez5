@@ -24,6 +24,7 @@
 #include "asyncutils.h"
 #include "logging.h"
 #include "utils.h"
+#include "obexpaths.h"
 
 using namespace std::placeholders;
 
@@ -74,27 +75,16 @@ void Bluez5ObexProfileBase::notifySessionStatus(const std::string &address, bool
 	}
 }
 
+// Only this attempt failed: it went through disconnect(), which removed the session that was working.
 void Bluez5ObexProfileBase::handleFailedToCreateSession(const std::string &address, BluetoothResultCallback callback)
 {
-	auto disconnectCallback = [this, alive = mLifetime.token(), address, callback](BluetoothError /*error*/) {
-		// Called back after the profile may have gone with its adapter.
-		if (alive.expired())
-		{
-			callback(BLUETOOTH_ERROR_FAIL);
-			return;
-		}
-		DEBUG("Connecting with device %s on uuid %s profile", address.c_str(), getProfileUuid().c_str());
-		// We always return a failure here that is initial thing someone
-		// called this method for
-		callback(BLUETOOTH_ERROR_FAIL);
-	};
-
-	disconnect(address, disconnectCallback);
+	DEBUG("Failed to connect with device %s on uuid %s profile", address.c_str(), getProfileUuid().c_str());
+	callback(BLUETOOTH_ERROR_FAIL);
 }
 
 void Bluez5ObexProfileBase::removeFromSessionList(std::string address)
 {
-	auto sessionIter = mSessions.find(address);
+	auto sessionIter = mSessions.find(normaliseSessionKey(address));
 	if (sessionIter == mSessions.end())
 		return;
 
@@ -103,6 +93,7 @@ void Bluez5ObexProfileBase::removeFromSessionList(std::string address)
 		return;
 
 	mSessions.erase(sessionIter);
+	removeSessionTransfers(session);
 	detachSession(session);
 	// This will unregister the session with the obex daemon
 	delete session;
@@ -111,7 +102,7 @@ void Bluez5ObexProfileBase::removeFromSessionList(std::string address)
 
 void Bluez5ObexProfileBase::removeSession(const std::string &address)
 {
-	auto sessionIter = mSessions.find(address);
+	auto sessionIter = mSessions.find(normaliseSessionKey(address));
 	if (sessionIter == mSessions.end())
 		return;
 
@@ -137,6 +128,7 @@ void Bluez5ObexProfileBase::removeSession(const std::string &address)
 		transferIter++;
 	}
 	mSessions.erase(sessionIter);
+	removeSessionTransfers(session);
 
 	notifySessionStatus(address, false);
 	detachSession(session);
@@ -171,17 +163,31 @@ const Bluez5ObexSession* Bluez5ObexProfileBase::findSessionByPropertiesProxy(GOb
 	return nullptr;
 }
 
+// One session per key: a second connect made a second obexd session, which leaked, and whose end removed the
+// stored one. A connect while one is being made is busy.
 void Bluez5ObexProfileBase::createSession(const std::string &address, Bluez5ObexSession::Type type, BluetoothResultCallback callback)
 {
+	std::string key = normaliseSessionKey(address);
+	if (findSession(key))
+	{
+		callback(BLUETOOTH_ERROR_NONE);
+		return;
+	}
+	if (mPendingSessions.count(key))
+	{
+		callback(BLUETOOTH_ERROR_BUSY);
+		return;
+	}
+
 	Bluez5ObexClient *obexClient = mAdapter->getObexClient();
 
 	if (!obexClient)
 	{
-		handleFailedToCreateSession(address, callback);
+		handleFailedToCreateSession(key, callback);
 		return;
 	}
 
-	auto sessionCreateCallback = [this, alive = mLifetime.token(), address, callback](Bluez5ObexSession *session) {
+	auto sessionCreateCallback = [this, alive = mLifetime.token(), key, callback](Bluez5ObexSession *session) {
 		// Called back after the profile may have gone with its adapter.
 		if (alive.expired())
 		{
@@ -189,23 +195,30 @@ void Bluez5ObexProfileBase::createSession(const std::string &address, Bluez5Obex
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}
+		mPendingSessions.erase(key);
 		if (!session)
 		{
-			handleFailedToCreateSession(address, callback);
+			handleFailedToCreateSession(key, callback);
+			return;
+		}
+		if (!storeSession(key, session))	// one came in meanwhile (an incoming push)
+		{
+			delete session;
+			callback(BLUETOOTH_ERROR_NONE);
 			return;
 		}
 
-		session->watch(std::bind(&Bluez5ObexProfileBase::handleObexSessionStatus, this, address, _1));
+		session->watch(std::bind(&Bluez5ObexProfileBase::handleObexSessionStatus, this, key, _1));
 		DEBUG("createSession g_signal_connect");
 		g_signal_connect(G_OBJECT(session->getObjectPropertiesProxy()), "properties-changed", G_CALLBACK(handlePropertiesChanged), this);
 
-		storeSession(address, session);
-		notifySessionStatus(address, true);
+		notifySessionStatus(key, true);
 
 		callback(BLUETOOTH_ERROR_NONE);
 	};
 
-	obexClient->createSession(type, address, sessionCreateCallback);
+	mPendingSessions.insert(key);
+	obexClient->createSession(type, key, sessionCreateCallback);
 }
 
 void Bluez5ObexProfileBase::handleObexSessionStatus(const std::string &address, bool lost)
@@ -220,9 +233,10 @@ void Bluez5ObexProfileBase::handleObexSessionStatus(const std::string &address, 
 	removeSession(address);
 }
 
-void Bluez5ObexProfileBase::storeSession(const std::string &address, Bluez5ObexSession *session)
+// False, storing nothing, when the key has a session already: insert() did nothing, and the new session leaked.
+bool Bluez5ObexProfileBase::storeSession(const std::string &address, Bluez5ObexSession *session)
 {
-	mSessions.insert(std::pair<std::string, Bluez5ObexSession*>(address, session));
+	return mSessions.insert(std::pair<std::string, Bluez5ObexSession*>(normaliseSessionKey(address), session)).second;
 }
 
 void Bluez5ObexProfileBase::connect(const std::string &address, BluetoothResultCallback callback)
@@ -253,7 +267,7 @@ void Bluez5ObexProfileBase::getProperty(const std::string &address, BluetoothPro
 	bool sessionExists = false;
 	BluetoothProperty prop(type);
 
-	auto sessionIter = mSessions.find(address);
+	auto sessionIter = mSessions.find(normaliseSessionKey(address));
 
 	switch (type)
 	{
@@ -271,7 +285,7 @@ void Bluez5ObexProfileBase::getProperty(const std::string &address, BluetoothPro
 
 const Bluez5ObexSession* Bluez5ObexProfileBase::findSession(const std::string &address) const
 {
-	auto sessionIter = mSessions.find(address);
+	auto sessionIter = mSessions.find(normaliseSessionKey(address));
 	if (sessionIter == mSessions.end())
 		return nullptr;
 
@@ -295,7 +309,8 @@ void Bluez5ObexProfileBase::updateActiveTransfer(BluetoothFtpTransferId id, Blue
 	{
 		callback(BLUETOOTH_ERROR_NONE, transfer->getBytesTransferred(), transfer->getFileSize(), false);
 	}
-	else if (transfer->getState() == Bluez5ObexTransfer::State::COMPLETE && transfer->getBytesTransferred())
+	// Final whatever the byte count: a zero-byte file, or a small one done before any progress, never completed.
+	else if (transfer->getState() == Bluez5ObexTransfer::State::COMPLETE)
 	{
 		callback(BLUETOOTH_ERROR_NONE, transfer->getBytesTransferred(), transfer->getFileSize(), true);
 		cleanup = true;

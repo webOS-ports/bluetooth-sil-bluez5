@@ -172,6 +172,15 @@ void Bluez5ObexClient::createSession(Bluez5ObexSession::Type type, const std::st
 		Bluez5ObexSession *session = new Bluez5ObexSession(this, type, std::string(objectPath), deviceAddress);
 		g_free(objectPath);	// allocated by the finish; it leaked
 
+		// Partly made, its callers used NULL proxies, and its end went unnoticed: a failure, which also removes
+		// the session from obexd.
+		if (!session->isValid())
+		{
+			delete session;
+			callback(0);
+			return;
+		}
+
 		// The caller has to take care to release the memory for the session when it isn't used anymore
 		callback(session);
 	};

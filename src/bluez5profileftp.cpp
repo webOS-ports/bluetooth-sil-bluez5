@@ -24,6 +24,7 @@
 #include "bluez5obextransfer.h"
 #include "asyncutils.h"
 #include "logging.h"
+#include "obexpaths.h"
 
 using namespace std::placeholders;
 
@@ -65,7 +66,7 @@ void Bluez5ProfileFtp::getProperty(const std::string &address, BluetoothProperty
 	bool sessionExists = false;
 	BluetoothProperty prop(type);
 
-	auto sessionIter = mSessions.find(address);
+	auto sessionIter = mSessions.find(normaliseSessionKey(address));
 
 	switch (type)
 	{
@@ -92,20 +93,16 @@ void Bluez5ProfileFtp::notifySessionStatus(const std::string &address, bool crea
 	observer->propertiesChanged(address, properties);
 }
 
-void Bluez5ProfileFtp::handleFailedToCreateSession(const std::string &address, BluetoothResultCallback callback)
+// Only this attempt failed: it went through disconnect(), which removed the session that was working.
+void Bluez5ProfileFtp::handleFailedToCreateSession(const std::string &/*address*/, BluetoothResultCallback callback)
 {
-	auto disconnectCallback = [address, callback](BluetoothError /*error*/) {
-		// We always return a failure here that is initial thing someone
-		// called this method for
-		callback(BLUETOOTH_ERROR_FAIL);
-	};
-
-	disconnect(address, disconnectCallback);
+	callback(BLUETOOTH_ERROR_FAIL);
 }
 
-void Bluez5ProfileFtp::storeSession(const std::string &address, Bluez5ObexSession *session)
+// False, storing nothing, when the address has a session already: insert() did nothing, and the new one leaked.
+bool Bluez5ProfileFtp::storeSession(const std::string &address, Bluez5ObexSession *session)
 {
-	mSessions.insert(std::pair<std::string, Bluez5ObexSession*>(address, session));
+	return mSessions.insert(std::pair<std::string, Bluez5ObexSession*>(normaliseSessionKey(address), session)).second;
 }
 
 void Bluez5ProfileFtp::handleObexSessionStatus(std::string address, bool lost)
@@ -120,17 +117,31 @@ void Bluez5ProfileFtp::handleObexSessionStatus(std::string address, bool lost)
 	removeSession(address);
 }
 
+// One session per address: a second connect made a second obexd session, which leaked, and whose end removed the
+// stored one. A connect while one is being made is busy.
 void Bluez5ProfileFtp::createSession(const std::string &address, BluetoothResultCallback callback)
 {
+	std::string key = normaliseSessionKey(address);
+	if (findSession(key))
+	{
+		callback(BLUETOOTH_ERROR_NONE);
+		return;
+	}
+	if (mPendingSessions.count(key))
+	{
+		callback(BLUETOOTH_ERROR_BUSY);
+		return;
+	}
+
 	Bluez5ObexClient *obexClient = mAdapter->getObexClient();
 
 	if (!obexClient)
 	{
-		handleFailedToCreateSession(address, callback);
+		handleFailedToCreateSession(key, callback);
 		return;
 	}
 
-	auto sessionCreateCallback = [this, alive = mLifetime.token(), address, callback](Bluez5ObexSession *session) {
+	auto sessionCreateCallback = [this, alive = mLifetime.token(), key, callback](Bluez5ObexSession *session) {
 		// Called back after the profile may have gone with its adapter.
 		if (alive.expired())
 		{
@@ -138,26 +149,32 @@ void Bluez5ProfileFtp::createSession(const std::string &address, BluetoothResult
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}
+		mPendingSessions.erase(key);
 		if (!session)
 		{
-			handleFailedToCreateSession(address, callback);
+			handleFailedToCreateSession(key, callback);
+			return;
+		}
+		if (!storeSession(key, session))
+		{
+			delete session;
+			callback(BLUETOOTH_ERROR_NONE);
 			return;
 		}
 
-		session->watch(std::bind(&Bluez5ProfileFtp::handleObexSessionStatus, this, address, _1));
-
-		storeSession(address, session);
-		notifySessionStatus(address, true);
+		session->watch(std::bind(&Bluez5ProfileFtp::handleObexSessionStatus, this, key, _1));
+		notifySessionStatus(key, true);
 
 		callback(BLUETOOTH_ERROR_NONE);
 	};
 
-	obexClient->createSession(Bluez5ObexSession::Type::FTP, address, sessionCreateCallback);
+	mPendingSessions.insert(key);
+	obexClient->createSession(Bluez5ObexSession::Type::FTP, key, sessionCreateCallback);
 }
 
 void Bluez5ProfileFtp::removeSession(const std::string &address)
 {
-	auto sessionIter = mSessions.find(address);
+	auto sessionIter = mSessions.find(normaliseSessionKey(address));
 	if (sessionIter == mSessions.end())
 		return;
 
@@ -204,7 +221,7 @@ void Bluez5ProfileFtp::removeTransfer(BluetoothFtpTransferId id)
 
 Bluez5ObexSession* Bluez5ProfileFtp::findSession(const std::string &address)
 {
-	auto sessionIter = mSessions.find(address);
+	auto sessionIter = mSessions.find(normaliseSessionKey(address));
 	if (sessionIter == mSessions.end())
 		return 0;
 
@@ -289,53 +306,48 @@ std::vector<BluetoothFtpElement> Bluez5ProfileFtp::buildElementList(GVariant *en
 			GVariant *value = g_variant_get_variant(valueVar);
 
 			std::string key = g_variant_get_string(keyVar, NULL);
+			// Types are checked: a value of another type gave NULL, and std::string(NULL) throws.
+			bool isString = g_variant_is_of_type(value, G_VARIANT_TYPE_STRING);
+			std::string text = isString ? g_variant_get_string(value, NULL) : "";
 
-			if (key == "Name")
+			if (key == "Name" && isString)
 			{
-				std::string name = g_variant_get_string(value, NULL);
-				currentElement.setName(name);
+				currentElement.setName(text);
 			}
-			else if (key == "Type")
+			else if (key == "Type" && isString)
 			{
-				std::string type = g_variant_get_string(value, NULL);
-				if (type == "folder")
+				if (text == "folder")
 					currentElement.setType(BluetoothFtpElement::Type::FOLDER);
-				else if (type == "file")
+				else if (text == "file")
 					currentElement.setType(BluetoothFtpElement::Type::FILE);
 			}
-			else if (key == "Size")
+			else if (key == "Size" && g_variant_is_of_type(value, G_VARIANT_TYPE_UINT64))
 			{
 				currentElement.setSize(g_variant_get_uint64(value));
 			}
-			else if (key == "User-perm")
+			else if (key == "User-perm" && isString)
 			{
-				std::string permission = g_variant_get_string(value, NULL);
-				currentElement.setUserPermission(decodePermissionString(permission));
+				currentElement.setUserPermission(decodePermissionString(text));
 			}
-			else if (key == "Group-perm")
+			else if (key == "Group-perm" && isString)
 			{
-				std::string permission = g_variant_get_string(value, NULL);
-				currentElement.setGroupPermission(decodePermissionString(permission));
+				currentElement.setGroupPermission(decodePermissionString(text));
 			}
-			else if (key == "Other-perm")
+			else if (key == "Other-perm" && isString)
 			{
-				std::string permission = g_variant_get_string(value, NULL);
-				currentElement.setOtherPermission(decodePermissionString(permission));
+				currentElement.setOtherPermission(decodePermissionString(text));
 			}
-			else if (key == "Modified")
+			else if (key == "Modified" && isString)
 			{
-				std::string modifiedTime = g_variant_get_string(value, NULL);
-				currentElement.setModifiedTime(decodeObexTime(modifiedTime));
+				currentElement.setModifiedTime(decodeObexTime(text));
 			}
-			else if (key == "Accessed")
+			else if (key == "Accessed" && isString)
 			{
-				std::string accessedTime = g_variant_get_string(value, NULL);
-				currentElement.setAccessedTime(decodeObexTime(accessedTime));
+				currentElement.setAccessedTime(decodeObexTime(text));
 			}
-			else if (key == "Created")
+			else if (key == "Created" && isString)
 			{
-				std::string createdTime = g_variant_get_string(value, NULL);
-				currentElement.setCreatedTime(decodeObexTime(createdTime));
+				currentElement.setCreatedTime(decodeObexTime(text));
 			}
 
 			g_variant_unref(value);
@@ -361,50 +373,50 @@ void Bluez5ProfileFtp::listFolder(const std::string &address, const std::string 
 		return;
 	}
 
+	// Checked, as pullFile and pushFile do: with NULL the call returned at once and the callback never came.
 	BluezObexFileTransfer1 *fileTransferProxy = session->getFileTransferProxy();
+	if (!fileTransferProxy)
+	{
+		callback(BLUETOOTH_ERROR_FAIL, std::vector<BluetoothFtpElement>());
+		return;
+	}
 
-	auto changeFolderCallback = [this, alive = mLifetime.token(), fileTransferProxy, callback](GAsyncResult *result) {
-		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
-		if (alive.expired())
-		{
-			callback(BLUETOOTH_ERROR_FAIL, std::vector<BluetoothFtpElement>());
-			return;
-		}
+	// Each reply is finished on the proxy it was made on: the session's, captured here before, is freed when the
+	// session goes. The listing was leaked on every call.
+	auto changeFolderCallback = [this, alive = mLifetime.token(), callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
-		[[maybe_unused]] gboolean ret;
+		gboolean ret;
 
-		ret = bluez_obex_file_transfer1_call_change_folder_finish(fileTransferProxy, result, &error);
-		if (error)
+		ret = bluez_obex_file_transfer1_call_change_folder_finish(BLUEZ_OBEX_FILE_TRANSFER1(source), result, &error);
+		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+		if (alive.expired() || !ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL, std::vector<BluetoothFtpElement>());
 			return;
 		}
 
-		auto listFolderCallback = [this, alive = mLifetime.token(), fileTransferProxy, callback](GAsyncResult *result) {
-			// The profile goes with its adapter, also while this call is out: nothing of it is touched.
-			if (alive.expired())
-			{
-				callback(BLUETOOTH_ERROR_FAIL, std::vector<BluetoothFtpElement>());
-				return;
-			}
+		auto listFolderCallback = [this, alive = mLifetime.token(), callback](GObject *source, GAsyncResult *result) {
 			GError *error = 0;
-			[[maybe_unused]] gboolean ret;
+			gboolean ret;
 			GVariant *entries = 0;
 
-			ret = bluez_obex_file_transfer1_call_list_folder_finish(fileTransferProxy, &entries, result, &error);
-			if (error)
+			ret = bluez_obex_file_transfer1_call_list_folder_finish(BLUEZ_OBEX_FILE_TRANSFER1(source), &entries, result, &error);
+			if (alive.expired() || !ret || error || !entries)
 			{
-				g_error_free(error);
+				g_clear_error(&error);
+				if (entries)
+					g_variant_unref(entries);
 				callback(BLUETOOTH_ERROR_FAIL, std::vector<BluetoothFtpElement>());
 				return;
 			}
 
 			auto elements = buildElementList(entries);
+			g_variant_unref(entries);
 			callback(BLUETOOTH_ERROR_NONE, elements);
 		};
 
-		bluez_obex_file_transfer1_call_list_folder(fileTransferProxy, NULL, glibAsyncMethodWrapper,
+		bluez_obex_file_transfer1_call_list_folder(BLUEZ_OBEX_FILE_TRANSFER1(source), NULL, glibAsyncMethodWrapper,
 												  new GlibAsyncFunctionWrapper(listFolderCallback));
 	};
 
@@ -474,47 +486,40 @@ BluetoothFtpTransferId Bluez5ProfileFtp::pullFile(const std::string &address, co
 	g_free(dirName);
 	g_free(fileName);
 
-	auto changeFolderCallback = [this, alive = mLifetime.token(), fileTransferProxy, sourceFileName, targetPath, transferId, callback](GAsyncResult *result) {
-		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
-		if (alive.expired())
-		{
-			callback(BLUETOOTH_ERROR_FAIL, 0, false);
-			return;
-		}
+	// Each reply is finished on the proxy it was made on (the session's is freed when the session goes); the
+	// transfer's path was leaked.
+	auto changeFolderCallback = [this, alive = mLifetime.token(), sourceFileName, targetPath, transferId, callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
-		[[maybe_unused]] gboolean ret;
+		gboolean ret;
 
-		ret = bluez_obex_file_transfer1_call_change_folder_finish(fileTransferProxy, result, &error);
-		if (error)
+		ret = bluez_obex_file_transfer1_call_change_folder_finish(BLUEZ_OBEX_FILE_TRANSFER1(source), result, &error);
+		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+		if (alive.expired() || !ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL, 0, false);
 			return;
 		}
 
-		auto getFileCallback = [this, alive = mLifetime.token(), fileTransferProxy, transferId, callback](GAsyncResult *result) {
-			// The profile goes with its adapter, also while this call is out: nothing of it is touched.
-			if (alive.expired())
-			{
-				callback(BLUETOOTH_ERROR_FAIL, 0, false);
-				return;
-			}
+		auto getFileCallback = [this, alive = mLifetime.token(), transferId, callback](GObject *source, GAsyncResult *result) {
 			GError *error = 0;
-			[[maybe_unused]] gboolean ret;
+			gboolean ret;
 			gchar *objectPath = 0;
 
-			ret = bluez_obex_file_transfer1_call_get_file_finish(fileTransferProxy, &objectPath, NULL, result, &error);
-			if (error)
+			ret = bluez_obex_file_transfer1_call_get_file_finish(BLUEZ_OBEX_FILE_TRANSFER1(source), &objectPath, NULL, result, &error);
+			if (alive.expired() || !ret || error || !objectPath)
 			{
-				g_error_free(error);
+				g_clear_error(&error);
+				g_free(objectPath);
 				callback(BLUETOOTH_ERROR_FAIL, 0, false);
 				return;
 			}
 
 			startTransfer(transferId, std::string(objectPath), callback);
+			g_free(objectPath);
 		};
 
-		bluez_obex_file_transfer1_call_get_file(fileTransferProxy, targetPath.c_str(), sourceFileName.c_str(),
+		bluez_obex_file_transfer1_call_get_file(BLUEZ_OBEX_FILE_TRANSFER1(source), targetPath.c_str(), sourceFileName.c_str(),
 											   NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(getFileCallback));
 	};
 
@@ -554,47 +559,40 @@ BluetoothFtpTransferId Bluez5ProfileFtp::pushFile(const std::string &address, co
 	g_free(dirName);
 	g_free(fileName);
 
-	auto changeFolderCallback = [this, alive = mLifetime.token(), fileTransferProxy, sourcePath, targetFileName, transferId, callback](GAsyncResult *result) {
-		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
-		if (alive.expired())
-		{
-			callback(BLUETOOTH_ERROR_FAIL, 0, false);
-			return;
-		}
+	// Each reply is finished on the proxy it was made on (the session's is freed when the session goes); the
+	// transfer's path was leaked.
+	auto changeFolderCallback = [this, alive = mLifetime.token(), sourcePath, targetFileName, transferId, callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
-		[[maybe_unused]] gboolean ret;
+		gboolean ret;
 
-		ret = bluez_obex_file_transfer1_call_change_folder_finish(fileTransferProxy, result, &error);
-		if (error)
+		ret = bluez_obex_file_transfer1_call_change_folder_finish(BLUEZ_OBEX_FILE_TRANSFER1(source), result, &error);
+		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+		if (alive.expired() || !ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL, 0, false);
 			return;
 		}
 
-		auto putFileCallback = [this, alive = mLifetime.token(), transferId, fileTransferProxy, callback](GAsyncResult *result) {
-			// The profile goes with its adapter, also while this call is out: nothing of it is touched.
-			if (alive.expired())
-			{
-				callback(BLUETOOTH_ERROR_FAIL, 0, false);
-				return;
-			}
+		auto putFileCallback = [this, alive = mLifetime.token(), transferId, callback](GObject *source, GAsyncResult *result) {
 			GError *error = 0;
-			[[maybe_unused]] gboolean ret;
+			gboolean ret;
 			gchar *objectPath = 0;
 
-			ret = bluez_obex_file_transfer1_call_put_file_finish(fileTransferProxy, &objectPath, NULL, result, &error);
-			if (error)
+			ret = bluez_obex_file_transfer1_call_put_file_finish(BLUEZ_OBEX_FILE_TRANSFER1(source), &objectPath, NULL, result, &error);
+			if (alive.expired() || !ret || error || !objectPath)
 			{
-				g_error_free(error);
+				g_clear_error(&error);
+				g_free(objectPath);
 				callback(BLUETOOTH_ERROR_FAIL, 0, false);
 				return;
 			}
 
-			startTransfer(transferId, std::string(objectPath), callback);;
+			startTransfer(transferId, std::string(objectPath), callback);
+			g_free(objectPath);
 		};
 
-		bluez_obex_file_transfer1_call_put_file(fileTransferProxy, sourcePath.c_str(), targetFileName.c_str(),
+		bluez_obex_file_transfer1_call_put_file(BLUEZ_OBEX_FILE_TRANSFER1(source), sourcePath.c_str(), targetFileName.c_str(),
 											   NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(putFileCallback));
 	};
 

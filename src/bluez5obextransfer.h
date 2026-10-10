@@ -83,7 +83,7 @@ private:
 	uint64_t mBytesTransferred;
 	uint64_t mFileSize;
 	State mState;
-	TransferType mTransferType;
+	[[maybe_unused]] TransferType mTransferType;	// both directions are completed alike
 	std::string mFileName;
 	std::string mFilePath;
 	std::string mMessageHandle;
@@ -91,6 +91,7 @@ private:
 	void updateFromProperties(GVariant *properties);
 	bool parsePropertyFromVariant(const std::string &key, GVariant *valueVar);
 	void notifyWatcherAboutChangedProperties();
+	void failSoon();
 };
 
 #endif // BLUEZ5OBEXTRANSFER_H

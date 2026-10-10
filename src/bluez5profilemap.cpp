@@ -21,6 +21,7 @@
 #include "asyncutils.h"
 #include "utils.h"
 #include "bluez5busconfig.h"
+#include "obexpaths.h"
 
 const std::string BLUETOOTH_PROFILE_MAS_UUID = "00001132-0000-1000-8000-00805f9b34fb";
 using namespace std::placeholders;
@@ -95,8 +96,22 @@ void Bluez5ProfileMap::disconnect(const std::string &sessionKey, const std::stri
 
 }
 
+// One session per key, as in the base class: a second connect leaked a session and returned its id while the
+// first stayed stored. A connect for a session that exists returns that session's id.
 void Bluez5ProfileMap::createSession(const std::string &address, const std::string &instanceName, BluetoothMapCallback callback)
 {
+	std::string sessionkey = normaliseSessionKey(address + "_" + instanceName);
+	if (const Bluez5ObexSession *existing = findSession(sessionkey))
+	{
+		callback(BLUETOOTH_ERROR_NONE, getSessionIdFromSessionPath(existing->getObjectPath()));
+		return;
+	}
+	if (mPendingSessions.count(sessionkey))
+	{
+		callback(BLUETOOTH_ERROR_BUSY, "");
+		return;
+	}
+
 	Bluez5ObexClient *obexClient = mAdapter->getObexClient();
 
 	if (!obexClient)
@@ -104,7 +119,6 @@ void Bluez5ProfileMap::createSession(const std::string &address, const std::stri
 		callback(BLUETOOTH_ERROR_FAIL,"");
 		return;
 	}
-	std::string sessionkey = address+"_"+instanceName;
 
 	auto sessionCreateCallback = [this, alive = mLifetime.token(), sessionkey, callback](Bluez5ObexSession *session) {
 		// Called back after the profile may have gone with its adapter.
@@ -114,9 +128,18 @@ void Bluez5ProfileMap::createSession(const std::string &address, const std::stri
 			callback(BLUETOOTH_ERROR_FAIL, "");
 			return;
 		}
+		mPendingSessions.erase(sessionkey);
 		if (!session)
 		{
 			callback(BLUETOOTH_ERROR_FAIL,"");
+			return;
+		}
+		std::string sessionId = getSessionIdFromSessionPath(session->getObjectPath());
+		if (!storeSession(sessionkey, session))
+		{
+			delete session;
+			const Bluez5ObexSession *existing = findSession(sessionkey);
+			callback(BLUETOOTH_ERROR_NONE, existing ? getSessionIdFromSessionPath(existing->getObjectPath()) : "");
 			return;
 		}
 
@@ -124,11 +147,10 @@ void Bluez5ProfileMap::createSession(const std::string &address, const std::stri
 		DEBUG("createSession g_signal_connect");
 		// As the base class pointer, which is what the handler reads it as, and what detachSession() disconnects.
 		g_signal_connect(G_OBJECT(session->getObjectPropertiesProxy()), "properties-changed", G_CALLBACK(handlePropertiesChanged), static_cast<Bluez5ObexProfileBase*>(this));
-		std::string sessionId = getSessionIdFromSessionPath(session->getObjectPath());
-		storeSession(sessionkey, session);
 		callback(BLUETOOTH_ERROR_NONE,sessionId);
 	};
 
+	mPendingSessions.insert(sessionkey);
 	std::string upperCaseAddress = convertAddressToUpperCase(address);
 	obexClient->createSession(Bluez5ObexSession::Type::MAP, upperCaseAddress, sessionCreateCallback, instanceName);
 }
@@ -142,11 +164,10 @@ void Bluez5ProfileMap::notifySessionStatus(const std::string &sessionKey, bool c
 	getObserver()->propertiesChanged(convertAddressToLowerCase(mAdapter->getAddress()), convertedAddress, properties);
 }
 
+// A key without '_' threw std::out_of_range from substr(npos).
 std::string Bluez5ProfileMap::convertSessionKey(const std::string &sessionKey)
 {
-	std::size_t keyPos = sessionKey.find("_");
-	std::string address = ( keyPos == std::string::npos ? "" : sessionKey.substr(0, keyPos));
-	return convertAddressToLowerCase(address) + sessionKey.substr(keyPos);
+	return normaliseSessionKey(sessionKey);
 }
 
 std::string Bluez5ProfileMap::getSessionIdFromSessionPath(const std::string &sessionPath)
@@ -215,26 +236,28 @@ void Bluez5ProfileMap::getFolderList(const std::string &sessionKey, const std::s
         callback(BLUETOOTH_ERROR_FAIL,folderList);
         return;
     }
-    bluez_obex_message_access1_call_list_folders(tObjectMapProxy ,buildGetFolderListParam(startOffset,maxCount),
-                                                 NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(std::bind(&Bluez5ProfileMap::getFolderListCb,
-                                                 this,tObjectMapProxy,callback,_1)));
-}
 
-void Bluez5ProfileMap::getFolderListCb(BluezObexMessageAccess1* tObjectMapProxy, BluetoothMapGetFoldersCallback callback, GAsyncResult *result)
-{
-    DEBUG("%s", __FUNCTION__);
-    std::vector<std::string> folderList;
-    GError *error = 0;
-    GVariant *outFolderList = 0;
-    bluez_obex_message_access1_call_list_folders_finish(tObjectMapProxy, &outFolderList, result, &error);
-    if (error)
-    {
-        callback(BLUETOOTH_ERROR_FAIL,folderList);
-        g_error_free(error);
-        return;
-    }
-    parseGetFolderListResponse(outFolderList,folderList);
-    callback(BLUETOOTH_ERROR_NONE,folderList);
+    // Finished on the proxy the call was made on (the session's, freed with it), and the list released: it leaked.
+    auto getFolderListCallback = [this, alive = mLifetime.token(), callback](GObject *source, GAsyncResult *result) {
+        std::vector<std::string> folderList;
+        GError *error = 0;
+        GVariant *outFolderList = 0;
+        gboolean ret = bluez_obex_message_access1_call_list_folders_finish(BLUEZ_OBEX_MESSAGE_ACCESS1(source), &outFolderList, result, &error);
+        if (alive.expired() || !ret || error || !outFolderList)
+        {
+            g_clear_error(&error);
+            if (outFolderList)
+                g_variant_unref(outFolderList);
+            callback(BLUETOOTH_ERROR_FAIL,folderList);
+            return;
+        }
+        parseGetFolderListResponse(outFolderList,folderList);
+        g_variant_unref(outFolderList);
+        callback(BLUETOOTH_ERROR_NONE,folderList);
+    };
+
+    bluez_obex_message_access1_call_list_folders(tObjectMapProxy ,buildGetFolderListParam(startOffset,maxCount),
+                                                 NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(getFolderListCallback));
 }
 
 void Bluez5ProfileMap::parseGetFolderListResponse(GVariant *outFolderList,std::vector<std::string> &folders)
@@ -248,7 +271,8 @@ void Bluez5ProfileMap::parseGetFolderListResponse(GVariant *outFolderList,std::v
         gchar *keyVar;
         GVariant *valueVar;
         while (g_variant_iter_loop (iter1, "{sv}", &keyVar, &valueVar))
-            folders.push_back(g_variant_get_string(valueVar, NULL));
+            if (g_variant_is_of_type(valueVar, G_VARIANT_TYPE_STRING))	// another type was a std::string(NULL)
+                folders.push_back(g_variant_get_string(valueVar, NULL));
     }
 }
 
@@ -285,11 +309,17 @@ void Bluez5ProfileMap::setFolder(const std::string &sessionKey, const std::strin
         return;
     }
 
-    auto setFolderCallback = [tObjectMapProxy, callback](GAsyncResult *result) {
+    // Finished on the proxy the call was made on: the session's, captured here, is freed when the session goes.
+    auto setFolderCallback = [callback](GObject *source, GAsyncResult *result) {
 
     GError *error = 0;
-    [[maybe_unused]] gboolean ret;
-    ret = bluez_obex_message_access1_call_set_folder_finish(tObjectMapProxy, result, &error);
+    gboolean ret;
+    ret = bluez_obex_message_access1_call_set_folder_finish(BLUEZ_OBEX_MESSAGE_ACCESS1(source), result, &error);
+    if (!ret && !error)
+    {
+        callback(BLUETOOTH_ERROR_FAIL);
+        return;
+    }
     if (error)
     {
         ERROR(MSGID_MAP_PROFILE_ERROR, 0, "Failed to set folder error:%s",error->message);
@@ -328,27 +358,30 @@ void Bluez5ProfileMap::getMessageList(const std::string &sessionKey, const std::
         return;
     }
 
-    bluez_obex_message_access1_call_list_messages(tObjectMapProxy ,folder.c_str(),buildGetMessageListParam(filters),
-                                                 NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(std::bind(&Bluez5ProfileMap::getMessageListCb,
-                                                 this,tObjectMapProxy,callback,_1)));
-}
+    // Finished on the proxy the call was made on (the session's, freed with it), and the listing released: the
+    // whole message listing leaked on every call.
+    auto getMessageListCallback = [this, alive = mLifetime.token(), callback](GObject *source, GAsyncResult *result) {
+        BluetoothMessageList messageList;
+        GError *error = nullptr;
+        GVariant *outMessageList = nullptr;
+        gboolean ret = bluez_obex_message_access1_call_list_messages_finish(BLUEZ_OBEX_MESSAGE_ACCESS1(source), &outMessageList, result, &error);
+        if (alive.expired() || !ret || error || !outMessageList)
+        {
+            if (error)
+                ERROR(MSGID_MAP_PROFILE_ERROR, 0, "Failed to get message list due to :%s",error->message);
+            g_clear_error(&error);
+            if (outMessageList)
+                g_variant_unref(outMessageList);
+            callback(BLUETOOTH_ERROR_FAIL,messageList);
+            return;
+        }
+        parseGetMessageListResponse(outMessageList,messageList);
+        g_variant_unref(outMessageList);
+        callback(BLUETOOTH_ERROR_NONE,messageList);
+    };
 
-void Bluez5ProfileMap::getMessageListCb(BluezObexMessageAccess1* tObjectMapProxy, BluetoothMapGetMessageListCallback callback, GAsyncResult *result)
-{
-    DEBUG("%s", __FUNCTION__);
-    BluetoothMessageList messageList;
-    GError *error = nullptr;
-    GVariant *outMessageList = nullptr;
-    bluez_obex_message_access1_call_list_messages_finish(tObjectMapProxy, &outMessageList, result, &error);
-    if (error)
-    {
-        ERROR(MSGID_MAP_PROFILE_ERROR, 0, "Failed to get message list due to :%s",error->message);
-        callback(BLUETOOTH_ERROR_FAIL,messageList);
-        g_error_free(error);
-        return;
-    }
-    parseGetMessageListResponse(outMessageList,messageList);
-    callback(BLUETOOTH_ERROR_NONE,messageList);
+    bluez_obex_message_access1_call_list_messages(tObjectMapProxy ,folder.c_str(),buildGetMessageListParam(filters),
+                                                 NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(getMessageListCallback));
 }
 
 GVariant * Bluez5ProfileMap::buildGetMessageListParam(const BluetoothMapPropertiesList &filters)
@@ -440,13 +473,9 @@ void Bluez5ProfileMap::parseGetMessageListResponse(GVariant *outMessageList,Blue
             std::string keyValue(key);
             addMessageProperties(keyValue,value,messageProperties);
         }
-        std::string tObjectPath(objectPath);
-        std::size_t found = tObjectPath.find("message");
-        if (found != std::string::npos)
-        {
-            std::string messageHandle = tObjectPath.substr(found);
+        std::string messageHandle = obexMessageHandle(objectPath);
+        if (!messageHandle.empty())
             messageList.push_back(std::make_pair(messageHandle,messageProperties));
-        }
     }
 }
 
@@ -470,6 +499,9 @@ void Bluez5ProfileMap::addMessageProperties(std::string& key , GVariant* value ,
             case BluetoothMapProperty::Type::EVENTTYPE:
             case BluetoothMapProperty::Type::OLDFOLDER:
                 {
+                    // Types checked: another type gave NULL, and std::string(NULL) throws.
+                    if (!g_variant_is_of_type(value, G_VARIANT_TYPE_STRING))
+                        break;
                     std::string parsedStringVal = g_variant_get_string(value, NULL);
                     messageProperties.push_back(BluetoothMapProperty(it->second,parsedStringVal));
                     break;
@@ -477,6 +509,8 @@ void Bluez5ProfileMap::addMessageProperties(std::string& key , GVariant* value ,
             case BluetoothMapProperty::Type::SIZE:
             case BluetoothMapProperty::Type::ATTACHMENTSIZE:
                 {
+                    if (!g_variant_is_of_type(value, G_VARIANT_TYPE_UINT64))
+                        break;
                     uint64_t parsedUint64Val = g_variant_get_uint64(value);
                     messageProperties.push_back(BluetoothMapProperty(it->second,parsedUint64Val));
                     break;
@@ -487,6 +521,8 @@ void Bluez5ProfileMap::addMessageProperties(std::string& key , GVariant* value ,
             case BluetoothMapProperty::Type::SENT:
             case BluetoothMapProperty::Type::PROTECTED:
                 {
+                    if (!g_variant_is_of_type(value, G_VARIANT_TYPE_BOOLEAN))
+                        break;
                     bool parsedBoolVal = g_variant_get_boolean(value);
                     messageProperties.push_back(BluetoothMapProperty(it->second,parsedBoolVal));
                     break;
@@ -507,6 +543,14 @@ void Bluez5ProfileMap::getMessage(const std::string &sessionKey, const std::stri
         return;
     }
 
+    // From the app, into an object path: one that is not a path element made the call fail a GLib check, and
+    // neither the reply nor the callback ever came.
+    if (!isObjectPathElement(messageHandle))
+    {
+        callback(BLUETOOTH_ERROR_PARAM_INVALID);
+        return;
+    }
+
     std::string objectPath = session->getObjectPath() + "/" + messageHandle;
 
     BluezObexMessage1 *objectMessageProxy = createMessageHandleProxyUsingPath(objectPath);
@@ -517,24 +561,20 @@ void Bluez5ProfileMap::getMessage(const std::string &sessionKey, const std::stri
         return;
     }
 
-    auto getMessageCallback = [this, alive = mLifetime.token(), objectMessageProxy, callback](GAsyncResult *result) {
-    // The profile goes with its adapter, also while this call is out: nothing of it is touched.
-    if (alive.expired())
-    {
-    	g_object_unref(objectMessageProxy);
-    	callback(BLUETOOTH_ERROR_FAIL);
-    	return;
-    }
-
+    auto getMessageCallback = [this, alive = mLifetime.token(), callback](GObject *source, GAsyncResult *result) {
         GError *error = 0;
-        [[maybe_unused]] gboolean ret;
+        gboolean ret;
         gchar *objectPath = 0;
 
-        ret = bluez_obex_message1_call_get_finish(objectMessageProxy, &objectPath, NULL, result, &error);
-
-        if(objectMessageProxy)
-            g_object_unref(objectMessageProxy);
-
+        ret = bluez_obex_message1_call_get_finish(BLUEZ_OBEX_MESSAGE1(source), &objectPath, NULL, result, &error);
+        // The profile goes with its adapter, also while this call is out: nothing of it is touched.
+        if (alive.expired() || (!error && (!ret || !objectPath)))
+        {
+            g_clear_error(&error);
+            g_free(objectPath);
+            callback(BLUETOOTH_ERROR_FAIL);
+            return;
+        }
         if (error)
         {
             ERROR(MSGID_MAP_PROFILE_ERROR, 0, "Failed to get message error:%s",error->message);
@@ -551,17 +591,20 @@ void Bluez5ProfileMap::getMessage(const std::string &sessionKey, const std::stri
         }
 
         startTransfer(std::string(objectPath), callback, Bluez5ObexTransfer::TransferType::RECEIVING);
+        g_free(objectPath);	// leaked on every message
     };
+    // The pending call keeps its own reference on the proxy.
     bluez_obex_message1_call_get(objectMessageProxy , destinationFile.c_str(), attachment,
                                                  NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(getMessageCallback));
-
+    g_object_unref(objectMessageProxy);
 }
 
 BluezObexMessage1* Bluez5ProfileMap::createMessageHandleProxyUsingPath(const std::string &objectPath)
 {
     GError *error = 0;
     BluezObexMessage1 *objectMessageProxy = NULL;
-    objectMessageProxy = bluez_obex_message1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
+    // Its cached properties are not read: no synchronous GetAll for it.
+    objectMessageProxy = bluez_obex_message1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES,
                                                                         "org.bluez.obex", objectPath.c_str(), NULL, &error);
     if (error)
     {
@@ -642,6 +685,8 @@ void Bluez5ProfileMap::updatePushTransfer(const std::string &objectPath, Bluez5O
         removeTransfer(objectPath);
 }
 
+// The status is set with an explicit Properties.Set, and its answer is the result: the generated setter sent it
+// and returned at once, so a refused change or an unknown handle was reported as success.
 void Bluez5ProfileMap::setMessageStatus(const std::string &sessionKey, const std::string &messageHandle, const std::string &statusIndicator, bool statusValue, BluetoothResultCallback callback)
 {
     DEBUG("%s", __FUNCTION__);
@@ -652,34 +697,48 @@ void Bluez5ProfileMap::setMessageStatus(const std::string &sessionKey, const std
         return;
     }
 
-    std::string objectPath = session->getObjectPath() + "/" + messageHandle;
-
-    BluezObexMessage1 *objectMessageProxy = createMessageHandleProxyUsingPath(objectPath);
-
-    if (!objectMessageProxy)
+    std::string property;
+    if (statusIndicator == "read")
+        property = "Read";
+    else if (statusIndicator == "delete")
+        property = "Deleted";
+    if (property.empty() || !isObjectPathElement(messageHandle))
     {
-        callback(BLUETOOTH_ERROR_MAP_MESSAGE_HANDLE_NOT_FOUND);
+        callback(BLUETOOTH_ERROR_PARAM_INVALID);
         return;
     }
 
-    if (statusIndicator == "read")
+    std::string objectPath = session->getObjectPath() + "/" + messageHandle;
+
+    GError *error = 0;
+    FreeDesktopDBusProperties *propertiesProxy = free_desktop_dbus_properties_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE,
+            G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES, "org.bluez.obex", objectPath.c_str(), NULL, &error);
+    if (!propertiesProxy)
     {
-        bluez_obex_message1_set_read(objectMessageProxy, statusValue);
-        callback(BLUETOOTH_ERROR_NONE);
-    }
-    else if (statusIndicator == "delete")
-    {
-        bluez_obex_message1_set_deleted(objectMessageProxy, statusValue);
-        callback(BLUETOOTH_ERROR_NONE);
-    }
-    else
-    {
-        callback(BLUETOOTH_ERROR_PARAM_INVALID);
+        g_clear_error(&error);
+        callback(BLUETOOTH_ERROR_FAIL);
+        return;
     }
 
-    if(objectMessageProxy)
-        g_object_unref(objectMessageProxy);
+    auto setCallback = [callback](GObject *source, GAsyncResult *result) {
+        GError *error = 0;
+        gboolean ret = free_desktop_dbus_properties_call_set_finish(FREE_DESKTOP_DBUS_PROPERTIES(source), result, &error);
+        if (error)
+        {
+            ERROR(MSGID_MAP_PROFILE_ERROR, 0, "Failed to set message status: %s", error->message);
+            bool unknown = strstr(error->message, "UnknownObject") || strstr(error->message, "Not Found");
+            g_error_free(error);
+            callback(unknown ? BLUETOOTH_ERROR_MAP_MESSAGE_HANDLE_NOT_FOUND : BLUETOOTH_ERROR_FAIL);
+            return;
+        }
+        callback(ret ? BLUETOOTH_ERROR_NONE : BLUETOOTH_ERROR_FAIL);
+    };
 
+    // The pending call keeps its own reference on the proxy.
+    free_desktop_dbus_properties_call_set(propertiesProxy, "org.bluez.obex.Message1", property.c_str(),
+                                          g_variant_new_variant(g_variant_new_boolean(statusValue)), NULL,
+                                          glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(setCallback));
+    g_object_unref(propertiesProxy);
 }
 
 void Bluez5ProfileMap::pushMessage(const std::string &sessionKey, const std::string &sourceFile, const std::string &folder, const std::string &charset, bool transparent, bool retry, BluetoothMapCallback callback)
@@ -700,23 +759,30 @@ void Bluez5ProfileMap::pushMessage(const std::string &sessionKey, const std::str
         return;
     }
 
-   auto pushMessageCallback = [=, this](GAsyncResult *result) {
+   // Finished on the proxy the call was made on (the session's, freed with it); the path and the properties were
+   // leaked on every message.
+   auto pushMessageCallback = [this, alive = mLifetime.token(), callback](GObject *source, GAsyncResult *result) {
 
         GError *error = 0;
-        [[maybe_unused]] gboolean ret;
+        gboolean ret;
         gchar *objectPath = 0;
-        GVariant *outProperties;
+        GVariant *outProperties = nullptr;
 
-        ret = bluez_obex_message_access1_call_push_message_finish(objectMessageProxy, &objectPath, &outProperties, result, &error);
-        if (error)
+        ret = bluez_obex_message_access1_call_push_message_finish(BLUEZ_OBEX_MESSAGE_ACCESS1(source), &objectPath, &outProperties, result, &error);
+        if (outProperties)
+            g_variant_unref(outProperties);
+        if (alive.expired() || !ret || error || !objectPath)
         {
-            ERROR(MSGID_MAP_PROFILE_ERROR, 0, "Failed to get message error:%s",error->message);
+            if (error)
+                ERROR(MSGID_MAP_PROFILE_ERROR, 0, "Failed to get message error:%s",error->message);
+            g_clear_error(&error);
+            g_free(objectPath);
             callback(BLUETOOTH_ERROR_FAIL,"");
-            g_error_free(error);
             return;
         }
 
 		startPushTransfer(std::string(objectPath), callback, Bluez5ObexTransfer::TransferType::SENDING);
+		g_free(objectPath);
     };
 
     bluez_obex_message_access1_call_push_message(objectMessageProxy , sourceFile.c_str(),  folder.c_str(), buildMessageArgs(charset, transparent, retry),
@@ -751,7 +817,7 @@ void Bluez5ProfileMap::updateProperties(GVariant *changedProperties)
         GVariant *valueVariant = g_variant_get_child_value(propertyVar, 1);
         GVariant *valueVar = g_variant_get_variant(valueVariant);
         std::string key = g_variant_get_string(keyVar, NULL);
-        if (key == "Notification")
+        if (key == "Notification" && g_variant_is_of_type(valueVar, G_VARIANT_TYPE_VARDICT))
         {
             g_autoptr(GVariantIter) iter1 = NULL;
             g_autoptr(GVariant) value = NULL;
@@ -765,26 +831,19 @@ void Bluez5ProfileMap::updateProperties(GVariant *changedProperties)
             {
                 std::string keyValue(key);
                 addMessageProperties(keyValue,value,properties);
-                if (keyValue == "ObjectPath")
+                if (keyValue == "ObjectPath" && g_variant_is_of_type(value, G_VARIANT_TYPE_STRING))
                 {
                     notificationEvent = true;
                     ObjectPath = g_variant_get_string(value, NULL);
                 }
 
             }
-            std::size_t messageFound = ObjectPath.find("message");
-            if (messageFound != std::string::npos)
-            {
-                std::string messageHandle = ObjectPath.substr(messageFound);
+            std::string messageHandle = obexMessageHandle(ObjectPath);
+            if (!messageHandle.empty())
                 messageList.push_back(std::make_pair(messageHandle,properties));
-            }
 
-            std::string session("session");
-            std::size_t sessionFound = ObjectPath.find(session);
-            if (sessionFound != std::string::npos)
-            {
-                sessionId = ObjectPath.substr(sessionFound, session.length()+1);
-            }
+            // The whole element: "session" and one more character gave session1 for session12.
+            sessionId = obexSessionId(ObjectPath);
         }
         g_variant_unref(keyVar);
         g_variant_unref(propertyVar);
@@ -793,4 +852,23 @@ void Bluez5ProfileMap::updateProperties(GVariant *changedProperties)
     }
     if(notificationEvent)
         getMapObserver()->messageNotificationEvent(convertAddressToLowerCase(mAdapter->getAddress()), sessionId, messageList);
+}
+
+// With their session: they outlived it and were cleaned up only if obexd still sent a final state. Taken out of the
+// map first; a transfer deleted unfinished reports itself aborted to its watch, so its request fails.
+void Bluez5ProfileMap::removeSessionTransfers(Bluez5ObexSession *session)
+{
+	std::vector<Bluez5ObexTransfer*> ended;
+	for (auto it = mTransfersMap.begin(); it != mTransfersMap.end(); )
+	{
+		if (it->second && it->second->isPartOfSession(session))
+		{
+			ended.push_back(it->second);
+			it = mTransfersMap.erase(it);
+		}
+		else
+			++it;
+	}
+	for (auto transfer : ended)
+		delete transfer;
 }

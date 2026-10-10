@@ -53,10 +53,8 @@ private:
     std::string convertSessionKey(const std::string &address);
     std::string getSessionIdFromSessionPath(const std::string &sessionPath);
     void createSession(const std::string &address, const std::string &instanceName, BluetoothMapCallback callback);
-    void getFolderListCb(BluezObexMessageAccess1* tObjectMapProxy, BluetoothMapGetFoldersCallback callback, GAsyncResult *result);
     void parseGetFolderListResponse(GVariant *outFolderList,std::vector<std::string> &folders);
     GVariant * buildGetFolderListParam(const uint16_t &startOffset, const uint16_t &maxCount);
-    void getMessageListCb(BluezObexMessageAccess1* tObjectMapProxy, BluetoothMapGetMessageListCallback callback, GAsyncResult *result);
     GVariant * buildGetMessageListParam(const BluetoothMapPropertiesList &filters);
     void parseGetMessageListResponse(GVariant *outMessageList,BluetoothMessageList &messageList);
     void addMessageProperties(std::string& key , GVariant* value , BluetoothMapPropertiesList &messageProperties);
@@ -67,6 +65,7 @@ private:
     void updateActiveTransfer(const std::string &objectPath, Bluez5ObexTransfer *transfer, BluetoothResultCallback callback);
     GVariant* buildMessageArgs(const std::string &charset, bool transparent, bool retry);
     void updatePushTransfer(const std::string &objectPath, Bluez5ObexTransfer *transfer, BluetoothMapCallback callback);
+    void removeSessionTransfers(Bluez5ObexSession *session);
 };
 
 #endif

@@ -67,6 +67,7 @@ private:
     std::map <std::string, Bluez5ObexTransfer*> mTransfersMap;
     std::map <std::string, std::string> mTransferStateMap;
     BluetoothPbapApplicationParameters pbapApplicationParameters;
+    void removeSessionTransfers(Bluez5ObexSession *session) override;
 };
 
 #endif

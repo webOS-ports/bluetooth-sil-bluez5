@@ -22,6 +22,8 @@
 #include <bluetooth-sil-api.h>
 
 #include "bluez5profilebase.h"
+#include <set>
+
 #include "bluez5obexsession.h"
 #include "bluez5obextransfer.h"
 
@@ -53,9 +55,11 @@ private:
 	Bluez5ObexSession::Type mType;
 
 protected:
+	std::set<std::string> mPendingSessions;	// keys of sessions being created
+
 	void createSession(const std::string &address, Bluez5ObexSession::Type type, BluetoothResultCallback callback);
 	void removeSession(const std::string &address);
-	void storeSession(const std::string &address, Bluez5ObexSession *session);
+	bool storeSession(const std::string &address, Bluez5ObexSession *session);
 	const Bluez5ObexSession* findSession(const std::string &address) const;
 	const Bluez5ObexSession* findSessionByPropertiesProxy(GObject *propertiesProxy) const;
 	void handleFailedToCreateSession(const std::string &address, BluetoothResultCallback callback);
@@ -65,6 +69,8 @@ protected:
 	Bluez5ObexTransfer* findTransfer(BluetoothFtpTransferId id);
 	void removeFromSessionList(std::string address);
 	void detachSession(Bluez5ObexSession *session);
+	// Transfers a profile keeps itself (MAP, PBAP), ended with their session: they outlived it, and never completed.
+	virtual void removeSessionTransfers(Bluez5ObexSession */*session*/) { }
 };
 
 #endif

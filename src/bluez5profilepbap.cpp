@@ -440,25 +440,28 @@ void Bluez5ProfilePbap::updateSessionProperties(GObject *propertiesProxy, GVaria
 
 }
 
+// Types are checked: a value of another type gave NULL, and std::string(NULL) throws.
 void Bluez5ProfilePbap::addPropertyFromVariant(const std::string &key, GVariant *valueVar)
 {
-    if (key == "PrimaryCounter")
+    bool isString = g_variant_is_of_type(valueVar, G_VARIANT_TYPE_STRING);
+
+    if (key == "PrimaryCounter" && isString)
     {
         pbapApplicationParameters.setPrimaryCounter(g_variant_get_string(valueVar, NULL));
     }
-    else if (key == "SecondaryCounter")
+    else if (key == "SecondaryCounter" && isString)
     {
         pbapApplicationParameters.setSecondaryCounter(g_variant_get_string(valueVar, NULL));
     }
-    else if (key == "DatabaseIdentifier")
+    else if (key == "DatabaseIdentifier" && isString)
     {
         pbapApplicationParameters.setDataBaseIdentifier(g_variant_get_string(valueVar, NULL));
     }
-    else if (key == "FixedImageSize")
+    else if (key == "FixedImageSize" && g_variant_is_of_type(valueVar, G_VARIANT_TYPE_BOOLEAN))
     {
         pbapApplicationParameters.setFixedImageSize(g_variant_get_boolean(valueVar));
     }
-    else  if (key == "Folder")
+    else  if (key == "Folder" && isString)
     {
         pbapApplicationParameters.setFolder(g_variant_get_string(valueVar, NULL));
     }
@@ -524,19 +527,23 @@ void Bluez5ProfilePbap::parseAllProperties(GVariant *propsVar)
     }
 }
 
+// Asynchronous: it was a synchronous call to the phone, from a signal handler, on the service's only main loop.
 void Bluez5ProfilePbap::updateVersion(BluezObexPhonebookAccess1 *phonebookProxy)
 {
     if (!phonebookProxy)
         return;
 
-    GError *error = 0;
-    [[maybe_unused]] gboolean ret;
-    ret = bluez_obex_phonebook_access1_call_update_version_sync(phonebookProxy, NULL, &error);
-    if (error)
-    {
-        ERROR(MSGID_PBAP_PROFILE_ERROR, 0, "Failed to call phonebook access update version error:%s",error->message);
-        g_error_free(error);
-    }
+    auto updateVersionCallback = [](GObject *source, GAsyncResult *result) {
+        GError *error = 0;
+        bluez_obex_phonebook_access1_call_update_version_finish(BLUEZ_OBEX_PHONEBOOK_ACCESS1(source), result, &error);
+        if (error)
+        {
+            ERROR(MSGID_PBAP_PROFILE_ERROR, 0, "Failed to call phonebook access update version error:%s",error->message);
+            g_error_free(error);
+        }
+    };
+    bluez_obex_phonebook_access1_call_update_version(phonebookProxy, NULL, glibAsyncMethodWrapper,
+                                                     new GlibAsyncFunctionWrapper(updateVersionCallback));
 }
 void Bluez5ProfilePbap::supplyAccessConfirmation(BluetoothPbapAccessRequestId /*accessRequestId*/, bool /*accept*/, BluetoothResultCallback callback)
 {
@@ -938,4 +945,23 @@ void Bluez5ProfilePbap::updateActiveTransfer(const std::string &objectPath, Blue
 
     if (cleanup)
         removeTransfer(objectPath);
+}
+
+// With their session: they outlived it and were cleaned up only if obexd still sent a final state. Taken out of the
+// map first; a transfer deleted unfinished reports itself aborted to its watch, so its request fails.
+void Bluez5ProfilePbap::removeSessionTransfers(Bluez5ObexSession *session)
+{
+	std::vector<Bluez5ObexTransfer*> ended;
+	for (auto it = mTransfersMap.begin(); it != mTransfersMap.end(); )
+	{
+		if (it->second && it->second->isPartOfSession(session))
+		{
+			ended.push_back(it->second);
+			it = mTransfersMap.erase(it);
+		}
+		else
+			++it;
+	}
+	for (auto transfer : ended)
+		delete transfer;
 }

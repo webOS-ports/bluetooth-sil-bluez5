@@ -21,6 +21,11 @@
 #include "logging.h"
 #include "bluez5busconfig.h"
 
+// Nothing reads these proxies' cached properties: loading them took a synchronous GetAll for each of the six, on
+// the service's only main loop. Creating them still waits for obexd once per proxy (name owner); making the
+// session creation asynchronous throughout is left as it is.
+static const GDBusProxyFlags PROXY_FLAGS = G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES;
+
 Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const std::string &objectPath, const std::string &deviceAddress) :
 	mClient(client),
 	mType(type),
@@ -33,11 +38,12 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 	mMessageAccessProxy(nullptr),
 	mPropertiesProxy(nullptr),
 	mLostRemote(false),
+	mValid(false),
 	mObjectWatch(new DBusUtils::ObjectWatch(BLUEZ5_OBEX_DBUS_BUS_TYPE, "org.bluez.obex", objectPath))
 {
 	GError *error = 0;
 
-	mSessionProxy = bluez_obex_session1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
+	mSessionProxy = bluez_obex_session1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, PROXY_FLAGS,
 	                                                           "org.bluez.obex", mObjectPath.c_str(), NULL, &error);
 	if (error)
 	{
@@ -48,7 +54,7 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 		return;
 	}
 
-	mFileTransferProxy = bluez_obex_file_transfer1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
+	mFileTransferProxy = bluez_obex_file_transfer1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, PROXY_FLAGS,
 																		"org.bluez.obex", mObjectPath.c_str(), NULL, &error);
 	if (error)
 	{
@@ -59,7 +65,7 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 		return;
 	}
 
-	mObjectPushProxy = bluez_obex_object_push1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
+	mObjectPushProxy = bluez_obex_object_push1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, PROXY_FLAGS,
 																		"org.bluez.obex", mObjectPath.c_str(), NULL, &error);
 
 	if (error)
@@ -71,7 +77,7 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 		return;
 	}
 
-	mPhonebookAccessProxy = bluez_obex_phonebook_access1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
+	mPhonebookAccessProxy = bluez_obex_phonebook_access1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, PROXY_FLAGS,
 																		"org.bluez.obex", mObjectPath.c_str(), NULL, &error);
 
 	if (error)
@@ -83,7 +89,7 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 		return;
 	}
 
-	mMessageAccessProxy = bluez_obex_message_access1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
+	mMessageAccessProxy = bluez_obex_message_access1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, PROXY_FLAGS,
 																		"org.bluez.obex", mObjectPath.c_str(), NULL, &error);
 
 	if (error)
@@ -95,7 +101,7 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 		return;
 	}
 
-	mPropertiesProxy = free_desktop_dbus_properties_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
+	mPropertiesProxy = free_desktop_dbus_properties_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, PROXY_FLAGS,
 																		"org.bluez.obex", objectPath.c_str(), NULL, &error);
 	if (error)
 	{
@@ -105,6 +111,8 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 		g_error_free(error);
 		return;
 	}
+
+	mValid = mObjectWatch->isWatching();
 
 	mObjectWatch->watchInterfaceRemoved([this](const std::string &name) {
 		if (name != "org.bluez.obex.Session1" && name != "all")
@@ -120,10 +128,13 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 
 Bluez5ObexSession::~Bluez5ObexSession()
 {
-	if (!mLostRemote)
+	// A server session (an incoming push) is not the client's to remove: obexd refused it and logged an error.
+	if (!mLostRemote && mObjectPath.find("/server/") == std::string::npos && mClient)
 		mClient->destroySession(mObjectPath);
 	if(mFileTransferProxy)
 		g_object_unref(mFileTransferProxy);
+	if (mObjectPushProxy)	// never released
+		g_object_unref(mObjectPushProxy);
 	if(mSessionProxy)
 		g_object_unref(mSessionProxy);
 	if(mPhonebookAccessProxy)
