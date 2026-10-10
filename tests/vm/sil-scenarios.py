@@ -90,6 +90,13 @@ class Pty:
                         except ValueError:
                             pass
 
+    def text_since(self, index):
+        """Lines from index on, plus the unterminated tail: obexctl prints some results without a newline until
+        its next output, which may never come."""
+        with self.lock:
+            tail = re.sub(r'\x1b\[[0-9;]*[A-Za-z]|\r', '', self.buffer.decode(errors='replace'))
+            return self.lines[index:] + [tail]
+
     def write(self, text):
         os.write(self.master, text.encode())
 
@@ -108,10 +115,9 @@ class Pty:
     def wait_line(self, pattern, timeout=10.0):
         end = time.time() + timeout
         while time.time() < end:
-            with self.lock:
-                for line in self.lines:
-                    if re.search(pattern, line):
-                        return line
+            for line in self.text_since(0):
+                if re.search(pattern, line):
+                    return line
             time.sleep(0.1)
         return None
 
@@ -280,6 +286,11 @@ def ensure_btvirt():
 
 
 def restart_bluetooth_stack(capability=None):
+    # Fresh controllers for every scenario: after many runs the virtual links degrade (a kernel WARNING in
+    # hci_conn_timeout), and a connect then hangs without any error.
+    subprocess.run(['systemctl', 'stop', SERVICE, 'bluetooth', 'obex'], check=False)
+    subprocess.run(['systemctl', 'kill', '-s', 'KILL', 'btvirt'], check=False, stderr=subprocess.DEVNULL)
+    settle(1.0)
     ensure_btvirt()
     # connman soft-blocks controllers that appear while its Bluetooth technology is disabled.
     subprocess.run(['rfkill', 'unblock', 'bluetooth'], check=False)
@@ -418,11 +429,11 @@ def obexctl_push(destination, path, timeout=60.0):
             end = time.time() + 20
             result = None
             while time.time() < end and result is None:
-                for line in ctl.lines[seen:]:
+                for line in ctl.text_since(seen):
                     if 'Connection successful' in line or 'Failed to connect' in line:
                         result = line
                 settle(0.2)
-            check(result, 'obexctl connect gave no answer')
+            check(result, 'obexctl connect gave no answer: %r' % [l[-80:] for l in ctl.text_since(0)[-6:]])
             if 'Connection successful' in result:
                 break
             settle(3.0)
