@@ -44,6 +44,7 @@ namespace DBusUtils
 	private:
 		uint32_t mWatch;
 		StatusCallback mCallback;
+		enum class State { UNKNOWN, PRESENT, ABSENT } mState = State::UNKNOWN;	// as last reported
 
 		static void handleNameAppeared(GDBusConnection *conn, const gchar *name, const gchar *nameOwner, gpointer user_data);
 		static void handleNameDisappeared(GDBusConnection *conn, const gchar *name, gpointer user_data);

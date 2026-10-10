@@ -82,15 +82,22 @@ NameWatch::~NameWatch()
 		g_bus_unwatch_name(mWatch);
 }
 
+// The watch starts in the constructor, but its users set their callback later, after an asynchronous bus check.
+// The first event could come in between and was lost: with obexd already running at a service start, the OBEX
+// client and agent never learnt it was there, and MAP, PBAP, FTP and incoming OPP stayed dead until obexd
+// restarted (seen on a TouchPad after a service restart). The last state is kept and given to a later callback.
 void NameWatch::watch(StatusCallback callback)
 {
 	mCallback = callback;
+	if (mCallback && mState != State::UNKNOWN)
+		mCallback(mState == State::PRESENT);
 }
 
 void NameWatch::handleNameAppeared(GDBusConnection */*conn*/, const gchar */*name*/, const gchar */*nameOwner*/, gpointer user_data)
 {
 	NameWatch *self = static_cast<NameWatch*>(user_data);
 
+	self->mState = State::PRESENT;
 	if (self->mCallback)
 		self->mCallback(true);
 }
@@ -99,6 +106,7 @@ void NameWatch::handleNameDisappeared(GDBusConnection */*conn*/, const gchar */*
 {
 	NameWatch *self = static_cast<NameWatch*>(user_data);
 
+	self->mState = State::ABSENT;
 	if (self->mCallback)
 		self->mCallback(false);
 }
