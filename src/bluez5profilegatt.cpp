@@ -844,22 +844,37 @@ void Bluez5ProfileGatt::disconnectGatt(const uint16_t &appId, const uint16_t &/*
 		}
 		mConnectedDevices.erase(appId);
 
-		GError *err = nullptr;
+		auto finish = [this, alive, deviceAddress, appId, callback]() {
+			if (!alive.expired())
+				handleAutoConnectReq(false, convertAddressToLowerCase(deviceAddress), appId);
+			callback(BLUETOOTH_ERROR_NONE);
+		};
+
 		Bluez5Device *device = mAdapter->findDevice(deviceAddress);
+		BluezAdapter1 *adapterProxy = mAdapter->getAdapterProxy();
 		// Only a device that is not paired is removed: RemoveDevice also deletes the pairing, which every GATT
 		// disconnect from a bonded device did.
-		if (device && !device->getPaired())
+		if (!device || device->getPaired() || !adapterProxy)
 		{
-			bluez_adapter1_call_remove_device_sync(mAdapter->getAdapterProxy(), device->getObjectPath().c_str(), NULL, &err);
-			if (err)
-			{
-				g_error_free(err);
-			}
+			finish();
+			return;
 		}
 
-		handleAutoConnectReq(false, convertAddressToLowerCase(deviceAddress), appId);
-
-		callback(BLUETOOTH_ERROR_NONE);
+		// Asynchronous: for a device that is connected again by then, bluetoothd answers RemoveDevice only once
+		// it has disconnected the link and the link is down. The callback is answered after it, as before; a
+		// failure is logged, and does not fail the disconnect, which has succeeded.
+		std::string objectPath = device->getObjectPath();
+		bluez_adapter1_call_remove_device(adapterProxy, objectPath.c_str(), NULL, glibAsyncMethodWrapper,
+		                                  new GlibAsyncFunctionWrapper([objectPath, finish](GObject *source, GAsyncResult *result) {
+			GError *err = nullptr;
+			if (!bluez_adapter1_call_remove_device_finish(BLUEZ_ADAPTER1(source), result, &err))
+			{
+				ERROR(MSGID_GATT_PROFILE_ERROR, 0, "RemoveDevice failed on %s: %s", objectPath.c_str(),
+				      err ? err->message : "no result");
+				g_clear_error(&err);
+			}
+			finish();
+		}));
 	};
 
 	device->disconnect(isDisconnectCallback);
