@@ -28,20 +28,39 @@ using namespace std::placeholders;
 
 const std::string BLUETOOTH_PROFILE_OPP_UUID = "00001105-0000-1000-8000-00805f9b34fb";
 
-#define BLUEZ5_OBEX_AGENT_ERROR_CANCELED        "org.bluez.Error.Canceled"
-#define BLUEZ5_OBEX_AGENT_ERROR_REJECTED        "org.bluez.Error.Rejected"
-#define BLUEZ5_OBEX_AGENT_ERROR_NOT_IMPLEMENTED "org.bluez.Error.NotImplemented"
+// obexd's own namespace: it takes only org.bluez.obex.Error.Rejected as a refusal (obexd/src/manager.c). Any other
+// error, org.bluez.Error.Rejected included, accepted the push under the sender's file name.
+#define BLUEZ5_OBEX_AGENT_ERROR_CANCELED        "org.bluez.obex.Error.Canceled"
+#define BLUEZ5_OBEX_AGENT_ERROR_REJECTED        "org.bluez.obex.Error.Rejected"
+#define BLUEZ5_OBEX_AGENT_ERROR_NOT_IMPLEMENTED "org.bluez.obex.Error.NotImplemented"
+
+// Below obexd's own 60 s agent timeout (obexd/src/manager.c).
+const guint CONFIRMATION_TIMEOUT_SECONDS = 50;
 
 Bluez5ProfileOpp::Bluez5ProfileOpp(Bluez5Adapter *adapter) :
 	Bluez5ObexProfileBase(Bluez5ObexSession::Type::OPP, adapter, BLUETOOTH_PROFILE_OPP_UUID),
 	mTranfserIdCounter(0),
 	mInterface(0),
-	mInvocation(nullptr)
+	mInvocation(nullptr),
+	mPendingTransferId(BLUETOOTH_OPP_TRANSFER_ID_INVALID),
+	mConfirmationTimeout(0)
 {
 }
 
 Bluez5ProfileOpp::~Bluez5ProfileOpp()
 {
+	cancelPendingConfirmation();
+}
+
+void Bluez5ProfileOpp::cancelPendingConfirmation()
+{
+	if (mConfirmationTimeout)
+		g_source_remove(mConfirmationTimeout);
+	mConfirmationTimeout = 0;
+	if (mInvocation)
+		g_dbus_method_invocation_return_dbus_error(mInvocation, BLUEZ5_OBEX_AGENT_ERROR_REJECTED, "User rejected confirmation");
+	mInvocation = nullptr;
+	mPendingTransferId = BLUETOOTH_OPP_TRANSFER_ID_INVALID;
 }
 
 BluetoothOppTransferId Bluez5ProfileOpp::pushFile(const std::string &address,
@@ -111,77 +130,89 @@ void Bluez5ProfileOpp::cancelTransfer(BluetoothOppTransferId id, BluetoothResult
 	transfer->cancel(cancelCallback);
 }
 
+// Everything is checked before the request is kept, and a request that is not kept is answered: obexd waits up to
+// 60 s for an answer and refuses every other push meanwhile.
 void Bluez5ProfileOpp::agentTransferConfirmationRequested(BluezObexAgent1 *interface, GDBusMethodInvocation *invocation, const gchar *arg_path)
 {
-	mInterface = interface;
-	mInvocation = invocation;
-	mTransferObjPath = std::string(arg_path);
-	BluetoothOppTransferId transferId = nextTransferId();
+	auto reject = [invocation]() {
+		g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_OBEX_AGENT_ERROR_REJECTED, "User rejected confirmation");
+	};
+
+	// obexd asks about one push at a time; one still pending was given up (its Cancel may not have reached us).
+	cancelPendingConfirmation();
 
 	GError *error = 0;
-	BluezObexTransfer1* mTransFerProxy = bluez_obex_transfer1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
-	                                                           "org.bluez.obex", arg_path, NULL, &error);
-	if (error)
+	GObjectRef<BluezObexTransfer1> transferProxy(bluez_obex_transfer1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE,
+	                                             G_DBUS_PROXY_FLAGS_NONE, "org.bluez.obex", arg_path, NULL, &error));
+	g_clear_error(&error);
+	if (!transferProxy)
 	{
-		g_dbus_method_invocation_return_dbus_error(mInvocation, BLUEZ5_OBEX_AGENT_ERROR_REJECTED, "User rejected confirmation");
-		mInvocation = nullptr;
-		g_error_free(error);
+		reject();
 		return;
 	}
 
-	const gchar * sessionPath = bluez_obex_transfer1_get_session(mTransFerProxy);
-	const char* fileName = bluez_obex_transfer1_get_name(mTransFerProxy);
-	if (!fileName)
+	// A PUT without a Name header has no name: rejected. Removing the session, as was tried, cannot work on a
+	// server session.
+	const gchar *sessionPath = bluez_obex_transfer1_get_session(transferProxy.get());
+	const char *fileName = bluez_obex_transfer1_get_name(transferProxy.get());
+	if (!sessionPath || !fileName)
 	{
-		/*work around, if we cancel ongoing transfer then continuously handle-confirmation is called
-		 so closing session to avoid it*/
-		mAdapter->getObexClient()->destroySession(sessionPath);
+		reject();
+		return;
+	}
+	guint64 size = bluez_obex_transfer1_get_size(transferProxy.get());
+
+	GObjectRef<BluezObexSession1> sessionProxy(bluez_obex_session1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE,
+	                                           G_DBUS_PROXY_FLAGS_NONE, "org.bluez.obex", sessionPath, NULL, &error));
+	g_clear_error(&error);
+	const gchar *destination = sessionProxy ? bluez_obex_session1_get_destination(sessionProxy.get()) : nullptr;
+	const gchar *source = sessionProxy ? bluez_obex_session1_get_source(sessionProxy.get()) : nullptr;
+	auto device = destination && source ? mAdapter->findDevice(destination) : nullptr;
+	if (!device || !getOppObserver())
+	{
+		reject();
 		return;
 	}
 
+	std::string deviceAddress = destination;
+	BluetoothOppTransferId transferId = nextTransferId();
+	mInterface = interface;
+	mInvocation = invocation;
+	mPendingTransferId = transferId;
+	mTransferObjPath = arg_path;
 	mFileName = fileName;
-	guint64 size = bluez_obex_transfer1_get_size(mTransFerProxy);
 
-	BluezObexSession1* mSessionProxy = bluez_obex_session1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
-	                                                           "org.bluez.obex", sessionPath, NULL, &error);
-	if (error)
-	{
-		g_dbus_method_invocation_return_dbus_error(mInvocation, BLUEZ5_OBEX_AGENT_ERROR_REJECTED, "User rejected confirmation");
-		mInvocation = nullptr;
-		g_error_free(error);
-		return;
-	}
+	// Unanswered, obexd gives up after 60 s and then takes the push anyway, under the sender's name: refused here
+	// first. The observer's request stays; answering it later fails.
+	mConfirmationTimeout = g_timeout_add_seconds(CONFIRMATION_TIMEOUT_SECONDS, [](gpointer data) -> gboolean {
+		auto opp = static_cast<Bluez5ProfileOpp*>(data);
+		opp->mConfirmationTimeout = 0;
+		opp->cancelPendingConfirmation();
+		return G_SOURCE_REMOVE;
+	}, this);
 
-	std::string deviceAddress = bluez_obex_session1_get_destination(mSessionProxy);
-	std::string sourceAddress = bluez_obex_session1_get_source(mSessionProxy);
-	auto device = mAdapter->findDevice(deviceAddress);
-
-	if (!device)
-	{
-		g_dbus_method_invocation_return_dbus_error(mInvocation, BLUEZ5_OBEX_AGENT_ERROR_REJECTED, "User rejected confirmation");
-		mInvocation = nullptr;
-		return;
-	}
-	else
-	{
-		Bluez5ObexSession *session = new Bluez5ObexSession(mAdapter->getObexClient(), Bluez5ObexSession::Type::OPP, std::string(sessionPath), deviceAddress);
-		session->watch(std::bind(&Bluez5ObexProfileBase::handleObexSessionStatus, this, deviceAddress, _1));
-		storeSession(deviceAddress, session);
-		notifySessionStatus(deviceAddress, true);
-		mTransfersMap[transferId] = 0;
-		std::string lowerCaseAddress = convertAddressToLowerCase(sourceAddress);
-		getOppObserver()->transferConfirmationRequested(transferId, lowerCaseAddress, deviceAddress, device->getName(), mFileName, size);
-	}
-
-	g_object_unref(mSessionProxy);
-	g_object_unref(mTransFerProxy);
+	Bluez5ObexSession *session = new Bluez5ObexSession(mAdapter->getObexClient(), Bluez5ObexSession::Type::OPP, std::string(sessionPath), deviceAddress);
+	session->watch(std::bind(&Bluez5ObexProfileBase::handleObexSessionStatus, this, deviceAddress, _1));
+	storeSession(deviceAddress, session);
+	notifySessionStatus(deviceAddress, true);
+	mTransfersMap[transferId] = 0;
+	std::string lowerCaseAddress = convertAddressToLowerCase(source);
+	getOppObserver()->transferConfirmationRequested(transferId, lowerCaseAddress, deviceAddress, device->getName(), mFileName, size);
 }
 
 void Bluez5ProfileOpp::supplyTransferConfirmation(BluetoothOppTransferId transferId, bool accept, BluetoothResultCallback callback)
 {
+	// Only the push still waiting for an answer: not one obexd has given up on, nor another id. An accept for a
+	// dead transfer started a transfer that never completed, and a reject with none pending was a GLib critical.
+	if (!mInvocation || transferId != mPendingTransferId)
+	{
+		callback(BLUETOOTH_ERROR_PARAM_INVALID);
+		return;
+	}
+
 	if (accept)
 	{
-		auto resultCallBack = [this, transferId, callback](BluetoothError /*error*/, uint64_t bytesTransferred,
+		auto resultCallBack = [this, transferId](BluetoothError /*error*/, uint64_t bytesTransferred,
 														   uint64_t /*totalSize*/, bool finished)
 		{
 			if (mTransfersMap[transferId])
@@ -196,19 +227,12 @@ void Bluez5ProfileOpp::supplyTransferConfirmation(BluetoothOppTransferId transfe
 		};
 
 		startTransfer(transferId, mTransferObjPath, resultCallBack, Bluez5ObexTransfer::TransferType::RECEIVING);
-
-		if (mInvocation)
-		{
-			bluez_obex_agent1_complete_authorize_push(mInterface, mInvocation, mFileName.c_str());
-			mInvocation = nullptr;
-		}
+		bluez_obex_agent1_complete_authorize_push(mInterface, mInvocation, mFileName.c_str());
+		mInvocation = nullptr;
+		cancelPendingConfirmation();	// only the timer and the id are left
 	}
 	else
-	{
-		g_dbus_method_invocation_return_dbus_error(mInvocation, BLUEZ5_OBEX_AGENT_ERROR_REJECTED, "User rejected confirmation");
-		mInvocation = nullptr;
-	}
+		cancelPendingConfirmation();
 
 	callback(BLUETOOTH_ERROR_NONE);
-
 }

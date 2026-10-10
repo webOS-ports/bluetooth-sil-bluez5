@@ -25,9 +25,11 @@
 
 const std::string OBEX_AGENT_PATH = "/obex/agent";
 
-#define BLUEZ5_OBEX_AGENT_ERROR_CANCELED        "org.bluez.Error.Canceled"
-#define BLUEZ5_OBEX_AGENT_ERROR_REJECTED        "org.bluez.Error.Rejected"
-#define BLUEZ5_OBEX_AGENT_ERROR_NOT_IMPLEMENTED "org.bluez.Error.NotImplemented"
+// obexd's own namespace: it takes only org.bluez.obex.Error.Rejected as a refusal (obexd/src/manager.c). Any other
+// error, org.bluez.Error.Rejected included, accepted the push under the sender's file name.
+#define BLUEZ5_OBEX_AGENT_ERROR_CANCELED        "org.bluez.obex.Error.Canceled"
+#define BLUEZ5_OBEX_AGENT_ERROR_REJECTED        "org.bluez.obex.Error.Rejected"
+#define BLUEZ5_OBEX_AGENT_ERROR_NOT_IMPLEMENTED "org.bluez.obex.Error.NotImplemented"
 
 Bluez5ObexAgent::Bluez5ObexAgent(Bluez5SIL *sil) :
 	mAgentManagerProxy(nullptr),
@@ -220,49 +222,54 @@ void Bluez5ObexAgent::createAgentInterface(const std::string &objectPath)
 
 }
 
+// Every request is answered: obexd waits up to 60 s for an unanswered one, refusing all other pushes meanwhile.
 gboolean Bluez5ObexAgent::handleAuthorizePush(BluezObexAgent1 *object, GDBusMethodInvocation *invocation,
 	                                      const gchar *arg_path)
 {
+	Bluez5ProfileOpp *oppProfile = nullptr;
+
 	GError *error = 0;
-	BluezObexTransfer1* mTransFerProxy = bluez_obex_transfer1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
-															   "org.bluez.obex", arg_path, NULL, &error);
-	if (error)
+	GObjectRef<BluezObexTransfer1> transferProxy(bluez_obex_transfer1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE,
+	                                             G_DBUS_PROXY_FLAGS_NONE, "org.bluez.obex", arg_path, NULL, &error));
+	g_clear_error(&error);
+	const gchar *sessionPath = transferProxy ? bluez_obex_transfer1_get_session(transferProxy.get()) : nullptr;
+	if (sessionPath)
 	{
-		g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_OBEX_AGENT_ERROR_REJECTED, "User rejected confirmation");
-		g_error_free(error);
-		return TRUE;
+		GObjectRef<BluezObexSession1> sessionProxy(bluez_obex_session1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE,
+		                                           G_DBUS_PROXY_FLAGS_NONE, "org.bluez.obex", sessionPath, NULL, &error));
+		g_clear_error(&error);
+		const gchar *source = sessionProxy ? bluez_obex_session1_get_source(sessionProxy.get()) : nullptr;
+
+		// No adapter while bluez is back but the adapter is not yet created; no OPP when it is not enabled.
+		Bluez5Adapter *adapter = source ? mSIL->getBluez5AdapterbyAddress(source) : nullptr;
+		if (adapter)
+			oppProfile = dynamic_cast<Bluez5ProfileOpp*>(adapter->getProfile(BLUETOOTH_PROFILE_ID_OPP));
 	}
 
-	const gchar * sessionPath = bluez_obex_transfer1_get_session(mTransFerProxy);
-
-
-	BluezObexSession1* mSessionProxy = bluez_obex_session1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
-	                                                           "org.bluez.obex", sessionPath, NULL, &error);
-	if (error)
-	{
-		g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_OBEX_AGENT_ERROR_REJECTED, "User rejected confirmation");
-		g_error_free(error);
-		return TRUE;
-	}
-
-	std::string sourceAddress = bluez_obex_session1_get_source(mSessionProxy);
-
-	auto adapter = mSIL->getBluez5AdapterbyAddress(sourceAddress);
-
-	Bluez5ProfileOpp *oppProfile = dynamic_cast<Bluez5ProfileOpp*> (adapter->getProfile(BLUETOOTH_PROFILE_ID_OPP));
 	if (oppProfile)
 		oppProfile->agentTransferConfirmationRequested(object, invocation, arg_path);
+	else
+		g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_OBEX_AGENT_ERROR_REJECTED, "User rejected confirmation");
 
 	return TRUE;
 }
 
-gboolean Bluez5ObexAgent::handleCancel(BluezObexAgent1 */*object*/, GDBusMethodInvocation *invocation)
+// obexd gave up on the push it asked about (timeout, or the sender cancelled): the pending confirmation is void.
+gboolean Bluez5ObexAgent::handleCancel(BluezObexAgent1 *object, GDBusMethodInvocation *invocation)
 {
-	g_dbus_method_invocation_return_dbus_error(invocation, "org.bluez.Error.Canceled", "User cancelled confirmation");
+	for (auto adapter : mSIL->getAdapters())
+	{
+		auto bluez5Adapter = static_cast<Bluez5Adapter*>(adapter);
+		auto oppProfile = dynamic_cast<Bluez5ProfileOpp*>(bluez5Adapter->getProfile(BLUETOOTH_PROFILE_ID_OPP));
+		if (oppProfile)
+			oppProfile->cancelPendingConfirmation();
+	}
+	bluez_obex_agent1_complete_cancel(object, invocation);
 	return TRUE;
 }
 
-gboolean Bluez5ObexAgent::handleRelease(BluezObexAgent1 */*object*/,GDBusMethodInvocation */*invocation*/)
+gboolean Bluez5ObexAgent::handleRelease(BluezObexAgent1 *object, GDBusMethodInvocation *invocation)
 {
+	bluez_obex_agent1_complete_release(object, invocation);
 	return TRUE;
 }

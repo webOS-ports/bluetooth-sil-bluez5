@@ -27,6 +27,7 @@
 #include <bluetooth-sil-api.h>
 #include "bluez5device.h"
 #include "bluez5advertise.h"
+#include "utils.h"
 
 extern "C" {
 #include "freedesktop-interface.h"
@@ -162,7 +163,7 @@ public:
 	virtual void unregisterAdvertiser(uint8_t advertiserId, AdvertiserStatusCallback callback);
 	virtual void disableAdvertiser(uint8_t advertiserId, AdvertiserStatusCallback callback);
 	BluezAdapter1* getAdapterProxy() { return mAdapterProxy; }
-	std::string getAddress() { return bluez_adapter1_get_address(mAdapterProxy);}
+	std::string getAddress() { return mAdapterProxy ? stringOrEmpty(bluez_adapter1_get_address(mAdapterProxy)) : "";}
 	void updateProfileConnectionStatus(const std::string PROFILE_ID, std::string address, bool isConnected, const std::string &uuid);
 	void updateAvrcpVolume(std::string address, guint16 volume);
 	void recievePassThroughCommand(std::string address, std::string key, std::string state);

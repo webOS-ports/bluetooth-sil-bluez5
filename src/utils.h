@@ -18,9 +18,11 @@
 #define BLUEZ_UTILS_H
 
 #include <locale>
+#include <memory>
 #include <string>
 #include <vector>
 #include <glib.h>
+#include <glib-object.h>
 #include "logging.h"
 #include "utils_mesh.h"
 
@@ -35,5 +37,13 @@ std::vector<std::string>convertArrayStringGVariantToVector(GVariant *iter);
 GVariant* convertVectorToArrayByteGVariant(const std::vector<unsigned char> &v);
 void splitInPathAndName(const std::string &serviceObjectPath, std::string &path, std::string &name);
 void objPathToDevAddress(const std::string &objectPath, std::string &devAddress);
+
+// A string property from a GDBus proxy is NULL when the proxy has no cached value (the object is gone, or the
+// property was never sent). std::string(NULL) throws, which aborts the service from a GLib callback.
+inline std::string stringOrEmpty(const char *value) { return value ? value : ""; }
+
+// Owns one GObject reference, dropped when it goes out of scope.
+template <typename T>
+using GObjectRef = std::unique_ptr<T, decltype([](T *object) { g_object_unref(object); })>;
 
 #endif // BLUEZ_UTILS_H

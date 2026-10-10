@@ -40,12 +40,15 @@ public:
 	void cancelTransfer(BluetoothOppTransferId id, BluetoothResultCallback callback);
 	void supplyTransferConfirmation(BluetoothOppTransferId transferId, bool accept, BluetoothResultCallback callback);
 	void agentTransferConfirmationRequested(BluezObexAgent1 *interface, GDBusMethodInvocation *invocation, const gchar *arg_path);
+	void cancelPendingConfirmation();
 	inline uint64_t nextTransferId() { return ++mTranfserIdCounter; }
 
 private:
 	uint64_t mTranfserIdCounter;
 	BluezObexAgent1 *mInterface;
 	GDBusMethodInvocation *mInvocation;
+	BluetoothOppTransferId mPendingTransferId;
+	guint mConfirmationTimeout;
 	std::string mTransferObjPath;
 	std::string mFileName;
 	std::map <BluetoothOppTransferId, uint64_t> mTransfersMap;
