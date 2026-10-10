@@ -150,14 +150,19 @@ int Bluez5ProfileSpp::registerProfile(spDeviceInfo &deviceInfo, std::string objP
 			g_variant_new_string((deviceInfo->mUuid).c_str()));
 	g_variant_builder_close(&profileBuilder);
 
+	// A server channel takes connections from whoever is in range, and its data goes to the app: BlueZ is asked to
+	// require an authenticated (paired) link and the agent's authorisation. Paired devices are unaffected. An
+	// outgoing (client) link is ours, so it stays as it was.
+	gboolean secure = deviceInfo->mDeviceRole == SERVER ? TRUE : FALSE;
+
 	g_variant_builder_open(&profileBuilder, G_VARIANT_TYPE("{sv}"));
 	g_variant_builder_add (&profileBuilder, "s", "RequireAuthorization");
-	g_variant_builder_add (&profileBuilder, "v", g_variant_new_boolean(FALSE));
+	g_variant_builder_add (&profileBuilder, "v", g_variant_new_boolean(secure));
 	g_variant_builder_close(&profileBuilder);
 
 	g_variant_builder_open(&profileBuilder, G_VARIANT_TYPE("{sv}"));
 	g_variant_builder_add (&profileBuilder, "s", "RequireAuthentication");
-	g_variant_builder_add (&profileBuilder, "v", g_variant_new_boolean(FALSE));
+	g_variant_builder_add (&profileBuilder, "v", g_variant_new_boolean(secure));
 	g_variant_builder_close(&profileBuilder);
 
 	g_variant_builder_open(&profileBuilder, G_VARIANT_TYPE("{sv}"));
@@ -203,8 +208,8 @@ int Bluez5ProfileSpp::registerProfile(spDeviceInfo &deviceInfo, std::string objP
 void Bluez5ProfileSpp::getProperties(const std::string &address, BluetoothPropertiesResultCallback callback)
 {
 	UNUSED(address);
-	UNUSED(callback);
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
+	callback(BLUETOOTH_ERROR_UNSUPPORTED, BluetoothPropertiesList());	// never answered
 }
 
 void Bluez5ProfileSpp::getProperty(const std::string &address, BluetoothProperty::Type type,
