@@ -69,6 +69,7 @@ public:
 	static gboolean onHandleRelease (BluezProfile1 *interface, GDBusMethodInvocation *invocation, gpointer user_data);
 
 private:
+	std::string profileObjectPath(BluetoothSppChannelId channelId) const;
 	class SppDeviceInfo
 	{
 	public:

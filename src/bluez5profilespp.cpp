@@ -31,6 +31,16 @@
 const std::string BLUETOOTH_PROFILE_SPP_UUID = "00001101-0000-1000-8000-00805f9b34fb";
 const std::string BASE_OBJ_PATH = "/bluetooth/profile/serial_port/";
 
+// BlueZ keys external profiles by their object path, for the whole process, while channel ids are counted per
+// adapter: with two adapters both registered ".../serial_port/<id>", and the second got AlreadyExists (an SPP
+// connect between two local adapters failed). The adapter's name keeps them apart.
+std::string Bluez5ProfileSpp::profileObjectPath(BluetoothSppChannelId channelId) const
+{
+	std::string adapterPath = mAdapter->getObjectPath();
+	std::string adapterName = adapterPath.substr(adapterPath.rfind('/') + 1);
+	return BASE_OBJ_PATH + adapterName + "/" + std::to_string(channelId);
+}
+
 Bluez5ProfileSpp::Bluez5ProfileSpp(Bluez5Adapter *adapter):
 	Bluez5ProfileBase(adapter, BLUETOOTH_PROFILE_SPP_UUID), mAdapter(adapter), mConn(0)
 {
@@ -375,7 +385,7 @@ gboolean Bluez5ProfileSpp::handleRequestDisconnection (BluezProfile1 *interface,
 
 	if ((devieInfo->mDeviceRole == CLIENT) && devieInfo->mInterface)
 	{
-		std::string objPath = BASE_OBJ_PATH + std::to_string(devieInfo->mChannelId);
+		std::string objPath = profileObjectPath(devieInfo->mChannelId);
 		auto unRegisterCallback = [this, alive = mLifetime.token()](GAsyncResult *result) {
 			// The profile goes with its adapter, also while this call is out: nothing of it is touched.
 			if (alive.expired())
@@ -509,7 +519,7 @@ void Bluez5ProfileSpp::connectUuid(const std::string &address, const std::string
 		}
 		else
 		{
-			std::string objPath = BASE_OBJ_PATH + std::to_string(channelId);
+			std::string objPath = profileObjectPath(channelId);
 			bluez_profile_manager1_call_unregister_profile_sync(mAdapter->getProfileManager(), objPath.c_str(), NULL, NULL);
 			// The entry went too: it stayed, with its released skeleton, which later paths released again.
 			releaseChannel(channelId);
@@ -652,7 +662,7 @@ BluetoothError Bluez5ProfileSpp::removeChannel(const std::string &uuid)
 
 	if (sppConnectionInfo->mInterface)
 	{
-		std::string objPath = BASE_OBJ_PATH + std::to_string(sppConnectionInfo->mChannelId);
+		std::string objPath = profileObjectPath(sppConnectionInfo->mChannelId);
 		bluez_profile_manager1_call_unregister_profile_sync(mAdapter->getProfileManager(), objPath.c_str(), NULL, NULL);
 		getSppObserver()->channelStateChanged(sppConnectionInfo->mAdapterAddress, sppConnectionInfo->mDeviceAddress, uuid, sppConnectionInfo->mChannelId, false);
 		releaseChannel(sppConnectionInfo->mChannelId);	// read the entry's id after freeing it
@@ -723,7 +733,7 @@ BluetoothError Bluez5ProfileSpp::createSkeletonAndExport(std::string uuid, spDev
 {
 	GError *error = nullptr;
 	UNUSED(uuid);
-	std::string objPath = BASE_OBJ_PATH + std::to_string(channelInfo->mChannelId);
+	std::string objPath = profileObjectPath(channelInfo->mChannelId);
 
 	if (registerProfile(channelInfo, objPath, mAdapter->getProfileManager()))
 	{
