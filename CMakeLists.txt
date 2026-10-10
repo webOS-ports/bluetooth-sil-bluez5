@@ -136,9 +136,18 @@ file(GLOB SOURCES
      src/bluez5meshelement.cpp
      src/bluez5meshmodelconfigclient.cpp
      src/bluez5meshmodelonoffclient.cpp
+     src/meshcomposition.cpp
+     src/leadvfilter.cpp
      )
 
 add_library(bluez5 MODULE ${SOURCES})
 target_link_libraries(bluez5 ${GLIB2_LDFLAGS} ${PMLOG_LDFLAGS}
                              ${GIO2_LDFLAGS} ${GIO-UNIX_LDFLAGS} ${UUID_LDFLAGS})
 install(TARGETS bluez5 DESTINATION ${WEBOS_INSTALL_LIBDIR}/bluetooth-sils)
+
+# Unit tests: off by default, so image builds are unaffected (cmake -DBUILD_TESTING=ON).
+option(BUILD_TESTING "Build the unit tests" OFF)
+if(BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

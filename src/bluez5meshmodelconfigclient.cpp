@@ -20,6 +20,7 @@
 #include "asyncutils.h"
 #include "bluez5profilemesh.h"
 #include "bluez5meshadv.h"
+#include "meshcomposition.h"
 #include "bluez5meshmodelconfigclient.h"
 #include "bluez5adapter.h"
 #include <cstdint>
@@ -481,103 +482,17 @@ const char * Bluez5MeshModelConfigClient::sigModelString(uint16_t sigModelId)
 	}
 }
 
+// Parsed by parseCompositionData() (meshcomposition.cpp), which is unit tested and fuzzed.
 void Bluez5MeshModelConfigClient::compositionReceived(uint8_t *data, uint16_t len,
 											BleMeshCompositionData &compositionData)
 {
-	uint16_t features;
-	int i = 0;
-
-	DEBUG("Received composion:\n");
-
-	// Every read is checked against what the node sent: a body shorter than its 11 header bytes made the
-	// unsigned length wrap, and the loop below read up to 64 KiB past it.
-	if (len < 11)
+	if (!parseCompositionData(data, len, compositionData))
 	{
 		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Composition data too short: %u bytes", len);
 		return;
 	}
-
-	/* skip page -- We only support Page Zero */
-	data++;
-	len--;
-
-	DEBUG("\tCID: %4.4x", get_le16(&data[0]));
-	DEBUG("\tPID: %4.4x", get_le16(&data[2]));
-	DEBUG("\tVID: %4.4x", get_le16(&data[4]));
-	DEBUG("\tCRPL: %4.4x", get_le16(&data[6]));
-
-	compositionData.setCompanyId(get_le16(&data[0]));
-	compositionData.setProductId(get_le16(&data[2]));
-	compositionData.setVersionId(get_le16(&data[4]));
-	compositionData.setNumRplEnteries(get_le16(&data[6]));
-
-	features = get_le16(&data[8]);
-	data += 10;
-	len -= 10;
-
-	DEBUG("\tFeature support:\n");
-	DEBUG("\t\trelay: %s\n", (features & FEATURE_RELAY) ?
-								"yes" : "no");
-	DEBUG("\t\tproxy: %s\n", (features & FEATURE_PROXY) ?
-								"yes" : "no");
-	DEBUG("\t\tfriend: %s\n", (features & FEATURE_FRIEND) ?
-								"yes" : "no");
-	DEBUG("\t\tlpn: %s\n", (features & FEATURE_LPN) ?
-								"yes" : "no");
-
-	BleMeshFeature meshFeatures(features & FEATURE_RELAY, features & FEATURE_PROXY,
-								features & FEATURE_FRIEND, features & FEATURE_LPN);
-
-	compositionData.setFeatures(meshFeatures);
-	std::vector<BleMeshElement> elements;
-
-	while (len >= 4) {	// location, and the SIG and vendor model counts
-		BleMeshElement element;
-		uint8_t m, v;
-
-		DEBUG("\t Element %d:\n", i);
-		DEBUG("\t\tlocation: %4.4x\n", get_le16(data));
-		element.setLoc(get_le16(data));
-		data += 2;
-		len -= 2;
-
-		m = *data++;
-		v = *data++;
-		len -= 2;
-		element.setNumS(m);
-		element.setNumV(v);
-		std::vector<uint32_t> sigModId;
-		std::vector<uint32_t> vendorModId;
-
-		if (m)
-			DEBUG("\t\tSIG defined models:\n");
-
-		while (len >= 2 && m--) {
-			printModId(data, false, "\t\t  ");
-			uint32_t modId = get_le16(data);
-			sigModId.push_back(modId);
-			data += 2;
-			len -= 2;
-		}
-		element.setSigModelIds(sigModId);
-
-		if (v)
-			DEBUG("\t\t Vendor defined models:\n");
-
-		while (len >= 4 && v--) {
-			printModId(data, true, "\t\t  ");
-			uint32_t modId = get_le16(data);
-			modId = get_le16(data) << 16 | modId;
-			vendorModId.push_back(modId);
-			data += 4;
-			len -= 4;
-		}
-		element.setVendorModelIds(vendorModId);
-		elements.push_back(element);
-		i++;
-	}
-	DEBUG("Elements size: %zu", elements.size());
-	compositionData.setElements(elements);
+	DEBUG("Received composition: CID %4.4x PID %4.4x VID %4.4x, %zu elements", compositionData.getCompanyId(),
+	      compositionData.getProductId(), compositionData.getVersionId(), compositionData.getElements().size());
 }
 
 bool Bluez5MeshModelConfigClient::recvData(uint16_t srcAddress, uint16_t destAddress,

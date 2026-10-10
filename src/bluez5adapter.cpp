@@ -19,6 +19,7 @@
 #include "logging.h"
 #include "bluez5adapter.h"
 #include "bluez5device.h"
+#include "leadvfilter.h"
 #include "bluez5agent.h"
 #include "bluez5obexclient.h"
 #include "bluez5obexagent.h"
@@ -1661,86 +1662,22 @@ bool Bluez5Adapter::bluezFilterUsageCriteria(unsigned char mFilterType)
 	return false;
 }
 
-// The filter comes from an app, the data from whatever device advertises: every index is bounded by both. The
-// device's data was indexed up to the filter's length, reading past it for a shorter advertisement, and the mask
-// up to the data's length.
+// The filter comes from an app, the data from whatever device advertises; the matching is in leadvfilter.cpp.
 bool Bluez5Adapter::checkServiceUuid(const BluetoothLeDiscoveryFilter &filter, Bluez5Device *device)
 {
-	auto uuids = device->getUuids();
-	std::string srvcUuidStr = convertToLowerCase(filter.getServiceUuid().getUuid());
-
-	if (!filter.getServiceUuid().getMask().empty())
-	{
-		std::string srvcUuidMasksStr = filter.getServiceUuid().getMask();
-		for (auto &uuid : uuids)
-		{
-			std::string deviceUuid = convertToLowerCase(uuid);
-			if (srvcUuidStr.size() > srvcUuidMasksStr.size() || srvcUuidStr.size() > deviceUuid.size())
-				continue;
-
-			// A mismatch at the last position still returned true.
-			bool isMatching = true;
-			for (size_t j = 0; j < srvcUuidStr.size() && isMatching; j++)
-				if (srvcUuidMasksStr[j] == '1' && srvcUuidStr[j] != deviceUuid[j])
-					isMatching = false;
-
-			if (isMatching)
-				return true;
-		}
-		return false;
-	}
-
-	for (auto &uuid : uuids)
-		if (convertToLowerCase(uuid) == srvcUuidStr)
-			return true;
-	return false;
+	return matchServiceUuid(filter.getServiceUuid().getUuid(), filter.getServiceUuid().getMask(), device->getUuids());
 }
 
 bool Bluez5Adapter::checkServiceData(const BluetoothLeDiscoveryFilter &filter, Bluez5Device *device)
 {
-	std::string srvcData_Uuid = convertToLowerCase(device->getServiceDataUuid());
-	std::string srvcUuidStr = convertToLowerCase(filter.getServiceData().getUuid());
-	if (srvcData_Uuid != srvcUuidStr)
-		return false;
-
-	std::vector<uint8_t> srvcData = filter.getServiceData().getData();
-	std::vector<uint8_t> srvcDeviceData = device->getScanRecord();
-
-	if (filter.getServiceData().getMask().empty())
-		return srvcData == srvcDeviceData;
-
-	std::vector<uint8_t> srvcDataMask = filter.getServiceData().getMask();
-	if (srvcDeviceData.size() < srvcData.size() || srvcDataMask.size() < srvcData.size())
-		return false;
-
-	for (size_t j = 0; j < srvcData.size(); j++)
-		if (srvcDataMask[j] == 1 && srvcData[j] != srvcDeviceData[j])
-			return false;
-	return true;
+	return matchServiceData(filter.getServiceData().getUuid(), filter.getServiceData().getData(),
+	                        filter.getServiceData().getMask(), device->getServiceDataUuid(), device->getScanRecord());
 }
 
 bool Bluez5Adapter::checkManufacturerData(const BluetoothLeDiscoveryFilter &filter, Bluez5Device *device)
 {
-	std::vector<uint8_t> deviceData = device->getManufactureData();
-	if (deviceData.size() <= 2)
-		return false;
-
-	uint16_t manufacturerId = (uint16_t)filter.getManufacturerData().getId();
-	uint16_t devManufacturerId = (uint16_t)((deviceData[0] << 8) | deviceData[1]);
-	if (manufacturerId != devManufacturerId)
-		return false;
-
-	// The payload follows the two id bytes.
-	std::vector<uint8_t> manuData = filter.getManufacturerData().getData();
-	std::vector<uint8_t> manuDataMask = filter.getManufacturerData().getMask();
-	bool masked = !manuDataMask.empty();
-	if (deviceData.size() - 2 < manuData.size() || (masked && manuDataMask.size() < manuData.size()))
-		return false;
-
-	for (size_t j = 0; j < manuData.size(); j++)
-		if ((!masked || manuDataMask[j] == 1) && manuData[j] != deviceData[j + 2])
-			return false;
-	return true;
+	return matchManufacturerData((uint16_t)filter.getManufacturerData().getId(), filter.getManufacturerData().getData(),
+	                             filter.getManufacturerData().getMask(), device->getManufactureData());
 }
 
 Bluez5Device* Bluez5Adapter::findDeviceByObjectPath(const std::string &objectPath)
