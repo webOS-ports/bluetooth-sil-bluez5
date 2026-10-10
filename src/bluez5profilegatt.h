@@ -20,8 +20,11 @@
 #include <unistd.h>
 #include <glib.h>
 #include <gio/gio.h>
+#include <deque>
+#include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <bluetooth-sil-api.h>
 #include "bluez5profilebase.h"
@@ -101,19 +104,9 @@ public:
 	using BluetoothGattProfile::readCharacteristics;
 	using BluetoothGattProfile::readDescriptors;
 	using BluetoothGattProfile::readDescriptor;
-	BluetoothGattCharacteristic readCharacteristic(const std::string &address, const BluetoothUuid& service,
-									 const BluetoothUuid &characteristic);
-	BluetoothGattCharacteristicList readCharacteristics(const std::string &address, const BluetoothUuid& service,
-									const BluetoothUuidList &characteristics, bool &found);
-	BluetoothGattDescriptorList readDescriptors(const std::string &address, const BluetoothUuid& service, const BluetoothUuid &characteristic,
-						const BluetoothUuidList &descriptors, bool &found);
-	BluetoothGattDescriptor readDescriptor(const std::string &address, const BluetoothUuid& service, const BluetoothUuid &characteristic,
-								 const BluetoothUuid &descriptor);
 	GattRemoteService* findService(const std::string &address, const BluetoothUuid& service);
 	GattRemoteCharacteristic* findCharacteristic(GattRemoteService* service, const BluetoothUuid &characteristic);
 	GattRemoteDescriptor* findDescriptor(GattRemoteCharacteristic* characteristic, const BluetoothUuid &descriptor);
-	BluetoothGattDescriptor readDescValue(GattRemoteService *service, GattRemoteCharacteristic* remoteCharacteristic, GattRemoteDescriptor* remoteDescriptor, const BluetoothUuid &descriptor);
-	BluetoothGattCharacteristic readCharValue(GattRemoteService* remoteService, GattRemoteCharacteristic* remoteCharacteristic, const BluetoothUuid &characteristic);
 	void addService(uint16_t appId, const BluetoothGattService &service, BluetoothGattAddCallback callback);
 	void removeService(uint16_t appId, uint16_t serviceId, BluetoothResultCallback callback);
 
@@ -195,6 +188,17 @@ private:
 
 	void setGdbusConnection(GDBusConnection *conn) { mConn = conn; }
 	void registerLocalApplication(BluetoothResultCallback callback, const std::string &objPath, bool unRegisterFirst);
+	void runNextRegistration();
+	// Re-registrations of the server, one at a time: a second one's synchronous UnregisterApplication tore down the
+	// first while BlueZ waited for our GetManagedObjects reply, which the blocked main loop could not send.
+	struct PendingRegistration
+	{
+		BluetoothResultCallback callback;
+		std::string objPath;
+		bool unRegisterFirst;
+	};
+	std::deque<PendingRegistration> mRegistrations;
+	bool mRegistering = false;
 	void createObjectManagers();
 	void removeLocalServices(Bluez5GattLocalService *service);
 	void removeLocalCharacteristics(Bluez5GattLocalService *service);
@@ -216,6 +220,20 @@ private:
 	id_type nextCharId();
 	id_type nextDescId();
 
+	// Reads and writes of remote attributes, asynchronous; each looks the attribute up again when answered.
+	struct ReadCharacteristicsState;
+	struct ReadDescriptorsState;
+	void readRemoteCharacteristic(const std::string &address, const BluetoothUuid &service,
+	                              const BluetoothUuid &characteristic, BluetoothGattReadCharacteristicCallback callback);
+	void readRemoteCharacteristicsStep(std::shared_ptr<ReadCharacteristicsState> state);
+	void readRemoteDescriptor(const std::string &address, const BluetoothUuid &service, const BluetoothUuid &characteristic,
+	                          const BluetoothUuid &descriptor, BluetoothGattReadDescriptorCallback callback);
+	void readRemoteDescriptorsStep(std::shared_ptr<ReadDescriptorsState> state);
+	void writeRemoteCharacteristic(const std::string &address, const BluetoothUuid &service,
+	                               const BluetoothGattCharacteristic &characteristic, BluetoothResultCallback callback);
+	void writeRemoteDescriptor(const std::string &address, const BluetoothUuid &service, const BluetoothUuid &characteristic,
+	                           const BluetoothGattDescriptor &descriptor, BluetoothResultCallback callback);
+
 private:
 	void registerSignalHandlers();
 
@@ -232,7 +250,11 @@ private:
 	void removeRemoteGattDescriptor(const std::string &descriptorObjectPath);
 
 	GattRemoteService* getRemoteGattService(std::string& serviceObjectPath);
-	void updateRemoteDeviceServices();
+	GattRemoteCharacteristic* getRemoteGattCharacteristic(const std::string &characteristicObjectPath);
+	BluetoothGattServiceList deviceServices(const std::string &address);
+	void deleteDeviceServices(const std::string &address);
+	void addExistingObjects();
+	void notifyConnected(const std::string &address, bool connected);
 
 	static void handleObjectAdded(GDBusObjectManager *objectManager, GDBusObject *object,
 									void *user_data);
@@ -246,10 +268,13 @@ private:
 	GDBusObjectManager *mObjectManager;
 
 	typedef std::vector<GattRemoteService*> GattServiceList;
+	// A GATT connection per app and device, keyed by the app's id: the service uses that id as connection id too.
 	std::unordered_map<id_type, std::string> mConnectedDevices;
 	std::unordered_map<id_type, std::unique_ptr <BluezGattLocalApplication>> mGattLocalApplications;
+	// Owns the remote services (and through them their characteristics and descriptors), by device address.
 	std::unordered_map<std::string, GattServiceList> mDeviceServicesMap;
-	std::unordered_map<std::string, BluetoothGattServiceList> mRemoteDeviceServicesMap;
+	// Devices reported connected through the profile observer.
+	std::unordered_set<std::string> mGattConnected;
 };
 
 #endif // BLUEZ5PROFILEGATT_H
