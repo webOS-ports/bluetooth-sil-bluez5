@@ -63,7 +63,7 @@ public:
 	static gboolean handleRequestAuthorization(BluezAgent1 *proxy, GDBusMethodInvocation *invocation,
                                                const gchar *address, gpointer user_data);
 	static gboolean handleAuthorizeService(BluezAgent1 *proxy, GDBusMethodInvocation *invocation,
-                                           const gchar *address, const gchar *service, gpointer user_data);
+                                           const gchar *objectPath, const gchar *service, gpointer user_data);
 	static gboolean handleCancel(BluezAgent1 *proxy, GDBusMethodInvocation *invocation, gpointer user_data);
 	static gboolean handleRelease(BluezAgent1 *proxy, GDBusMethodInvocation *invocation, gpointer user_data);
 

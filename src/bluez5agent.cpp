@@ -320,11 +320,28 @@ gboolean Bluez5Agent::handleCancel(BluezAgent1 */*proxy*/, GDBusMethodInvocation
 	return TRUE;
 }
 
+// bluetoothd asks when a device it does not trust connects to a profile. The service marks devices trusted only on
+// request, so this is asked for nearly every connection of a paired device, and was accepted for every device. Now a
+// device has to be paired, or be pairing with us right now (a profile can connect before Paired is reported).
 gboolean Bluez5Agent::handleAuthorizeService(BluezAgent1 *proxy, GDBusMethodInvocation *invocation,
-                                         const gchar */*address*/, const gchar */*service*/, gpointer /*user_data*/)
+                                         const gchar *objectPath, const gchar *service, gpointer user_data)
 {
-	DEBUG("Agent authorize service method was called");
-	bluez_agent1_complete_authorize_service(proxy, invocation);
+	Bluez5Agent *agent = static_cast<Bluez5Agent*>(user_data);
+	std::string path = objectPath ? objectPath : "";
+
+	bool allowed = agent->findPairingInfoForDevice(path) != nullptr;
+	if (!allowed)
+	{
+		Bluez5Adapter *adapter = agent->mSIL->getBluez5Adapter(path);
+		const Bluez5Device *device = adapter ? adapter->findDeviceByObjectPath(path) : nullptr;
+		allowed = device && device->getPaired();
+	}
+
+	DEBUG("Agent authorize service %s for %s: %s", service ? service : "", path.c_str(), allowed ? "yes" : "no");
+	if (allowed)
+		bluez_agent1_complete_authorize_service(proxy, invocation);
+	else
+		g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_AGENT_ERROR_REJECTED, "Device is not paired");
 	return TRUE;
 }
 
