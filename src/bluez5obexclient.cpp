@@ -28,7 +28,10 @@ Bluez5ObexClient::Bluez5ObexClient(Bluez5Adapter *adapter) :
     mNameWatch(BLUEZ5_OBEX_DBUS_BUS_TYPE, "org.bluez.obex"),
     mAdapter(adapter)
 {
-	DBusUtils::waitForBus(BLUEZ5_OBEX_DBUS_BUS_TYPE, [this](bool available) {
+	// The adapter deletes its client when bluetoothd drops the adapter, which can be before the bus answers.
+	DBusUtils::waitForBus(BLUEZ5_OBEX_DBUS_BUS_TYPE, [this, alive = mLifetime.token()](bool available) {
+		if (alive.expired())
+			return;
 		if (!available) {
 			// register an empty name watch handler
 			mNameWatch.watch([](bool /*available*/) { });
@@ -68,10 +71,18 @@ void Bluez5ObexClient::createProxy()
 
 	DEBUG("Creating proxy for OBEX client ..");
 
-	auto createProxyCallback = [this](GAsyncResult *result) {
+	auto createProxyCallback = [this, alive = mLifetime.token()](GAsyncResult *result) {
 		GError *error = 0;
 
-		mClientProxy = bluez_obex_client1_proxy_new_for_bus_finish(result, &error);
+		BluezObexClient1 *proxy = bluez_obex_client1_proxy_new_for_bus_finish(result, &error);
+		if (alive.expired())
+		{
+			g_clear_error(&error);
+			if (proxy)
+				g_object_unref(proxy);
+			return;
+		}
+		mClientProxy = proxy;
 		if (error)
 		{
 			ERROR(MSGID_FAILED_TO_CREATE_OBEX_CLIENT_PROXY, 0,
