@@ -170,41 +170,51 @@ void Bluez5MeshAdv::updateNetworkId()
 
 BluetoothError Bluez5MeshAdv::attachToken(const std::string &token)
 {
-	std::string::size_type sz = 0;
-	mToken = std::stoull(token, &sz, 0);
+	// From the service's database: std::stoull threw on a token that is not a number, and took the service down.
+	uint64_t parsed = 0;
+	if (!parseMeshToken(token, parsed))
+		return BLUETOOTH_ERROR_PARAM_INVALID;
+	mToken = parsed;
 	DEBUG("attachToken mToken: %" PRIu64, mToken);
-	attach();
-	return BLUETOOTH_ERROR_NONE;
+	return attach();
 }
 
-void Bluez5MeshAdv::attach()
+BluetoothError Bluez5MeshAdv::attach()
 {
 	if (!mNetworkInterface)	// meshd not there: the call went to a NULL proxy and was lost
 	{
 		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Attach: no mesh network interface");
-		return;
+		return BLUETOOTH_ERROR_NOT_ALLOWED;
 	}
 
-	// Its failure is only logged: the SIL API has no event for it (updateNetworkId would store a token of 0).
-	// Nothing of this object is used: finished on the source, as the profile may go with its adapter meanwhile.
-	auto attachCallback = [](GObject *source, GAsyncResult *result) {
+	// Its result goes to the observer (attachResult): it was only logged, and the service went on as if the node
+	// were attached.
+	auto attachCallback = [this, alive = mLifetime.token()](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gchar *node = 0;
 		GVariant *configuration = 0;
 		bluez_mesh_network1_call_attach_finish(BLUEZ_MESH_NETWORK1(source), &node, &configuration, result, &error);
+		BluetoothError status = BLUETOOTH_ERROR_NONE;
 		if (error)
 		{
-			ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Atttach failed: %s", error->message);
+			ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Attach failed: %s", error->message);
 			g_error_free(error);
-			return;
+			status = BLUETOOTH_ERROR_FAIL;
 		}
-		DEBUG("attached node: %s", node);
-		g_free(node);	// both leaked
-		if (configuration)
-			g_variant_unref(configuration);
+		else
+		{
+			DEBUG("attached node: %s", node);
+			g_free(node);	// both leaked
+			if (configuration)
+				g_variant_unref(configuration);
+		}
+		if (alive.expired())	// the profile went with its adapter
+			return;
+		mMesh->getMeshObserver()->attachResult(status, convertAddressToLowerCase(mAdapter->getAddress()));
 	};
 	bluez_mesh_network1_call_attach(mNetworkInterface, BLUEZ_MESH_APP_PATH, mToken, NULL,
 									glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(attachCallback));
+	return BLUETOOTH_ERROR_NONE;
 }
 
 BluetoothError Bluez5MeshAdv::createNetwork()
@@ -219,17 +229,23 @@ BluetoothError Bluez5MeshAdv::createNetwork()
 	GVariant *uuidVar = g_variant_new_from_bytes(G_VARIANT_TYPE_BYTESTRING, bytes, true);
 	g_bytes_unref(bytes);	// the variant holds its own reference: this one leaked
 
-	// Its failure is only logged: the SIL API has no event for it, and the client waits for updateNetworkId.
-	auto createNetworkCallback = [](GObject *source, GAsyncResult *result) {
+	// Its result goes to the observer (createNetworkResult): a refusal was only logged, and the client waited for
+	// a network id that never came.
+	auto createNetworkCallback = [this, alive = mLifetime.token()](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		bluez_mesh_network1_call_create_network_finish(BLUEZ_MESH_NETWORK1(source), result, &error);
+		BluetoothError status = BLUETOOTH_ERROR_NONE;
 		if (error)
 		{
 			ERROR(MSGID_MESH_PROFILE_ERROR, 0, "CreateNetwork failed: %s", error->message);
 			g_error_free(error);
-			return;
+			status = BLUETOOTH_ERROR_FAIL;
 		}
-		DEBUG("Mesh CreateNetwork success\n");
+		else
+			DEBUG("Mesh CreateNetwork success\n");
+		if (alive.expired())	// the profile went with its adapter
+			return;
+		mMesh->getMeshObserver()->createNetworkResult(status, convertAddressToLowerCase(mAdapter->getAddress()));
 	};
 
 	bluez_mesh_network1_call_create_network(mNetworkInterface, BLUEZ_MESH_APP_PATH, uuidVar, NULL, glibAsyncMethodWrapper,

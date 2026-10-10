@@ -83,7 +83,7 @@ public:
 								std::vector<uint32_t> &vendorModelIds);
 	BluetoothError devKeySend(uint16_t destAddress, uint16_t netKeyIndex, uint8_t *msg, uint16_t n);
 	BluetoothError send(uint16_t destAddress, uint16_t appKeyIndex, uint8_t *msg, uint16_t msgLen);
-	void attach();
+	BluetoothError attach();
 	void updateNetworkId();
 	void stopReqTimer();
 	// Whether a received message is the ack of the pending acknowledged setOnOff; it then ends the wait.

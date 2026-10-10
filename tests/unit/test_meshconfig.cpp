@@ -176,3 +176,24 @@ TEST(MeshConfig, WaitTimes)
 	EXPECT_EQ(waitMilliseconds(3, 2000), 3000u);
 	EXPECT_EQ(waitMilliseconds(3000000, 2000), 3600000u);	// was 3e9 in an int32
 }
+
+TEST(MeshConfig, NetworkToken)
+{
+	uint64_t token = 7;
+	EXPECT_TRUE(parseMeshToken("0", token));
+	EXPECT_EQ(token, 0u);
+	EXPECT_TRUE(parseMeshToken("15004514395959625402", token));	// as the service stored one
+	EXPECT_EQ(token, 15004514395959625402u);
+	EXPECT_TRUE(parseMeshToken("18446744073709551615", token));
+	EXPECT_EQ(token, UINT64_MAX);
+	token = 7;
+	EXPECT_FALSE(parseMeshToken("18446744073709551616", token));	// one past: stoull threw
+	EXPECT_FALSE(parseMeshToken("99999999999999999999", token));
+	EXPECT_FALSE(parseMeshToken("", token));
+	EXPECT_FALSE(parseMeshToken("abc", token));	// stoull threw
+	EXPECT_FALSE(parseMeshToken("-1", token));	// stoull took it as UINT64_MAX
+	EXPECT_FALSE(parseMeshToken(" 1", token));
+	EXPECT_FALSE(parseMeshToken("12x", token));	// stoull stopped at the x
+	EXPECT_FALSE(parseMeshToken("000000000000000000001", token));	// 21 digits
+	EXPECT_EQ(token, 7u);	// left alone on failure
+}

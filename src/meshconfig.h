@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include <bluetooth-sil-api.h>
 
@@ -86,6 +87,10 @@ bool isOnOffStatusFor(uint32_t opcode, uint16_t src, uint16_t dest);
 // A wait from the LS2 client (keyRefresh waitTimeout), in seconds, clamped to [0, 3600]. Negative values slept for
 // about 136 years, large ones overflowed when made milliseconds.
 int32_t clampWaitSeconds(int32_t seconds);
+
+// A mesh network token as the service stores it (std::to_string of the 64-bit token meshd gave): decimal digits
+// only, within 64 bits. std::stoull threw on anything else, which took the service down, and took "-1" and " 1".
+bool parseMeshToken(const std::string &token, uint64_t &out);
 
 // The timer for a wait in seconds, in milliseconds; defaultMs when the wait is 0 or less.
 unsigned int waitMilliseconds(int32_t seconds, unsigned int defaultMs);

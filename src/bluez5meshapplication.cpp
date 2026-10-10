@@ -61,13 +61,17 @@ gboolean Bluez5MeshApplication::handleJoinComplete(BluezMeshApplication1 *object
 	meshAdv->mToken = argToken;
 	DEBUG("handleJoinCompletem mToken: %" PRIu64, meshAdv->mToken);
 	bluez_mesh_application1_complete_join_complete(object, invocation);
-	meshAdv->attach();
+	BluetoothError error = meshAdv->attach();
 	meshAdv->updateNetworkId();
+	if (error != BLUETOOTH_ERROR_NONE)	// not started; a started attach reports its own result
+		meshAdv->mMesh->getMeshObserver()->attachResult(error,
+			convertAddressToLowerCase(meshAdv->mAdapter->getAddress()));
 	return true;
 }
 
-// Answered: returning TRUE leaves the invocation to the handler, and it leaked. The failure is only logged: the
-// SIL API has no event for it.
+// Answered: returning TRUE leaves the invocation to the handler, and it leaked. Only logged: meshd calls
+// JoinFailed for a Join(), which this SIL never makes (it creates its network with CreateNetwork, whose failure is
+// the reply to that call and goes to createNetworkResult).
 gboolean Bluez5MeshApplication::handleJoinFailed(BluezMeshApplication1 *object,
 										GDBusMethodInvocation *invocation,
 										const gchar *argReason, gpointer /*userData*/)

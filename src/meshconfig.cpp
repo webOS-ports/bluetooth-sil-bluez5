@@ -151,3 +151,21 @@ unsigned int waitMilliseconds(int32_t seconds, unsigned int defaultMs)
 		return defaultMs;
 	return (unsigned int)clamped * 1000u;
 }
+
+bool parseMeshToken(const std::string &token, uint64_t &out)
+{
+	if (token.empty() || token.size() > 20)	// UINT64_MAX has 20 digits
+		return false;
+	uint64_t value = 0;
+	for (char c : token)
+	{
+		if (c < '0' || c > '9')
+			return false;
+		uint64_t digit = static_cast<uint64_t>(c - '0');
+		if (value > (UINT64_MAX - digit) / 10)
+			return false;
+		value = value * 10 + digit;
+	}
+	out = value;
+	return true;
+}
