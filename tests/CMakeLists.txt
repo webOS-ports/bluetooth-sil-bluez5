@@ -16,14 +16,14 @@
 
 #
 # Unit tests for what the SIL parses from remote devices without a bus: Composition Data from mesh nodes, the
-# LE scan filter matchers, OBEX listing times and MPRIS times. They link those sources alone, and GoogleTest
-# from the sysroot.
+# LE scan filter matchers, OBEX listing times, OBEX paths and received file names, D-Bus object paths and MPRIS
+# times. They link those sources alone, and GoogleTest from the sysroot.
 
 find_library(GTEST_LIBRARY gtest REQUIRED)
 find_library(GTEST_MAIN_LIBRARY gtest_main REQUIRED)
 
 set(PARSER_SOURCES ${PROJECT_SOURCE_DIR}/src/meshcomposition.cpp ${PROJECT_SOURCE_DIR}/src/leadvfilter.cpp
-    ${PROJECT_SOURCE_DIR}/src/obextime.cpp ${PROJECT_SOURCE_DIR}/src/dbuspath.cpp)
+    ${PROJECT_SOURCE_DIR}/src/obextime.cpp ${PROJECT_SOURCE_DIR}/src/dbuspath.cpp ${PROJECT_SOURCE_DIR}/src/obexpaths.cpp)
 
 file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/unit/*.cpp)
 add_executable(bluez5-sil-tests ${TEST_SOURCES} ${PARSER_SOURCES})

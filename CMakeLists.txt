@@ -139,6 +139,7 @@ file(GLOB SOURCES
      src/leadvfilter.cpp
      src/obextime.cpp
      src/dbuspath.cpp
+     src/obexpaths.cpp
      )
 
 add_library(bluez5 MODULE ${SOURCES})
