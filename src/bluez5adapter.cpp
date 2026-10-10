@@ -325,7 +325,9 @@ bool Bluez5Adapter::addPropertyFromVariant(BluetoothPropertiesList& properties, 
 	}
 	else if (key == "DeviceType")
 	{
-		BluetoothDeviceType typeOfDevice = (BluetoothDeviceType)g_variant_get_uint32(valueVar);
+		// As a uint32_t, like the device's own (bluez5device.cpp): the service reads it with getValue<uint32_t>(),
+		// which throws for a value stored as BluetoothDeviceType.
+		uint32_t typeOfDevice = g_variant_get_uint32(valueVar);
 		properties.push_back(BluetoothProperty(BluetoothProperty::Type::TYPE_OF_DEVICE, typeOfDevice));
 		changed = true;
 	}
