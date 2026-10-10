@@ -49,7 +49,7 @@ add_test(NAME bluez5-sil-glib COMMAND bluez5-sil-glib-tests)
 # libFuzzer targets (clang only, -DBUILD_FUZZING=ON).
 option(BUILD_FUZZING "Build the libFuzzer targets (clang)" OFF)
 if(BUILD_FUZZING)
-    foreach(name meshcomposition leadvfilter)
+    foreach(name meshcomposition leadvfilter obexpaths gattlocal meshconfig)
         add_executable(fuzz-${name} fuzz/fuzz_${name}.cpp ${PROJECT_SOURCE_DIR}/src/${name}.cpp)
         target_include_directories(fuzz-${name} PRIVATE ${PROJECT_SOURCE_DIR}/src)
         target_compile_options(fuzz-${name} PRIVATE -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all)
