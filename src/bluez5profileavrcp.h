@@ -19,6 +19,7 @@
 
 #include <bluetooth-sil-api.h>
 #include <bluez5profilebase.h>
+#include "avrcpdevices.h"
 #include <map>
 #include <string>
 
@@ -69,14 +70,13 @@ public:
 	void updateRemoteFeatures(uint8_t features, const std::string &role, const std::string &address);
 	void updateSupportedNotificationEvents(uint16_t notificationEvents, const std::string &address);
 	void addressedPlayerChanged(const std::string &playerPath);
-	const std::string getDeviceObjPath();
 	void addMediaPlayer(GDBusObject *object);
 	void removeMediaPlayer(const std::string &playerPath);
-	std::string getConnectedDeviceAddress() { return mConnectedDeviceAddress ; }
 	bool isDeviceConnected(const std::string &address) const;
 	std::string getAdapterAddress();
 	BluetoothAvrcpStatusObserver* getAvrcpObserver() { return BluetoothAvrcpProfile::getAvrcpObserver(); }
-	void updatePlayerInfo();
+	// The players of one device, reported under that device.
+	void updatePlayerInfo(const std::string &address);
 	void notifyMediaPlayStatus(const BluetoothMediaPlayStatus &playStatus,
 			BluetoothResultCallback callback) override;
 
@@ -94,23 +94,18 @@ public:
 private:
 	BluetoothAvrcpRequestId generateMetaDataRequestId() { return ++mMetaDataRequestId; }
 	BluetoothAvrcpRequestId generateMediaPlayStatusRequestId() { return ++mMediaPlayStatusRequestId; }
+	Bluez5MediaPlayer *findMediaPlayer(const std::string &playerPath) const;
+	// The addressed player of a device connected in the controller role, or NULL.
+	Bluez5MediaPlayer *controllerPlayer(const std::string &address) const;
 
 private:
 	BluetoothAvrcpRequestId mMetaDataRequestId;
 	BluetoothAvrcpRequestId mMediaPlayStatusRequestId;
-	/* TRUE if connected as controller */
-	bool mConnectedController;
-	/* TRUE if connected as target */
-	bool mConnectedTarget;
-	/* TRUE if either of the roles is connected. FALSE if both the roles are disconnected*/
-	bool mConnected;
-	std::string mConnectedDeviceAddress;
-	// Roles per device (upper-case address): {controller, target}. The two flags above are "any device"; with
-	// one flag pair for all devices, A as target and B as controller hid A's disconnect.
-	std::map<std::string, std::pair<bool, bool>> mDeviceRoles;
+	// Roles and addressed player per device. Calls that name no device (browsing, player application settings)
+	// go to the device whose player was addressed last.
+	AvrcpDevices mDevices;
 	GDBusObjectManager *mObjectManager;
 	std::list<Bluez5MediaPlayer *> mMediaPlayerList;
-	Bluez5MediaPlayer *mAddressedMediaPlayer;
 	guint mWatcherId;
 };
 

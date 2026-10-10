@@ -61,6 +61,7 @@ public:
 
 	/* AVRCP CT helper functions called from AVRCP profile class */
 	std::string getPlayerObjPath() const { return mPlayerInfo.getPath(); }
+	const std::string &getDeviceAddress() const { return mDeviceAddress; }
 	bool getAddressed() const { return mPlayerInfo.getAddressed(); }
 	BluetoothPlayerInfo getPlayerInfo() const { return mPlayerInfo; }
 	void getAllProperties();

@@ -361,7 +361,7 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 			if (changed)
 			{
 				DEBUG("Updating player info");
-				mAvrcp->updatePlayerInfo();
+				mAvrcp->updatePlayerInfo(mDeviceAddress);
 			}
 		}
 		else
