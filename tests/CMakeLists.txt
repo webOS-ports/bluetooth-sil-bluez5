@@ -15,13 +15,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 #
-# Unit tests for what the SIL parses from remote devices without a bus: Composition Data from mesh nodes and the
-# LE scan filter matchers. They link those sources alone, and GoogleTest from the sysroot.
+# Unit tests for what the SIL parses from remote devices without a bus: Composition Data from mesh nodes, the
+# LE scan filter matchers and OBEX listing times. They link those sources alone, and GoogleTest from the sysroot.
 
 find_library(GTEST_LIBRARY gtest REQUIRED)
 find_library(GTEST_MAIN_LIBRARY gtest_main REQUIRED)
 
-set(PARSER_SOURCES ${PROJECT_SOURCE_DIR}/src/meshcomposition.cpp ${PROJECT_SOURCE_DIR}/src/leadvfilter.cpp)
+set(PARSER_SOURCES ${PROJECT_SOURCE_DIR}/src/meshcomposition.cpp ${PROJECT_SOURCE_DIR}/src/leadvfilter.cpp
+    ${PROJECT_SOURCE_DIR}/src/obextime.cpp)
 
 file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/unit/*.cpp)
 add_executable(bluez5-sil-tests ${TEST_SOURCES} ${PARSER_SOURCES})

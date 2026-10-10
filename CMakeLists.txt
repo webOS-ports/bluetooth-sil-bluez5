@@ -138,6 +138,7 @@ file(GLOB SOURCES
      src/bluez5meshmodelonoffclient.cpp
      src/meshcomposition.cpp
      src/leadvfilter.cpp
+     src/obextime.cpp
      )
 
 add_library(bluez5 MODULE ${SOURCES})

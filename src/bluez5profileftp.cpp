@@ -17,6 +17,7 @@
 #include <memory.h>
 
 #include "bluez5profileftp.h"
+#include "obextime.h"
 #include "bluez5adapter.h"
 #include "bluez5obexclient.h"
 #include "bluez5obexsession.h"
@@ -256,35 +257,6 @@ static uint8_t decodePermissionString(const std::string &str)
 	return permission;
 }
 
-/**
- * Bluez encodes the times in the format "yyyymmddThhmmssZ" where T and Z are delimiters.
- */
-static time_t decodeTimeString(const std::string &str)
-{
-	struct tm t;
-	memset(&t, 0, sizeof(struct tm));
-
-	sscanf(str.c_str(), "%4d%2d%2dT%2d%2d%2dZ",
-		   &t.tm_year, &t.tm_mon, &t.tm_mday,
-		   &t.tm_hour, &t.tm_min, &t.tm_sec);
-
-	// tm_year counts the years from 1900 onwards
-	t.tm_year = abs(t.tm_year - 1900);
-
-	// We have to align the time ranges with the time we got from
-	// bluez. struct tm normally has a range from 0 - ... and we
-	// need to respect that here to get proper values.
-	if (t.tm_mon > 0)
-		t.tm_mon -= 1;
-	if (t.tm_hour > 0)
-		t.tm_hour -= 1;
-	if (t.tm_min > 0)
-		t.tm_min -= 1;
-	if (t.tm_sec > 0)
-		t.tm_sec -= 1;
-
-	return mktime(&t);
-}
 
 std::vector<BluetoothFtpElement> Bluez5ProfileFtp::buildElementList(GVariant *entries)
 {
@@ -340,17 +312,17 @@ std::vector<BluetoothFtpElement> Bluez5ProfileFtp::buildElementList(GVariant *en
 			else if (key == "Modified")
 			{
 				std::string modifiedTime = g_variant_get_string(value, NULL);
-				currentElement.setModifiedTime(decodeTimeString(modifiedTime));
+				currentElement.setModifiedTime(decodeObexTime(modifiedTime));
 			}
 			else if (key == "Accessed")
 			{
 				std::string accessedTime = g_variant_get_string(value, NULL);
-				currentElement.setAccessedTime(decodeTimeString(accessedTime));
+				currentElement.setAccessedTime(decodeObexTime(accessedTime));
 			}
 			else if (key == "Created")
 			{
 				std::string createdTime = g_variant_get_string(value, NULL);
-				currentElement.setCreatedTime(decodeTimeString(createdTime));
+				currentElement.setCreatedTime(decodeObexTime(createdTime));
 			}
 
 			g_variant_unref(value);
