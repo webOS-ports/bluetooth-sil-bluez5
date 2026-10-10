@@ -50,11 +50,16 @@ std::string convertToUpperCase(const std::string &input)
 	return output;
 }
 
+// Both take what a remote device sent, through BlueZ: anything but the expected type (or NULL) is an empty
+// vector. g_variant_get refused the mismatch with a critical and left the iterator uninitialised, which was read.
 std::vector<unsigned char>convertArrayByteGVariantToVector(GVariant *iter)
 {
-	GVariantIter *valueIter;
+	GVariantIter *valueIter = nullptr;
 	guchar valueByte;
 	std::vector<unsigned char> value;
+
+	if (!iter || !g_variant_is_of_type(iter, G_VARIANT_TYPE_BYTESTRING))
+		return value;
 
 	g_variant_get (iter,
                    "ay",
@@ -76,9 +81,12 @@ std::vector<unsigned char>convertArrayByteGVariantToVector(GVariant *iter)
 
 std::vector<std::string>convertArrayStringGVariantToVector(GVariant *iter)
 {
-	GVariantIter *valueIter;
+	GVariantIter *valueIter = nullptr;
 	char *valueByte;
 	std::vector<std::string> value;
+
+	if (!iter || !g_variant_is_of_type(iter, G_VARIANT_TYPE_STRING_ARRAY))
+		return value;
 
 	g_variant_get (iter,
                    "as",

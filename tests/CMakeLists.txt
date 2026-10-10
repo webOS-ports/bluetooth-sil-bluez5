@@ -16,7 +16,8 @@
 
 #
 # Unit tests for what the SIL parses from remote devices without a bus: Composition Data from mesh nodes, the
-# LE scan filter matchers and OBEX listing times. They link those sources alone, and GoogleTest from the sysroot.
+# LE scan filter matchers, OBEX listing times and MPRIS times. They link those sources alone, and GoogleTest
+# from the sysroot.
 
 find_library(GTEST_LIBRARY gtest REQUIRED)
 find_library(GTEST_MAIN_LIBRARY gtest_main REQUIRED)
@@ -29,6 +30,15 @@ add_executable(bluez5-sil-tests ${TEST_SOURCES} ${PARSER_SOURCES})
 target_include_directories(bluez5-sil-tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(bluez5-sil-tests ${GTEST_MAIN_LIBRARY} ${GTEST_LIBRARY} pthread)
 add_test(NAME bluez5-sil-unit COMMAND bluez5-sil-tests)
+
+# Helpers that need GLib (and the SIL's logging): source wrappers and the GVariant array conversions.
+file(GLOB GLIB_TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/glib/*.cpp)
+add_executable(bluez5-sil-glib-tests ${GLIB_TEST_SOURCES}
+    ${PROJECT_SOURCE_DIR}/src/asyncutils.cpp ${PROJECT_SOURCE_DIR}/src/utils.cpp)
+target_include_directories(bluez5-sil-glib-tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(bluez5-sil-glib-tests ${GTEST_MAIN_LIBRARY} ${GTEST_LIBRARY}
+    ${GLIB2_LDFLAGS} ${GIO2_LDFLAGS} ${PMLOG_LDFLAGS} pthread)
+add_test(NAME bluez5-sil-glib COMMAND bluez5-sil-glib-tests)
 
 # libFuzzer targets (clang only, -DBUILD_FUZZING=ON).
 option(BUILD_FUZZING "Build the libFuzzer targets (clang)" OFF)

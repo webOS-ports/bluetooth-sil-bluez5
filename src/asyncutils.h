@@ -77,6 +77,11 @@ private:
 };
 
 void glibAsyncMethodWrapper(GObject *sourceObject, GAsyncResult *result, gpointer user_data);
+// For g_timeout_add(..., glibSourceMethodWrapper, new GlibSourceFunctionWrapper(f)): the wrapper is freed when f
+// returns false. A source removed before that leaks it; glibTimeoutAdd does not.
 gboolean glibSourceMethodWrapper(gpointer user_data);
+
+// A timeout that runs func until it returns false, owning it: freed when the source ends or is removed.
+guint glibTimeoutAdd(guint interval, GlibSourceFunction func);
 
 #endif // ASYNCUTILS_H
