@@ -25,6 +25,7 @@
 #include <bluetooth-sil-api.h>
 
 #include "bluez5profilebase.h"
+#include "obexpush.h"
 
 class Bluez5Adapter;
 class Bluez5Device;
@@ -68,7 +69,7 @@ private:
 	Bluez5ObexSession* findSession(const std::string &address);
 	Bluez5ObexTransfer* findTransfer(BluetoothFtpTransferId id);
 	std::vector<BluetoothFtpElement> buildElementList(GVariant *entries);
-	void startTransfer(BluetoothFtpTransferId id, const std::string &objectPath, BluetoothFtpTransferResultCallback callback);
+	void startTransfer(BluetoothFtpTransferId id, const std::string &objectPath, const ObexPeer &peer, BluetoothFtpTransferResultCallback callback);
 	void updateActiveTransfer(BluetoothFtpTransferId id, Bluez5ObexTransfer *transfer, BluetoothFtpTransferResultCallback callback);
 	void removeTransfer(BluetoothFtpTransferId id);
 

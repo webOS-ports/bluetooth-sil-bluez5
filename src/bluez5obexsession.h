@@ -20,6 +20,8 @@
 #include <string>
 #include <functional>
 
+#include "obexpush.h"
+
 extern "C" {
 #include "freedesktop-interface.h"
 #include "bluez-interface.h"
@@ -46,7 +48,9 @@ public:
 		SYNC
 	};
 
-	Bluez5ObexSession(Bluez5ObexClient *client, Type type, const std::string &objectPath, const std::string &deviceAddress);
+	// peer: the obexd that made the session (it answered CreateSession, or asked about the push).
+	Bluez5ObexSession(Bluez5ObexClient *client, Type type, const std::string &objectPath, const std::string &deviceAddress,
+	                  const ObexPeer &peer);
 	~Bluez5ObexSession();
 
 	Bluez5ObexSession(const Bluez5ObexSession&) = delete;
@@ -55,6 +59,8 @@ public:
 	Type getType() const { return mType; }
 	std::string getDeviceAddress() const { return mDeviceAddress; }
 	std::string getObjectPath() const { return mObjectPath; }
+	// The obexd the session lives in, for proxies of its objects. Invalid when the session is not.
+	ObexPeer getPeer() const;
 
 	BluezObexFileTransfer1* getFileTransferProxy() const { return mFileTransferProxy; }
 
@@ -76,6 +82,7 @@ private:
 	Type mType;
 	std::string mObjectPath;
 	std::string mDeviceAddress;
+	std::string mBusName;
 	BluezObexSession1 *mSessionProxy;
 	BluezObexFileTransfer1 *mFileTransferProxy;
 	BluezObexObjectPush1 *mObjectPushProxy;

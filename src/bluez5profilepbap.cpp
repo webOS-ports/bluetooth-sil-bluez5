@@ -779,7 +779,7 @@ void Bluez5ProfilePbap::pullvCard(const std::string &address, const std::string 
             return;
         }
 
-        startTransfer(std::string(objectPath), callback, Bluez5ObexTransfer::TransferType::RECEIVING);
+        startTransfer(std::string(objectPath), obexPeerOfProxy(source), callback, Bluez5ObexTransfer::TransferType::RECEIVING);
         g_free(objectPath);
     };
 
@@ -856,28 +856,29 @@ void Bluez5ProfilePbap::pullPhoneBook(const std::string &address,const std::stri
 
         std::string path(objectPath);
         g_free(objectPath);
+        ObexPeer peer = obexPeerOfProxy(source);
         callback(BLUETOOTH_ERROR_NONE, path);
-        startPhoneBookTransfer(path,address,Bluez5ObexTransfer::TransferType::RECEIVING);
+        startPhoneBookTransfer(path,peer,address,Bluez5ObexTransfer::TransferType::RECEIVING);
     };
 
     bluez_obex_phonebook_access1_call_pull_all(phonebookProxy,destinationFile.c_str(),setPhoneBookFilters(supportedVcardVersion, vCardFilters, startIndex, maxCount),
                                         NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(getPhoneBookCallback));
 }
 
-void Bluez5ProfilePbap::startPhoneBookTransfer(const std::string &objectPath, const std::string &address ,Bluez5ObexTransfer::TransferType type)
+void Bluez5ProfilePbap::startPhoneBookTransfer(const std::string &objectPath, const ObexPeer &peer, const std::string &address ,Bluez5ObexTransfer::TransferType type)
 {
     // NOTE: ownership of the transfer object is passed to updateActiveTransfer which
     // will delete it once there is nothing to left to do with it
-    Bluez5ObexTransfer *transfer = new Bluez5ObexTransfer(std::string(objectPath), type);
+    Bluez5ObexTransfer *transfer = new Bluez5ObexTransfer(std::string(objectPath), peer, type);
     mTransfersMap.insert({std::string(objectPath), transfer});
     transfer->watch(std::bind(&Bluez5ProfilePbap::monitorTransfer, this, objectPath,address,transfer));
 }
 
-void Bluez5ProfilePbap::startTransfer(const std::string &objectPath, BluetoothResultCallback callback, Bluez5ObexTransfer::TransferType type)
+void Bluez5ProfilePbap::startTransfer(const std::string &objectPath, const ObexPeer &peer, BluetoothResultCallback callback, Bluez5ObexTransfer::TransferType type)
 {
     // NOTE: ownership of the transfer object is passed to updateActiveTransfer which
     // will delete it once there is nothing to left to do with it
-    Bluez5ObexTransfer *transfer = new Bluez5ObexTransfer(std::string(objectPath), type);
+    Bluez5ObexTransfer *transfer = new Bluez5ObexTransfer(std::string(objectPath), peer, type);
     mTransfersMap.insert({std::string(objectPath), transfer});
     transfer->watch(std::bind(&Bluez5ProfilePbap::updateActiveTransfer, this, objectPath, transfer, callback));
 }

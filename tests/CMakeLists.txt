@@ -38,10 +38,12 @@ target_include_directories(bluez5-sil-tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(bluez5-sil-tests ${GTEST_MAIN_LIBRARY} ${GTEST_LIBRARY} pthread)
 add_test(NAME bluez5-sil-unit COMMAND bluez5-sil-tests)
 
-# Helpers that need GLib (and the SIL's logging): source wrappers and the GVariant array conversions.
+# Helpers that need GLib (and the SIL's logging): source wrappers, the GVariant array conversions, the bus signals
+# that end an OBEX session, and the properties an incoming push is decided on.
 file(GLOB GLIB_TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/glib/*.cpp)
 add_executable(bluez5-sil-glib-tests ${GLIB_TEST_SOURCES}
-    ${PROJECT_SOURCE_DIR}/src/asyncutils.cpp ${PROJECT_SOURCE_DIR}/src/utils.cpp)
+    ${PROJECT_SOURCE_DIR}/src/asyncutils.cpp ${PROJECT_SOURCE_DIR}/src/utils.cpp
+    ${PROJECT_SOURCE_DIR}/src/dbussignals.cpp ${PROJECT_SOURCE_DIR}/src/obexpush.cpp)
 target_include_directories(bluez5-sil-glib-tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(bluez5-sil-glib-tests ${GTEST_MAIN_LIBRARY} ${GTEST_LIBRARY}
     ${GLIB2_LDFLAGS} ${GIO2_LDFLAGS} ${PMLOG_LDFLAGS} pthread)

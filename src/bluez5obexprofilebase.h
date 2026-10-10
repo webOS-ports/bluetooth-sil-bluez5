@@ -63,7 +63,7 @@ protected:
 	const Bluez5ObexSession* findSession(const std::string &address) const;
 	const Bluez5ObexSession* findSessionByPropertiesProxy(GObject *propertiesProxy) const;
 	void handleFailedToCreateSession(const std::string &address, BluetoothResultCallback callback);
-	void startTransfer(BluetoothFtpTransferId id, const std::string &objectPath, BluetoothOppTransferResultCallback callback, Bluez5ObexTransfer::TransferType type);
+	void startTransfer(BluetoothFtpTransferId id, const std::string &objectPath, const ObexPeer &peer, BluetoothOppTransferResultCallback callback, Bluez5ObexTransfer::TransferType type);
 	void updateActiveTransfer(BluetoothFtpTransferId id, Bluez5ObexTransfer *transfer, BluetoothOppTransferResultCallback callback);
 	void removeTransfer(BluetoothFtpTransferId id);
 	Bluez5ObexTransfer* findTransfer(BluetoothFtpTransferId id);

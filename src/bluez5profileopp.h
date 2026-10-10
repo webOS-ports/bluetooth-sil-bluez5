@@ -23,6 +23,7 @@
 #include <bluetooth-sil-api.h>
 #include <bluez5obexprofilebase.h>
 #include "bluez5profilebase.h"
+#include "obexpush.h"
 
 class Bluez5Adapter;
 class Bluez5Device;
@@ -39,7 +40,8 @@ public:
 	BluetoothOppTransferId pushFile(const std::string &address, const std::string &sourcePath, BluetoothOppTransferResultCallback callback);
 	void cancelTransfer(BluetoothOppTransferId id, BluetoothResultCallback callback);
 	void supplyTransferConfirmation(BluetoothOppTransferId transferId, bool accept, BluetoothResultCallback callback);
-	void agentTransferConfirmationRequested(BluezObexAgent1 *interface, GDBusMethodInvocation *invocation, const gchar *arg_path);
+	void agentTransferConfirmationRequested(BluezObexAgent1 *interface, GDBusMethodInvocation *invocation,
+	                                        const ObexPushRequest &request, const ObexPeer &peer);
 	void cancelPendingConfirmation();
 	inline uint64_t nextTransferId() { return ++mTranfserIdCounter; }
 
@@ -47,6 +49,7 @@ private:
 	uint64_t mTranfserIdCounter;
 	BluezObexAgent1 *mInterface;
 	GDBusMethodInvocation *mInvocation;
+	ObexPeer mPushPeer;	// the obexd asking; its connection is borrowed from mInvocation, valid while that is
 	BluetoothOppTransferId mPendingTransferId;
 	guint mConfirmationTimeout;
 	std::string mTransferObjPath;

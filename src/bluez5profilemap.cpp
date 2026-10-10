@@ -20,7 +20,6 @@
 #include "bluez5obexclient.h"
 #include "asyncutils.h"
 #include "utils.h"
-#include "bluez5busconfig.h"
 #include "obexpaths.h"
 
 const std::string BLUETOOTH_PROFILE_MAS_UUID = "00001132-0000-1000-8000-00805f9b34fb";
@@ -553,7 +552,7 @@ void Bluez5ProfileMap::getMessage(const std::string &sessionKey, const std::stri
 
     std::string objectPath = session->getObjectPath() + "/" + messageHandle;
 
-    BluezObexMessage1 *objectMessageProxy = createMessageHandleProxyUsingPath(objectPath);
+    BluezObexMessage1 *objectMessageProxy = createMessageHandleProxyUsingPath(session->getPeer(), objectPath);
 
     if (!objectMessageProxy)
     {
@@ -590,7 +589,7 @@ void Bluez5ProfileMap::getMessage(const std::string &sessionKey, const std::stri
             return;
         }
 
-        startTransfer(std::string(objectPath), callback, Bluez5ObexTransfer::TransferType::RECEIVING);
+        startTransfer(std::string(objectPath), obexPeerOfProxy(source), callback, Bluez5ObexTransfer::TransferType::RECEIVING);
         g_free(objectPath);	// leaked on every message
     };
     // The pending call keeps its own reference on the proxy.
@@ -599,13 +598,16 @@ void Bluez5ProfileMap::getMessage(const std::string &sessionKey, const std::stri
     g_object_unref(objectMessageProxy);
 }
 
-BluezObexMessage1* Bluez5ProfileMap::createMessageHandleProxyUsingPath(const std::string &objectPath)
+BluezObexMessage1* Bluez5ProfileMap::createMessageHandleProxyUsingPath(const ObexPeer &peer, const std::string &objectPath)
 {
     GError *error = 0;
     BluezObexMessage1 *objectMessageProxy = NULL;
-    // Its cached properties are not read: no synchronous GetAll for it.
-    objectMessageProxy = bluez_obex_message1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES,
-                                                                        "org.bluez.obex", objectPath.c_str(), NULL, &error);
+    if (!peer.isValid())
+        return NULL;
+    // Its cached properties are not read: no GetAll for it. On the session's obexd by its unique name: made without
+    // a call (on the well-known name the bus was asked, synchronously, who owns it).
+    objectMessageProxy = bluez_obex_message1_proxy_new_sync(peer.connection, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES,
+                                                            peer.name.c_str(), objectPath.c_str(), NULL, &error);
     if (error)
     {
         ERROR(MSGID_FAILED_TO_CREATE_OBEX_MESSAGE_PROXY, 0,
@@ -616,20 +618,20 @@ BluezObexMessage1* Bluez5ProfileMap::createMessageHandleProxyUsingPath(const std
     return objectMessageProxy;
 }
 
-void Bluez5ProfileMap::startTransfer(const std::string &objectPath, BluetoothResultCallback callback, Bluez5ObexTransfer::TransferType type)
+void Bluez5ProfileMap::startTransfer(const std::string &objectPath, const ObexPeer &peer, BluetoothResultCallback callback, Bluez5ObexTransfer::TransferType type)
 {
       // NOTE: ownership of the transfer object is passed to updateActiveTransfer which
       // will delete it once there is nothing to left to do with it
-      Bluez5ObexTransfer *transfer = new Bluez5ObexTransfer(std::string(objectPath), type);
+      Bluez5ObexTransfer *transfer = new Bluez5ObexTransfer(std::string(objectPath), peer, type);
       mTransfersMap.insert({std::string(objectPath), transfer});
       transfer->watch(std::bind(&Bluez5ProfileMap::updateActiveTransfer, this, objectPath, transfer, callback));
 }
 
-void Bluez5ProfileMap::startPushTransfer(const std::string &objectPath, BluetoothMapCallback callback, Bluez5ObexTransfer::TransferType type)
+void Bluez5ProfileMap::startPushTransfer(const std::string &objectPath, const ObexPeer &peer, BluetoothMapCallback callback, Bluez5ObexTransfer::TransferType type)
 {
       // NOTE: ownership of the transfer object is passed to updateActiveTransfer which
       // will delete it once there is nothing to left to do with it
-      Bluez5ObexTransfer *transfer = new Bluez5ObexTransfer(std::string(objectPath), type);
+      Bluez5ObexTransfer *transfer = new Bluez5ObexTransfer(std::string(objectPath), peer, type);
       mTransfersMap.insert({std::string(objectPath), transfer});
       transfer->watch(std::bind(&Bluez5ProfileMap::updatePushTransfer, this, objectPath, transfer, callback));
 }
@@ -711,8 +713,10 @@ void Bluez5ProfileMap::setMessageStatus(const std::string &sessionKey, const std
     std::string objectPath = session->getObjectPath() + "/" + messageHandle;
 
     GError *error = 0;
-    FreeDesktopDBusProperties *propertiesProxy = free_desktop_dbus_properties_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE,
-            G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES, "org.bluez.obex", objectPath.c_str(), NULL, &error);
+    ObexPeer peer = session->getPeer();
+    FreeDesktopDBusProperties *propertiesProxy = !peer.isValid() ? nullptr :
+        free_desktop_dbus_properties_proxy_new_sync(peer.connection, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES,
+                                                    peer.name.c_str(), objectPath.c_str(), NULL, &error);
     if (!propertiesProxy)
     {
         g_clear_error(&error);
@@ -781,7 +785,7 @@ void Bluez5ProfileMap::pushMessage(const std::string &sessionKey, const std::str
             return;
         }
 
-		startPushTransfer(std::string(objectPath), callback, Bluez5ObexTransfer::TransferType::SENDING);
+		startPushTransfer(std::string(objectPath), obexPeerOfProxy(source), callback, Bluez5ObexTransfer::TransferType::SENDING);
 		g_free(objectPath);
     };
 

@@ -143,6 +143,8 @@ file(GLOB SOURCES
      src/obexpaths.cpp
      src/gattlocal.cpp
      src/avrcpdevices.cpp
+     src/dbussignals.cpp
+     src/obexpush.cpp
      )
 
 add_library(bluez5 MODULE ${SOURCES})

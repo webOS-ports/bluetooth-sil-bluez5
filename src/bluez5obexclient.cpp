@@ -171,7 +171,9 @@ void Bluez5ObexClient::createSession(Bluez5ObexSession::Type type, const std::st
 			return;
 		}
 
-		Bluez5ObexSession *session = new Bluez5ObexSession(this, type, std::string(objectPath), deviceAddress);
+		// The obexd that answered: its objects are reached by its unique name, which needs no call to the bus.
+		Bluez5ObexSession *session = new Bluez5ObexSession(this, type, std::string(objectPath), deviceAddress,
+		                                                   obexPeerOfOwner(source));
 		g_free(objectPath);	// allocated by the finish; it leaked
 
 		// Partly made, its callers used NULL proxies, and its end went unnoticed: a failure, which also removes

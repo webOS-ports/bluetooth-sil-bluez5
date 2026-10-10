@@ -20,9 +20,11 @@
 #include "bluez5obexsession.h"
 #include "logging.h"
 #include "asyncutils.h"
-#include "bluez5busconfig.h"
 
-Bluez5ObexTransfer::Bluez5ObexTransfer(const std::string &objectPath, TransferType type) :
+// Neither proxy's cached properties are read (the state comes from the GetAll below and the signal), and both are
+// made on obexd's unique name: no call is made to make them. With G_DBUS_PROXY_FLAGS_NONE on the well-known name,
+// each waited for StartServiceByName and GetNameOwner from the bus and a GetAll from obexd.
+Bluez5ObexTransfer::Bluez5ObexTransfer(const std::string &objectPath, const ObexPeer &peer, TransferType type) :
 	mObjectPath(objectPath),
 	mTransferProxy(0),
 	mPropertiesProxy(0),
@@ -33,9 +35,17 @@ Bluez5ObexTransfer::Bluez5ObexTransfer(const std::string &objectPath, TransferTy
 	mTransferType(type)
 {
 	GError *error = 0;
+	const GDBusProxyFlags flags = G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES;
 
-	mTransferProxy = bluez_obex_transfer1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
-														"org.bluez.obex", mObjectPath.c_str(), NULL, &error);
+	if (!peer.isValid())
+	{
+		ERROR(MSGID_FAILED_TO_CREATE_OBEX_TRANSFER_PROXY, 0, "No obexd for transfer %s", mObjectPath.c_str());
+		failSoon();
+		return;
+	}
+
+	mTransferProxy = bluez_obex_transfer1_proxy_new_sync(peer.connection, flags, peer.name.c_str(), mObjectPath.c_str(),
+	                                                     NULL, &error);
 	if (error)
 	{
 		ERROR(MSGID_FAILED_TO_CREATE_OBEX_TRANSFER_PROXY, 0,
@@ -46,8 +56,10 @@ Bluez5ObexTransfer::Bluez5ObexTransfer(const std::string &objectPath, TransferTy
 		return;
 	}
 
-	mPropertiesProxy = free_desktop_dbus_properties_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
-																		   "org.bluez.obex", objectPath.c_str(), NULL, &error);
+	// Its signal subscription (AddMatch) goes out before the GetAll below, so a change after obexd's answer is
+	// not missed.
+	mPropertiesProxy = free_desktop_dbus_properties_proxy_new_sync(peer.connection, flags, peer.name.c_str(),
+	                                                               objectPath.c_str(), NULL, &error);
 	if (error)
 	{
 		ERROR(MSGID_FAILED_TO_CREATE_OBEX_TRANSFER_PROXY, 0, "Failed to create dbus proxy for obex transfer on path %s: %s",

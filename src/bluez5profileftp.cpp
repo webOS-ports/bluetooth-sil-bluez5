@@ -451,11 +451,11 @@ void Bluez5ProfileFtp::updateActiveTransfer(BluetoothFtpTransferId id, Bluez5Obe
 		removeTransfer(id);
 }
 
-void Bluez5ProfileFtp::startTransfer(BluetoothFtpTransferId id, const std::string &objectPath, BluetoothFtpTransferResultCallback callback)
+void Bluez5ProfileFtp::startTransfer(BluetoothFtpTransferId id, const std::string &objectPath, const ObexPeer &peer, BluetoothFtpTransferResultCallback callback)
 {
 	// NOTE: ownership of the transfer object is passed to updateActiveTransfer which
 	// will delete it once there is nothing to left to do with it
-	Bluez5ObexTransfer *transfer = new Bluez5ObexTransfer(std::string(objectPath));
+	Bluez5ObexTransfer *transfer = new Bluez5ObexTransfer(std::string(objectPath), peer);
 	mTransfers.insert(std::pair<BluetoothFtpTransferId, Bluez5ObexTransfer*>(id, transfer));
 	transfer->watch(std::bind(&Bluez5ProfileFtp::updateActiveTransfer, this, id, transfer, callback));
 }
@@ -515,7 +515,7 @@ BluetoothFtpTransferId Bluez5ProfileFtp::pullFile(const std::string &address, co
 				return;
 			}
 
-			startTransfer(transferId, std::string(objectPath), callback);
+			startTransfer(transferId, std::string(objectPath), obexPeerOfProxy(source), callback);
 			g_free(objectPath);
 		};
 
@@ -588,7 +588,7 @@ BluetoothFtpTransferId Bluez5ProfileFtp::pushFile(const std::string &address, co
 				return;
 			}
 
-			startTransfer(transferId, std::string(objectPath), callback);
+			startTransfer(transferId, std::string(objectPath), obexPeerOfProxy(source), callback);
 			g_free(objectPath);
 		};
 

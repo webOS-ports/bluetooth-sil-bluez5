@@ -19,18 +19,20 @@
 #include "dbusutils.h"
 #include "asyncutils.h"
 #include "logging.h"
-#include "bluez5busconfig.h"
 
 // Nothing reads these proxies' cached properties: loading them took a synchronous GetAll for each of the six, on
-// the service's only main loop. Creating them still waits for obexd once per proxy (name owner); making the
-// session creation asynchronous throughout is left as it is.
+// the service's only main loop. Made on obexd's unique name and the connection its answer came on, they are made
+// without any call: on the well-known name each one first asked the bus, synchronously, StartServiceByName and
+// GetNameOwner (GLib gdbusproxy.c, initable_init and async_initable_init_second_async).
 static const GDBusProxyFlags PROXY_FLAGS = G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES;
 
-Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const std::string &objectPath, const std::string &deviceAddress) :
+Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const std::string &objectPath,
+                                     const std::string &deviceAddress, const ObexPeer &peer) :
 	mClient(client),
 	mType(type),
 	mObjectPath(objectPath),
 	mDeviceAddress(deviceAddress),
+	mBusName(peer.name),
 	mSessionProxy(0),
 	mFileTransferProxy(0),
 	mObjectPushProxy(0),
@@ -39,12 +41,19 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 	mPropertiesProxy(nullptr),
 	mLostRemote(false),
 	mValid(false),
-	mObjectWatch(new DBusUtils::ObjectWatch(BLUEZ5_OBEX_DBUS_BUS_TYPE, "org.bluez.obex", objectPath))
+	mObjectWatch(new DBusUtils::ObjectWatch(peer.connection, peer.name, objectPath))
 {
 	GError *error = 0;
 
-	mSessionProxy = bluez_obex_session1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, PROXY_FLAGS,
-	                                                           "org.bluez.obex", mObjectPath.c_str(), NULL, &error);
+	if (!peer.isValid())
+	{
+		ERROR(MSGID_FAILED_TO_CREATE_OBEX_SESSION_PROXY, 0, "No obexd for session %s", mObjectPath.c_str());
+		return;
+	}
+	GDBusConnection *conn = peer.connection;
+	const char *name = peer.name.c_str();
+
+	mSessionProxy = bluez_obex_session1_proxy_new_sync(conn, PROXY_FLAGS, name, mObjectPath.c_str(), NULL, &error);
 	if (error)
 	{
 		ERROR(MSGID_FAILED_TO_CREATE_OBEX_SESSION_PROXY, 0,
@@ -54,8 +63,8 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 		return;
 	}
 
-	mFileTransferProxy = bluez_obex_file_transfer1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, PROXY_FLAGS,
-																		"org.bluez.obex", mObjectPath.c_str(), NULL, &error);
+	mFileTransferProxy = bluez_obex_file_transfer1_proxy_new_sync(conn, PROXY_FLAGS, name, mObjectPath.c_str(), NULL,
+	                                                              &error);
 	if (error)
 	{
 		ERROR(MSGID_FAILED_TO_CREATE_OBEX_FILE_TRANSFER_PROXY, 0,
@@ -65,8 +74,7 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 		return;
 	}
 
-	mObjectPushProxy = bluez_obex_object_push1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, PROXY_FLAGS,
-																		"org.bluez.obex", mObjectPath.c_str(), NULL, &error);
+	mObjectPushProxy = bluez_obex_object_push1_proxy_new_sync(conn, PROXY_FLAGS, name, mObjectPath.c_str(), NULL, &error);
 
 	if (error)
 	{
@@ -77,8 +85,8 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 		return;
 	}
 
-	mPhonebookAccessProxy = bluez_obex_phonebook_access1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, PROXY_FLAGS,
-																		"org.bluez.obex", mObjectPath.c_str(), NULL, &error);
+	mPhonebookAccessProxy = bluez_obex_phonebook_access1_proxy_new_sync(conn, PROXY_FLAGS, name, mObjectPath.c_str(),
+	                                                                    NULL, &error);
 
 	if (error)
 	{
@@ -89,8 +97,8 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 		return;
 	}
 
-	mMessageAccessProxy = bluez_obex_message_access1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, PROXY_FLAGS,
-																		"org.bluez.obex", mObjectPath.c_str(), NULL, &error);
+	mMessageAccessProxy = bluez_obex_message_access1_proxy_new_sync(conn, PROXY_FLAGS, name, mObjectPath.c_str(), NULL,
+	                                                                &error);
 
 	if (error)
 	{
@@ -101,8 +109,8 @@ Bluez5ObexSession::Bluez5ObexSession(Bluez5ObexClient *client, Type type, const 
 		return;
 	}
 
-	mPropertiesProxy = free_desktop_dbus_properties_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, PROXY_FLAGS,
-																		"org.bluez.obex", objectPath.c_str(), NULL, &error);
+	mPropertiesProxy = free_desktop_dbus_properties_proxy_new_sync(conn, PROXY_FLAGS, name, mObjectPath.c_str(), NULL,
+	                                                               &error);
 	if (error)
 	{
 		ERROR(MSGID_FAILED_TO_CREATE_OBEX_PHONEBOOK_PROXY, 0,
@@ -145,6 +153,17 @@ Bluez5ObexSession::~Bluez5ObexSession()
 		g_object_unref(mPropertiesProxy);
 
 	delete mObjectWatch;
+}
+
+ObexPeer Bluez5ObexSession::getPeer() const
+{
+	ObexPeer peer;
+	if (mSessionProxy)
+	{
+		peer.connection = g_dbus_proxy_get_connection(G_DBUS_PROXY(mSessionProxy));
+		peer.name = mBusName;
+	}
+	return peer;
 }
 
 void Bluez5ObexSession::watch(Bluez5ObexSessionStatusCallback callback)

@@ -56,8 +56,8 @@ private:
     void updateVersion(BluezObexPhonebookAccess1 *phonebookProxy);
     GVariant * setFilters(const std::string &vCardVersion, BluetoothPbapVCardFilterList &vCardFilters);
     GVariant * setSearchFilters(const std::string &searchOrder);
-    void startTransfer( const std::string &objectPath, BluetoothResultCallback callback, Bluez5ObexTransfer::TransferType type);
-    void startPhoneBookTransfer(const std::string &objectPath, const std::string &address ,Bluez5ObexTransfer::TransferType type);
+    void startTransfer( const std::string &objectPath, const ObexPeer &peer, BluetoothResultCallback callback, Bluez5ObexTransfer::TransferType type);
+    void startPhoneBookTransfer(const std::string &objectPath, const ObexPeer &peer, const std::string &address ,Bluez5ObexTransfer::TransferType type);
     void removeTransfer(const std::string &objectPath);
     void updateActiveTransfer(const std::string &objectPath, Bluez5ObexTransfer *transfer, BluetoothResultCallback callback);
     void monitorTransfer(const std::string &objectPath, const std::string &address, Bluez5ObexTransfer *transfer);

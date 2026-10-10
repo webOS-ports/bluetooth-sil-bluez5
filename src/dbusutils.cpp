@@ -20,6 +20,7 @@
 #include "dbusutils.h"
 #include "asyncutils.h"
 #include "logging.h"
+#include "dbussignals.h"
 
 namespace DBusUtils
 {
@@ -111,35 +112,44 @@ void NameWatch::handleNameDisappeared(GDBusConnection */*conn*/, const gchar */*
 		self->mCallback(false);
 }
 
-ObjectWatch::ObjectWatch(GBusType busType, const std::string &busName, const std::string &path) :
+ObjectWatch::ObjectWatch(GDBusConnection *connection, const std::string &busName, const std::string &path) :
     mPath(path),
-    mObjectManager(0)
+    mBusName(busName),
+    mConnection(nullptr),
+    mRemovedSubscription(0),
+    mOwnerSubscription(0)
 {
-	GError *error = 0;
-
-	mObjectManager = g_dbus_object_manager_client_new_for_bus_sync(busType, G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
-	                                                               busName.c_str(), "/", NULL, NULL, NULL, NULL,
-	                                                               &error);
-	if (error)
+	if (!connection || !g_dbus_is_unique_name(busName.c_str()))
 	{
-		ERROR(MSGID_OBJECT_MANAGER_CREATION_FAILED, 0, "Failed to create object manager: %s", error->message);
-		g_error_free(error);
+		ERROR(MSGID_OBJECT_MANAGER_CREATION_FAILED, 0, "Cannot watch %s: no connection or no unique name",
+		      path.c_str());
 		return;
 	}
+	mConnection = G_DBUS_CONNECTION(g_object_ref(connection));
 
-	g_signal_connect(G_OBJECT(mObjectManager), "interface-removed", G_CALLBACK(handleInterfaceRemoved), this);
-	g_signal_connect(G_OBJECT(mObjectManager), "object-removed", G_CALLBACK(handleObjectRemoved), this);
+	// The sender is the unique name: another client cannot fake the signal, and a restarted owner's objects
+	// are not taken for these. Its object manager is at "/" (bluez's gdbus, g_dbus_attach_object_manager).
+	mRemovedSubscription = g_dbus_connection_signal_subscribe(mConnection, busName.c_str(),
+	                                                          "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved",
+	                                                          "/", NULL, G_DBUS_SIGNAL_FLAGS_NONE,
+	                                                          handleInterfacesRemoved, this, NULL);
+	// The object manager client told this as the removal of every object.
+	mOwnerSubscription = g_dbus_connection_signal_subscribe(mConnection, "org.freedesktop.DBus",
+	                                                        "org.freedesktop.DBus", "NameOwnerChanged",
+	                                                        "/org/freedesktop/DBus", busName.c_str(),
+	                                                        G_DBUS_SIGNAL_FLAGS_NONE, handleNameOwnerChanged, this, NULL);
 
-	DEBUG("Created object watch on bus %s for %s", busName.c_str(), path.c_str());
+	DEBUG("Created object watch for %s of %s", path.c_str(), busName.c_str());
 }
 
 ObjectWatch::~ObjectWatch()
 {
-	if (!mObjectManager)	// construction failed
+	if (!mConnection)	// construction failed
 		return;
-	// Its handlers point at this watch, and the manager can outlive it.
-	g_signal_handlers_disconnect_by_data(mObjectManager, this);
-	g_object_unref(mObjectManager);
+	// After this no handler runs, also not one already queued (GLib checks the subscription before calling).
+	g_dbus_connection_signal_unsubscribe(mConnection, mRemovedSubscription);
+	g_dbus_connection_signal_unsubscribe(mConnection, mOwnerSubscription);
+	g_object_unref(mConnection);
 }
 
 void ObjectWatch::watchInterfaceRemoved(InterfaceStatusCallback callback)
@@ -147,40 +157,35 @@ void ObjectWatch::watchInterfaceRemoved(InterfaceStatusCallback callback)
 	mInterfaceRemovedCallback = callback;
 }
 
-void ObjectWatch::handleInterfaceRemoved(GDBusObjectManager */*manager*/, GDBusObject *object, GDBusInterface *interface, gpointer user_data)
+void ObjectWatch::handleInterfacesRemoved(GDBusConnection */*connection*/, const gchar */*sender*/,
+                                          const gchar */*path*/, const gchar */*interface*/, const gchar */*signal*/,
+                                          GVariant *parameters, gpointer user_data)
 {
-	ObjectWatch *watch = static_cast<ObjectWatch*>(user_data);
+	const ObjectWatch *watch = static_cast<const ObjectWatch*>(user_data);
 
-	DEBUG("%s", __PRETTY_FUNCTION__);
-
-	if (!watch->mInterfaceRemovedCallback)
+	// A copy: the callback may delete the watch.
+	InterfaceStatusCallback callback = watch->mInterfaceRemovedCallback;
+	if (!callback)
 		return;
 
-	const gchar *objectPath = g_dbus_object_get_object_path(object);
-	if (g_strcmp0(objectPath, watch->mPath.c_str()) != 0)
-		return;
-
-	GDBusInterfaceInfo *info = g_dbus_interface_get_info(interface);
-	if (!info)
-		return;
-
-	watch->mInterfaceRemovedCallback(std::string(info->name));
+	auto alive = watch->mLifetime.token();
+	for (const std::string &name : interfacesRemovedAt(parameters, watch->mPath))
+	{
+		callback(name);
+		if (alive.expired())
+			return;
+	}
 }
 
-void ObjectWatch::handleObjectRemoved(GDBusObjectManager */*manager*/, GDBusObject *object, gpointer user_data)
+void ObjectWatch::handleNameOwnerChanged(GDBusConnection */*connection*/, const gchar */*sender*/,
+                                         const gchar */*path*/, const gchar */*interface*/, const gchar */*signal*/,
+                                         GVariant *parameters, gpointer user_data)
 {
-	ObjectWatch *watch = static_cast<ObjectWatch*>(user_data);
+	const ObjectWatch *watch = static_cast<const ObjectWatch*>(user_data);
 
-	DEBUG("%s", __PRETTY_FUNCTION__);
-
-	if (!watch->mInterfaceRemovedCallback)
-		return;
-
-	const gchar *objectPath = g_dbus_object_get_object_path(object);
-	if (g_strcmp0(objectPath, watch->mPath.c_str()) != 0)
-		return;
-
-	watch->mInterfaceRemovedCallback("all");
+	InterfaceStatusCallback callback = watch->mInterfaceRemovedCallback;
+	if (callback && nameLost(parameters, watch->mBusName))
+		callback("all");
 }
 
 
