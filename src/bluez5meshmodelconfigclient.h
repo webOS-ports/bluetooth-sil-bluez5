@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <mutex>
 
+#include "meshconfig.h"
+
 extern "C"
 {
 #include "freedesktop-interface.h"
@@ -61,6 +63,7 @@ public:
 	uint8_t count;
 	std::string desc;
 	BleMeshKeyRefreshData keyRefreshData;
+	MeshRequestKey key;	// what the reply echoes, to tell requests waiting for the same status apart
 	Bluez5MeshModelConfigClient *configClient;
 };
 
@@ -105,15 +108,13 @@ private:
 	BluetoothError setDefaultTTL(uint16_t destAddress, uint16_t netKeyIndex, uint8_t ttl);
 	BluetoothError setGATTProxy(uint16_t destAddress, uint16_t netKeyIndex, uint8_t gattProxyState);
 	BluetoothError setRelay(uint16_t destAddress, uint16_t netKeyIndex, BleMeshRelayStatus *relayStatus);
-	uint16_t putModelId(uint8_t *buf, uint32_t *args);
 	BluetoothError addAppKey(uint16_t destAddress,	uint16_t netKeyIndex,
 								uint16_t appKeyIndex, bool update, int32_t waitTime = 0);
-	BluetoothError addPendingRequest(uint32_t opcode, uint16_t destAddr, uint8_t count = 0);
-	BluetoothError addPendingRequest(uint32_t opcode, uint16_t destAddr, BleMeshKeyRefreshData keyRefreshData);
-	bool requestExists(uint32_t opcode, uint16_t destAddr);
-	BluetoothError deletePendingRequest(uint32_t opcode, uint16_t destAddr);
-	std::vector<BleMeshPendingRequest *>::iterator getRequestFromResponse(uint32_t opcode,
-											uint16_t destAddr);
+	BleMeshPendingRequest *addPendingRequest(uint32_t opcode, uint16_t destAddr, uint8_t count = 0,
+	                                         const MeshRequestKey &key = MeshRequestKey());
+	BleMeshPendingRequest *addPendingRequest(uint32_t opcode, uint16_t destAddr, BleMeshKeyRefreshData keyRefreshData,
+	                                         const MeshRequestKey &key = MeshRequestKey());
+	BleMeshPendingRequest *findRequestForResponse(uint32_t opcode, uint16_t srcAddr, const MeshRequestKey &replyKey);
 	BluetoothError configAppKeyDelete(uint16_t destAddress, uint16_t netKeyIndex,
 										uint16_t appKeyIndex);
 	BluetoothError configUnBindAppKey(uint16_t destAddress, uint16_t netKeyIndex,
@@ -125,6 +126,11 @@ private:
 			uint16_t netKeyIndex, uint8_t phase);
 
 public:
+	// Off the queue, its timer removed, deleted.
+	void removePendingRequest(BleMeshPendingRequest *req);
+	// A key refresh step the node did not take (no reply, or a refusal), told to the observer.
+	void reportKeyRefreshFailure(const BleMeshPendingRequest &req);
+
 	/* Mutex used to synchronise the access to pending request Q */
 	std::mutex pendingReqMutex;
 };

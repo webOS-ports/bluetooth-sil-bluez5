@@ -136,6 +136,7 @@ file(GLOB SOURCES
      src/bluez5meshmodelconfigclient.cpp
      src/bluez5meshmodelonoffclient.cpp
      src/meshcomposition.cpp
+     src/meshconfig.cpp
      src/leadvfilter.cpp
      src/obextime.cpp
      src/dbuspath.cpp
