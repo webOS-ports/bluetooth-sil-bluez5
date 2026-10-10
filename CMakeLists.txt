@@ -139,6 +139,7 @@ file(GLOB SOURCES
      src/meshcomposition.cpp
      src/leadvfilter.cpp
      src/obextime.cpp
+     src/dbuspath.cpp
      )
 
 add_library(bluez5 MODULE ${SOURCES})

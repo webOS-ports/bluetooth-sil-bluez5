@@ -334,7 +334,8 @@ void Bluez5Advertise::advertiseIncludes(uint8_t advId, bool isTxPowerInclude, bo
 	BluezLEAdvertisement1 *interface = getInteface(advId);
 	if (!interface)
 		return;
-	const char* includes[3] = {0,0,0};
+	// Room for the NULL that ends the list: with all three set it had none.
+	const char* includes[4] = {0,0,0,0};
 	int includeIndex = 0;
 
 	if (isTxPowerInclude)
@@ -346,7 +347,8 @@ void Bluez5Advertise::advertiseIncludes(uint8_t advId, bool isTxPowerInclude, bo
 
 	bluez_leadvertisement1_set_includes(interface, includes);
 	const gchar *const *include = bluez_leadvertisement1_get_includes(interface);
-	DEBUG("ad include property changed to %s", include[includeIndex-1]);
+	if (include && includeIndex > 0)	// [-1] with none set
+		DEBUG("ad include property changed to %s", include[includeIndex-1]);
 }
 
 void Bluez5Advertise::advertiseDuration(uint8_t advId, uint16_t value)

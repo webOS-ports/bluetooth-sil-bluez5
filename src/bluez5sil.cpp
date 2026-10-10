@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "bluez5sil.h"
+#include "dbuspath.h"
 #include "bluez5adapter.h"
 #include "bluez5device.h"
 #include "bluez5agent.h"
@@ -363,8 +364,7 @@ Bluez5Adapter* Bluez5SIL::findAdapterForObjectPath(const std::string &objectPath
 {
 	for (auto adapter : mAdapters)
 	{
-		auto adapterPath = adapter->getObjectPath();
-		if (!objectPath.compare(0, adapterPath.length(), adapterPath))
+		if (isObjectPathUnder(objectPath, adapter->getObjectPath()))
 			return adapter;
 	}
 
@@ -518,8 +518,7 @@ Bluez5Adapter * Bluez5SIL::getBluez5Adapter(std::string objectPath)
 {
 	for (auto adapter: mAdapters)
 	{
-		std::size_t found = objectPath.find(adapter->getObjectPath());
-		if (found != std::string::npos)
+		if (isObjectPathUnder(objectPath, adapter->getObjectPath()))
 			return adapter;
 	}
 

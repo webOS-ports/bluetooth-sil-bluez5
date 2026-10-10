@@ -22,7 +22,7 @@ find_library(GTEST_LIBRARY gtest REQUIRED)
 find_library(GTEST_MAIN_LIBRARY gtest_main REQUIRED)
 
 set(PARSER_SOURCES ${PROJECT_SOURCE_DIR}/src/meshcomposition.cpp ${PROJECT_SOURCE_DIR}/src/leadvfilter.cpp
-    ${PROJECT_SOURCE_DIR}/src/obextime.cpp)
+    ${PROJECT_SOURCE_DIR}/src/obextime.cpp ${PROJECT_SOURCE_DIR}/src/dbuspath.cpp)
 
 file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/unit/*.cpp)
 add_executable(bluez5-sil-tests ${TEST_SOURCES} ${PARSER_SOURCES})

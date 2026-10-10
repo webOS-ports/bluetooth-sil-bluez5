@@ -497,14 +497,8 @@ std::string Bluez5Adapter::propertyTypeToString(BluetoothProperty::Type type)
 
 void Bluez5Adapter::getAdapterProperty(BluetoothProperty::Type type, BluetoothPropertyResultCallback callback)
 {
-	std::string propertyName = propertyTypeToString(type);
-
-	if (propertyName.length() == 0)
-	{
-		callback(BLUETOOTH_ERROR_PARAM_INVALID, BluetoothProperty());
-		return;
-	}
-
+	// Ours, not BlueZ's: answered before the name lookup, which has no BlueZ name for STACK_NAME (it was
+	// refused as invalid, so its branch never ran).
 	if (type == BluetoothProperty::Type::DISCOVERY_TIMEOUT)
 	{
 		callback(BLUETOOTH_ERROR_NONE, BluetoothProperty(type, mDiscoveryTimeout));
@@ -513,6 +507,14 @@ void Bluez5Adapter::getAdapterProperty(BluetoothProperty::Type type, BluetoothPr
 	else if (type == BluetoothProperty::Type::STACK_NAME)
 	{
 		callback(BLUETOOTH_ERROR_NONE, BluetoothProperty(type, std::string("bluez5")));
+		return;
+	}
+
+	std::string propertyName = propertyTypeToString(type);
+
+	if (propertyName.length() == 0)
+	{
+		callback(BLUETOOTH_ERROR_PARAM_INVALID, BluetoothProperty());
 		return;
 	}
 
@@ -652,30 +654,26 @@ bool Bluez5Adapter::setAdapterPropertySync(const BluetoothProperty& property)
 	return true;
 }
 
+// An empty callback is allowed on every path: it was checked only on success.
 void Bluez5Adapter::setAdapterProperty(const BluetoothProperty& property, BluetoothResultCallback callback)
 {
-	if (!setAdapterPropertySync(property))
-	{
-		callback(BLUETOOTH_ERROR_FAIL);
-		return;
-	}
-
+	bool ok = setAdapterPropertySync(property);
 	if (callback)
-		callback(BLUETOOTH_ERROR_NONE);
+		callback(ok ? BLUETOOTH_ERROR_NONE : BLUETOOTH_ERROR_FAIL);
 }
 
 void Bluez5Adapter::setAdapterProperties(const BluetoothPropertiesList& properties, BluetoothResultCallback callback)
 {
+	bool ok = true;
 	for (auto property : properties)
-	{
 		if (!setAdapterPropertySync(property))
 		{
-			callback(BLUETOOTH_ERROR_FAIL);
-			return;
+			ok = false;
+			break;
 		}
-	}
 
-	callback(BLUETOOTH_ERROR_NONE);
+	if (callback)
+		callback(ok ? BLUETOOTH_ERROR_NONE : BLUETOOTH_ERROR_FAIL);
 }
 
 bool Bluez5Adapter::setAdapterDelayReport(bool delayReporting)
@@ -1170,14 +1168,15 @@ BluetoothError Bluez5Adapter::removeLeDiscoveryFilter(uint32_t scanId)
 	{
 		removeFilterType(scanId);
 		mLeScanFilters.erase(scanIter);
+		// Its devices too: the entries were kept, with raw device pointers that dangle once a device goes.
+		mLeDevicesByScanId.erase(scanId);
 		return BLUETOOTH_ERROR_NONE;
 	}
 }
 
 void Bluez5Adapter::removeFilterType(uint32_t scanId)
 {
-	auto tmpIter = mLeScanFilterTypes.find(scanId);
-	mLeScanFilterTypes.erase(tmpIter);
+	mLeScanFilterTypes.erase(scanId);	// erase(end()) if the two maps ever disagreed
 }
 
 BluetoothError Bluez5Adapter::prepareFilterForDiscovery()
