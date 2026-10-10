@@ -404,15 +404,19 @@ bool Bluez5Adapter::addPropertyFromVariant(BluetoothPropertiesList& properties, 
 
 void Bluez5Adapter::getAdapterProperties(BluetoothPropertiesResultCallback callback)
 {
-	auto propertiesGetCallback = [this, callback](GAsyncResult *result) {
-		GVariant *propsVar;
+	// The adapter is deleted when its controller goes away, which can be before the reply: reproduced in the VM
+	// with btvirt killed during pairing (ASan heap-use-after-free on mPropertiesProxy and the members below).
+	auto propertiesGetCallback = [this, alive = mLifetime.token(), callback](GObject *source, GAsyncResult *result) {
+		GVariant *propsVar = nullptr;
 		GError *error = 0;
-		[[maybe_unused]] gboolean ret;
+		gboolean ret;
 
-		ret = free_desktop_dbus_properties_call_get_all_finish(mPropertiesProxy, &propsVar, result, &error);
-		if (error)
+		ret = free_desktop_dbus_properties_call_get_all_finish(FREE_DESKTOP_DBUS_PROPERTIES(source), &propsVar, result, &error);
+		if (alive.expired() || !ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
+			if (propsVar)
+				g_variant_unref(propsVar);
 			callback(BLUETOOTH_ERROR_FAIL, BluetoothPropertiesList());
 			return;
 		}
@@ -439,6 +443,7 @@ void Bluez5Adapter::getAdapterProperties(BluetoothPropertiesResultCallback callb
 		properties.push_back(BluetoothProperty(BluetoothProperty::Type::DISCOVERY_TIMEOUT, mDiscoveryTimeout));
 		properties.push_back(BluetoothProperty(BluetoothProperty::Type::STACK_NAME, std::string("bluez5")));
 		properties.push_back(BluetoothProperty(BluetoothProperty::Type::UUIDS, mUuids));
+		g_variant_unref(propsVar);	// leaked on every read
 
 		callback(BLUETOOTH_ERROR_NONE, properties);
 	};
@@ -1802,14 +1807,14 @@ void Bluez5Adapter::unpair(const std::string &address, BluetoothResultCallback c
 		return;
 	}
 
-	auto unPairCallback = [this, callback, address](GAsyncResult *result) {
+	auto unPairCallback = [this, alive = mLifetime.token(), callback, address](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
-		[[maybe_unused]] gboolean ret;
+		gboolean ret;
 
-		ret = bluez_adapter1_call_remove_device_finish(mAdapterProxy, result, &error);
-		if (error)
+		ret = bluez_adapter1_call_remove_device_finish(BLUEZ_ADAPTER1(source), result, &error);
+		if (alive.expired() || !ret || error)	// the adapter was deleted meanwhile, see getAdapterProperties
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}

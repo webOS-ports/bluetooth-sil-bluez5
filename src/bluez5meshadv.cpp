@@ -170,7 +170,12 @@ BluetoothError Bluez5MeshAdv::attachToken(const std::string &token)
 
 void Bluez5MeshAdv::attach()
 {
-	auto attachCallback = [this](GAsyncResult *result) {
+	auto attachCallback = [this, alive = mLifetime.token()](GAsyncResult *result) {
+		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+		if (alive.expired())
+		{
+			return;
+		}
 		GError *error = 0;
 		gchar *node = 0;
 		GVariant *configuration = 0;
@@ -199,7 +204,12 @@ BluetoothError Bluez5MeshAdv::createNetwork()
 	GVariant *uuidVar = g_variant_new_from_bytes(G_VARIANT_TYPE_BYTESTRING, bytes, true);
 	g_bytes_unref(bytes);	// the variant holds its own reference: this one leaked
 
-	auto createNetworkCallback = [this](GAsyncResult *result) {
+	auto createNetworkCallback = [this, alive = mLifetime.token()](GAsyncResult *result) {
+		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+		if (alive.expired())
+		{
+			return BLUETOOTH_ERROR_FAIL;
+		}
 
 		GError *error = 0;
 		bluez_mesh_network1_call_create_network_finish(mNetworkInterface, result, &error);
@@ -412,7 +422,12 @@ BluetoothError Bluez5MeshAdv::provision(const std::string &uuid, const uint16_t 
 	uint8_t uuidByte[16] = {0};
 	int j = 0;
 
-	auto provisionCallback = [this](GAsyncResult *result) {
+	auto provisionCallback = [this, alive = mLifetime.token()](GAsyncResult *result) {
+		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+		if (alive.expired())
+		{
+			return BLUETOOTH_ERROR_FAIL;
+		}
 
 		GError *error = 0;
 		bluez_mesh_management1_call_add_node_finish(mMgmtInterface, result, &error);

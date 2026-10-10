@@ -28,6 +28,7 @@
 #include "bluez5device.h"
 #include "bluez5advertise.h"
 #include "utils.h"
+#include "asyncutils.h"
 
 extern "C" {
 #include "freedesktop-interface.h"
@@ -228,6 +229,7 @@ private:
 	std::vector <std::string> mUuids;
 	Bluez5MprisPlayer *mPlayer;
 	BluezMedia1 *mMediaManager;
+	LifetimeGuard mLifetime;	// last: async replies see it expire before anything else goes
 };
 
 #endif // BLUEZ5ADAPTER_H

@@ -371,7 +371,12 @@ gboolean Bluez5ProfileSpp::handleRequestDisconnection (BluezProfile1 *interface,
 	if ((devieInfo->mDeviceRole == CLIENT) && devieInfo->mInterface)
 	{
 		std::string objPath = BASE_OBJ_PATH + std::to_string(devieInfo->mChannelId);
-		auto unRegisterCallback = [this](GAsyncResult *result) {
+		auto unRegisterCallback = [this, alive = mLifetime.token()](GAsyncResult *result) {
+			// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+			if (alive.expired())
+			{
+				return;
+			}
 			GError *error = nullptr;
 			[[maybe_unused]] gboolean ret;
 
@@ -485,8 +490,14 @@ void Bluez5ProfileSpp::connectUuid(const std::string &address, const std::string
 		return;
 	}
 
-	auto ConnectedCallback = [this, callback, channelId](BluetoothError error)
+	auto ConnectedCallback = [this, alive = mLifetime.token(), callback, channelId](BluetoothError error)
 	{
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL, BLUETOOTH_SPP_CHANNEL_ID_INVALID);
+			return;
+		}
 		if (error == BLUETOOTH_ERROR_NONE)
 		{
 			callback(BLUETOOTH_ERROR_NONE, channelId);

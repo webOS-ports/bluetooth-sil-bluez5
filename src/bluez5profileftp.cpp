@@ -130,7 +130,14 @@ void Bluez5ProfileFtp::createSession(const std::string &address, BluetoothResult
 		return;
 	}
 
-	auto sessionCreateCallback = [this, address, callback](Bluez5ObexSession *session) {
+	auto sessionCreateCallback = [this, alive = mLifetime.token(), address, callback](Bluez5ObexSession *session) {
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			delete session;
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
 		if (!session)
 		{
 			handleFailedToCreateSession(address, callback);
@@ -221,7 +228,13 @@ void Bluez5ProfileFtp::connect(const std::string &address, BluetoothResultCallba
 {
 	DEBUG("Connecting with device %s on FTP profile", address.c_str());
 
-	auto connectCallback = [this, address, callback](BluetoothError error) {
+	auto connectCallback = [this, alive = mLifetime.token(), address, callback](BluetoothError error) {
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
 		if (error != BLUETOOTH_ERROR_NONE)
 		{
 			callback(error);
@@ -350,7 +363,13 @@ void Bluez5ProfileFtp::listFolder(const std::string &address, const std::string 
 
 	BluezObexFileTransfer1 *fileTransferProxy = session->getFileTransferProxy();
 
-	auto changeFolderCallback = [this, fileTransferProxy, callback](GAsyncResult *result) {
+	auto changeFolderCallback = [this, alive = mLifetime.token(), fileTransferProxy, callback](GAsyncResult *result) {
+		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL, std::vector<BluetoothFtpElement>());
+			return;
+		}
 		GError *error = 0;
 		[[maybe_unused]] gboolean ret;
 
@@ -362,7 +381,13 @@ void Bluez5ProfileFtp::listFolder(const std::string &address, const std::string 
 			return;
 		}
 
-		auto listFolderCallback = [this, fileTransferProxy, callback](GAsyncResult *result) {
+		auto listFolderCallback = [this, alive = mLifetime.token(), fileTransferProxy, callback](GAsyncResult *result) {
+			// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+			if (alive.expired())
+			{
+				callback(BLUETOOTH_ERROR_FAIL, std::vector<BluetoothFtpElement>());
+				return;
+			}
 			GError *error = 0;
 			[[maybe_unused]] gboolean ret;
 			GVariant *entries = 0;
@@ -449,7 +474,13 @@ BluetoothFtpTransferId Bluez5ProfileFtp::pullFile(const std::string &address, co
 	g_free(dirName);
 	g_free(fileName);
 
-	auto changeFolderCallback = [this, fileTransferProxy, sourceFileName, targetPath, transferId, callback](GAsyncResult *result) {
+	auto changeFolderCallback = [this, alive = mLifetime.token(), fileTransferProxy, sourceFileName, targetPath, transferId, callback](GAsyncResult *result) {
+		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL, 0, false);
+			return;
+		}
 		GError *error = 0;
 		[[maybe_unused]] gboolean ret;
 
@@ -461,7 +492,13 @@ BluetoothFtpTransferId Bluez5ProfileFtp::pullFile(const std::string &address, co
 			return;
 		}
 
-		auto getFileCallback = [this, fileTransferProxy, transferId, callback](GAsyncResult *result) {
+		auto getFileCallback = [this, alive = mLifetime.token(), fileTransferProxy, transferId, callback](GAsyncResult *result) {
+			// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+			if (alive.expired())
+			{
+				callback(BLUETOOTH_ERROR_FAIL, 0, false);
+				return;
+			}
 			GError *error = 0;
 			[[maybe_unused]] gboolean ret;
 			gchar *objectPath = 0;
@@ -517,7 +554,13 @@ BluetoothFtpTransferId Bluez5ProfileFtp::pushFile(const std::string &address, co
 	g_free(dirName);
 	g_free(fileName);
 
-	auto changeFolderCallback = [this, fileTransferProxy, sourcePath, targetFileName, transferId, callback](GAsyncResult *result) {
+	auto changeFolderCallback = [this, alive = mLifetime.token(), fileTransferProxy, sourcePath, targetFileName, transferId, callback](GAsyncResult *result) {
+		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL, 0, false);
+			return;
+		}
 		GError *error = 0;
 		[[maybe_unused]] gboolean ret;
 
@@ -529,7 +572,13 @@ BluetoothFtpTransferId Bluez5ProfileFtp::pushFile(const std::string &address, co
 			return;
 		}
 
-		auto putFileCallback = [this, transferId, fileTransferProxy, callback](GAsyncResult *result) {
+		auto putFileCallback = [this, alive = mLifetime.token(), transferId, fileTransferProxy, callback](GAsyncResult *result) {
+			// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+			if (alive.expired())
+			{
+				callback(BLUETOOTH_ERROR_FAIL, 0, false);
+				return;
+			}
 			GError *error = 0;
 			[[maybe_unused]] gboolean ret;
 			gchar *objectPath = 0;
@@ -567,7 +616,13 @@ void Bluez5ProfileFtp::cancelTransfer(BluetoothFtpTransferId id, BluetoothResult
 		return;
 	}
 
-	auto cancelCallback = [this, id, callback](BluetoothError error) {
+	auto cancelCallback = [this, alive = mLifetime.token(), id, callback](BluetoothError error) {
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
 		if (error != BLUETOOTH_ERROR_NONE)
 		{
 			callback(error);

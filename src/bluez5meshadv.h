@@ -17,6 +17,7 @@
 #ifndef BLUEZ5MESHADV_H
 #define BLUEZ5MESHADV_H
 
+#include "asyncutils.h"
 #include <bluetooth-sil-api.h>
 #include <cstdint>
 #include <string>
@@ -124,6 +125,7 @@ public:
 	Bluez5ProfileMesh *mMesh;
 	Bluez5Adapter *mAdapter;
 	uint64_t mToken;
+	LifetimeGuard mLifetime;	// last: async replies see it expire before anything else goes
 };
 
 #endif //BLUEZ5MESHADV_H

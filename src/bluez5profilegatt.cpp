@@ -710,7 +710,13 @@ void Bluez5ProfileGatt::connectGatt(const uint16_t & appId, bool autoConnection,
 			}
 		}
 	}
-	auto isConnectCallback = [this, lowerCaseAddress, callback, pAppId, autoConnection](BluetoothError error) {
+	auto isConnectCallback = [this, alive = mLifetime.token(), lowerCaseAddress, callback, pAppId, autoConnection](BluetoothError error) {
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL, -1);
+			return;
+		}
 		if (error != BLUETOOTH_ERROR_NONE)
 		{
 			callback(error, -1);
@@ -748,8 +754,14 @@ void Bluez5ProfileGatt::disconnectGatt(const uint16_t &appId, const uint16_t &/*
 
 	// By key: the iterator was kept across the asynchronous Disconnect, in which a second disconnect erased the
 	// entry or a connect rehashed the map.
-	auto isDisconnectCallback = [this, deviceAddress, appId, callback](BluetoothError error)
+	auto isDisconnectCallback = [this, alive = mLifetime.token(), deviceAddress, appId, callback](BluetoothError error)
 	{
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
 		if (error != BLUETOOTH_ERROR_NONE)
 		{
 			callback(error);
@@ -899,8 +911,14 @@ void Bluez5ProfileGatt::registerLocalApplication(BluetoothResultCallback callbac
 	arguments = g_variant_builder_end (builder);
 	g_variant_builder_unref(builder);
 
-	auto registerCallback = [this, callback](GAsyncResult *result)
+	auto registerCallback = [this, alive = mLifetime.token(), callback](GAsyncResult *result)
 	{
+		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
 		GError *error = NULL;
 		[[maybe_unused]] gboolean ret;
 
@@ -1642,8 +1660,14 @@ void Bluez5ProfileGatt::addService(uint16_t appId, const BluetoothGattService &s
 	g_dbus_object_manager_server_export(mObjectManagerGattServer, G_DBUS_OBJECT_SKELETON (object));
 	g_dbus_object_manager_server_set_connection (mObjectManagerGattServer, mConn);
 
-	auto registerCallback = [this, callback, object, skeletonGattService, appId, serviceId](BluetoothError error)
+	auto registerCallback = [this, alive = mLifetime.token(), callback, object, skeletonGattService, appId, serviceId](BluetoothError error)
 	{
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL, -1);
+			return;
+		}
 		if (error == BLUETOOTH_ERROR_NONE)
 		{
 			DEBUG("Register application successfully");
@@ -1873,8 +1897,14 @@ void Bluez5ProfileGatt::addCharacteristic(uint16_t appId, uint16_t serviceId, co
 
 	// The service is looked up again when the registration is answered: it held a reference to the service's
 	// characteristics, which removing the service in the meantime freed.
-	auto registerCallback = [this, callback, appId, serviceId, charId, charObjPath, object, skeletonGattChar](BluetoothError error)
+	auto registerCallback = [this, alive = mLifetime.token(), callback, appId, serviceId, charId, charObjPath, object, skeletonGattChar](BluetoothError error)
 	{
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL, -1);
+			return;
+		}
 		Bluez5GattLocalService *localService = findLocalService(appId, serviceId);
 		if (error == BLUETOOTH_ERROR_NONE && localService)
 		{
@@ -2020,8 +2050,14 @@ void Bluez5ProfileGatt::addDescriptor(uint16_t appId, uint16_t serviceId, const 
 	g_dbus_object_manager_server_export(mObjectManagerGattServer, G_DBUS_OBJECT_SKELETON (object));
 	g_dbus_object_manager_server_set_connection (mObjectManagerGattServer, mConn);
 
-	auto registerCallback = [this, callback, appId, serviceId, charId, descId, descObjPath, object, skeletonGattDesc](BluetoothError error)
+	auto registerCallback = [this, alive = mLifetime.token(), callback, appId, serviceId, charId, descId, descObjPath, object, skeletonGattDesc](BluetoothError error)
 	{
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL, -1);
+			return;
+		}
 		// Looked up again, as for characteristics.
 		GattLocalDescriptorsMap *descs = getLocalDescriptorList(appId, serviceId, charId);
 		if (error == BLUETOOTH_ERROR_NONE && descs)

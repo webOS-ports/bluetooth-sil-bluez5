@@ -106,7 +106,14 @@ void Bluez5ProfileMap::createSession(const std::string &address, const std::stri
 	}
 	std::string sessionkey = address+"_"+instanceName;
 
-	auto sessionCreateCallback = [this, sessionkey, callback](Bluez5ObexSession *session) {
+	auto sessionCreateCallback = [this, alive = mLifetime.token(), sessionkey, callback](Bluez5ObexSession *session) {
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			delete session;
+			callback(BLUETOOTH_ERROR_FAIL, "");
+			return;
+		}
 		if (!session)
 		{
 			callback(BLUETOOTH_ERROR_FAIL,"");
@@ -510,7 +517,14 @@ void Bluez5ProfileMap::getMessage(const std::string &sessionKey, const std::stri
         return;
     }
 
-    auto getMessageCallback = [this, objectMessageProxy, callback](GAsyncResult *result) {
+    auto getMessageCallback = [this, alive = mLifetime.token(), objectMessageProxy, callback](GAsyncResult *result) {
+    // The profile goes with its adapter, also while this call is out: nothing of it is touched.
+    if (alive.expired())
+    {
+    	g_object_unref(objectMessageProxy);
+    	callback(BLUETOOTH_ERROR_FAIL);
+    	return;
+    }
 
         GError *error = 0;
         [[maybe_unused]] gboolean ret;

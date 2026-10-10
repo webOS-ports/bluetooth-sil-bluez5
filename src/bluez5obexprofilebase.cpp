@@ -76,7 +76,13 @@ void Bluez5ObexProfileBase::notifySessionStatus(const std::string &address, bool
 
 void Bluez5ObexProfileBase::handleFailedToCreateSession(const std::string &address, BluetoothResultCallback callback)
 {
-	auto disconnectCallback = [this, address, callback](BluetoothError /*error*/) {
+	auto disconnectCallback = [this, alive = mLifetime.token(), address, callback](BluetoothError /*error*/) {
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
 		DEBUG("Connecting with device %s on uuid %s profile", address.c_str(), getProfileUuid().c_str());
 		// We always return a failure here that is initial thing someone
 		// called this method for
@@ -175,7 +181,14 @@ void Bluez5ObexProfileBase::createSession(const std::string &address, Bluez5Obex
 		return;
 	}
 
-	auto sessionCreateCallback = [this, address, callback](Bluez5ObexSession *session) {
+	auto sessionCreateCallback = [this, alive = mLifetime.token(), address, callback](Bluez5ObexSession *session) {
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			delete session;
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
 		if (!session)
 		{
 			handleFailedToCreateSession(address, callback);

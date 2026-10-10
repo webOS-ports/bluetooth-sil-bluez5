@@ -83,7 +83,13 @@ BluetoothOppTransferId Bluez5ProfileOpp::pushFile(const std::string &address,
 
 	BluetoothOppTransferId transferId = nextTransferId();
 
-	auto pushCallback = [this, objectPushProxy, sourcePath, transferId, callback](GAsyncResult *result) {
+	auto pushCallback = [this, alive = mLifetime.token(), objectPushProxy, sourcePath, transferId, callback](GAsyncResult *result) {
+		// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL, 0, 0, false);
+			return;
+		}
 		GError *error = 0;
 		[[maybe_unused]] gboolean ret;
 
@@ -115,7 +121,13 @@ void Bluez5ProfileOpp::cancelTransfer(BluetoothOppTransferId id, BluetoothResult
 		return;
 	}
 
-	auto cancelCallback = [this, id, callback](BluetoothError error) {
+	auto cancelCallback = [this, alive = mLifetime.token(), id, callback](BluetoothError error) {
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
 		if (error != BLUETOOTH_ERROR_NONE)
 		{
 			callback(error);
@@ -212,9 +224,14 @@ void Bluez5ProfileOpp::supplyTransferConfirmation(BluetoothOppTransferId transfe
 
 	if (accept)
 	{
-		auto resultCallBack = [this, transferId](BluetoothError /*error*/, uint64_t bytesTransferred,
+		auto resultCallBack = [this, alive = mLifetime.token(), transferId](BluetoothError /*error*/, uint64_t bytesTransferred,
 														   uint64_t /*totalSize*/, bool finished)
 		{
+			// Called back after the profile may have gone with its adapter.
+			if (alive.expired())
+			{
+				return;
+			}
 			if (mTransfersMap[transferId])
 				getOppObserver()->transferStateChanged(transferId, bytesTransferred - mTransfersMap[transferId], finished);
 			else
