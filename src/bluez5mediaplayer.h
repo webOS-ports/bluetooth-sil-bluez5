@@ -19,7 +19,12 @@
 
 #include <bluetooth-sil-api.h>
 #include <map>
+#include <memory>
 #include <string>
+#include <utility>
+#include <vector>
+
+#include "asyncutils.h"
 
 extern "C" {
 #include "freedesktop-interface.h"
@@ -46,8 +51,11 @@ public:
 	/* AVRCP CT player control APIs */
 	BluetoothError sendPassThroughCommand(BluetoothAvrcpPassThroughKeyCode keyCode,
 			BluetoothAvrcpPassThroughKeyStatus keyStatus);
-	BluetoothError setPlayerApplicationSettingsProperties(
-			const BluetoothPlayerApplicationSettingsPropertiesList &properties);
+	// Answered with callback, once, after the remote device has answered every setting (BlueZ completes the Set
+	// only then) or the first one failed.
+	void setPlayerApplicationSettingsProperties(
+			const BluetoothPlayerApplicationSettingsPropertiesList &properties,
+			BluetoothResultCallback callback);
 
 	/* AVRCP CT browse APIs called from Bluez5ProfileAvcrp */
 	void getNumberOfItems(BluetoothAvrcpBrowseTotalNumberOfItemsCallback callback);
@@ -101,6 +109,13 @@ private:
 	std::string scanEnumToString(BluetoothPlayerApplicationSettingsScan scan);
 	bool updatePlayerProperties();
 	BluetoothAvrcpPlayerType playerTypeStringToEnum(const std::string type);
+
+	// {property, value} for org.bluez.MediaPlayer1, set one after the other.
+	typedef std::vector<std::pair<std::string, std::string>> PlayerSettings;
+	void setNextPlayerSetting(std::shared_ptr<const PlayerSettings> settings, size_t index,
+			BluetoothResultCallback callback);
+
+	LifetimeGuard mLifetime;	// last: replies after the player went see it expire first
 };
 
 #endif //BLUEZ5MEDIAPLAYER_H

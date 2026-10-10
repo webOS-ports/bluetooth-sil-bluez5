@@ -47,6 +47,19 @@ target_link_libraries(bluez5-sil-glib-tests ${GTEST_MAIN_LIBRARY} ${GTEST_LIBRAR
     ${GLIB2_LDFLAGS} ${GIO2_LDFLAGS} ${PMLOG_LDFLAGS} pthread)
 add_test(NAME bluez5-sil-glib COMMAND bluez5-sil-glib-tests)
 
+# The AVRCP browsing folder and player against a fake bluetoothd on a private bus (needs dbus-daemon at run time).
+add_executable(bluez5-sil-media-tests ${CMAKE_CURRENT_SOURCE_DIR}/media/test_avrcpmedia.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/glib/support.cpp
+    ${PROJECT_SOURCE_DIR}/src/bluez5mediafolder.cpp ${PROJECT_SOURCE_DIR}/src/bluez5mediaplayer.cpp
+    ${PROJECT_SOURCE_DIR}/src/asyncutils.cpp ${PROJECT_SOURCE_DIR}/src/utils.cpp
+    ${GDBUS_IF_DIR}/bluez-interface.c ${GDBUS_IF_DIR}/freedesktop-interface.c)
+target_include_directories(bluez5-sil-media-tests PRIVATE ${PROJECT_SOURCE_DIR}/src ${GDBUS_IF_DIR})
+target_link_libraries(bluez5-sil-media-tests ${GTEST_MAIN_LIBRARY} ${GTEST_LIBRARY}
+    ${GLIB2_LDFLAGS} ${GIO2_LDFLAGS} ${PMLOG_LDFLAGS} pthread)
+# The profile is stubbed, so its type info is not there for UBSan's vptr check (GCC references it).
+target_compile_options(bluez5-sil-media-tests PRIVATE -fno-sanitize=vptr)
+add_test(NAME bluez5-sil-media COMMAND bluez5-sil-media-tests)
+
 # libFuzzer targets (clang only, -DBUILD_FUZZING=ON).
 option(BUILD_FUZZING "Build the libFuzzer targets (clang)" OFF)
 if(BUILD_FUZZING)

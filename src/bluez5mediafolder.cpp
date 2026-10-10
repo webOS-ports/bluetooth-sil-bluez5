@@ -20,9 +20,13 @@
 #include "logging.h"
 #include "asyncutils.h"
 
-// ChangeFolder, Play, AddtoNowPlaying and NumberOfItems are answered by BlueZ only once the remote device is: an
-// unresponsive phone held the whole service for the default 25 s per call.
-static const gint REMOTE_CALL_TIMEOUT_MS = 3000;
+// The calls still made synchronously, which bluetoothd answers itself (BlueZ 5.86 profiles/audio/player.c): the
+// NumberOfItems and GetAll property reads from its cache, and AddtoNowPlaying, replied to once the command is queued.
+// They blocked the whole service for up to the default 25 s when bluetoothd hung; 3 s bounds that.
+// ChangeFolder, MediaItem1.Play, ListItems and Search are answered only after the remote device (BlueZ's own AVCTP
+// timeout is 10 s, a control request is retried once): they are asynchronous, with the default D-Bus timeout, as a
+// shorter one gave up while BlueZ still held the request and refused the next one with EBUSY.
+static const gint LOCAL_CALL_TIMEOUT_MS = 3000;
 
 // A MediaItem1 proxy, owned for the scope: one leaked per changePath/playItem/addToNowPlaying, each with its own
 // match rule on the bus.
@@ -32,7 +36,8 @@ Bluez5MediaFolder::Bluez5MediaFolder(Bluez5ProfileAvcrp *avrcp,
 		const std::string &playerPath) :
 	mAvrcp(avrcp),
 	mFolderInterface(nullptr),
-	mPropertiesProxy(nullptr)
+	mPropertiesProxy(nullptr),
+	mBrowseRequestPending(false)
 {
 	mPlayerObjPath = playerPath;
 	GError *error = 0;
@@ -56,8 +61,7 @@ Bluez5MediaFolder::Bluez5MediaFolder(Bluez5ProfileAvcrp *avrcp,
 		return;
 	}
 
-	g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mFolderInterface), REMOTE_CALL_TIMEOUT_MS);
-	g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mPropertiesProxy), REMOTE_CALL_TIMEOUT_MS);
+	g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mPropertiesProxy), LOCAL_CALL_TIMEOUT_MS);
 
 	g_signal_connect(G_OBJECT(mPropertiesProxy), "properties-changed",
 			G_CALLBACK(handlePropertiesChanged), this);
@@ -173,6 +177,12 @@ void Bluez5MediaFolder::getFolderItems(uint32_t startIndex, uint32_t endIndex,
 		callback(BLUETOOTH_ERROR_FAIL, BluetoothFolderItemList());
 		return;
 	}
+	if (mBrowseRequestPending)
+	{
+		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "List items: another browsing request is waiting for the device");
+		callback(BLUETOOTH_ERROR_BUSY, BluetoothFolderItemList());
+		return;
+	}
 
 	GVariantBuilder *builderFilter = g_variant_builder_new(G_VARIANT_TYPE("a{sv}"));
 	g_variant_builder_add(builderFilter, "{sv}", "start", g_variant_new_uint32(startIndex));
@@ -183,9 +193,12 @@ void Bluez5MediaFolder::getFolderItems(uint32_t startIndex, uint32_t endIndex,
 	BluetoothFolderItemList itemList;
 
 	// Answered over AVRCP browsing, possibly after the phone switched player and this folder was deleted: the
-	// reply finishes on its own proxy and uses nothing of the folder (it read the freed folder's interface).
-	auto listItemsCallback = [callback](GObject *source, GAsyncResult *result) {
+	// reply finishes on its own proxy (it read the freed folder's interface), and touches the folder only while
+	// it is there.
+	auto listItemsCallback = [this, alive = mLifetime.token(), callback](GObject *source, GAsyncResult *result) {
 		DEBUG("listItemsCallback");
+		if (!alive.expired())
+			mBrowseRequestPending = false;
 		GError *error = 0;
 		gboolean ret;
 		BluetoothFolderItemList itemList;
@@ -303,6 +316,7 @@ void Bluez5MediaFolder::getFolderItems(uint32_t startIndex, uint32_t endIndex,
 		return;
 	};
 
+	mBrowseRequestPending = true;
 	bluez_media_folder1_call_list_items(mFolderInterface, filters, NULL,
 										glibAsyncMethodWrapper,
 										new GlibAsyncFunctionWrapper(listItemsCallback));
@@ -332,8 +346,6 @@ BluetoothError Bluez5MediaFolder::changePath(const std::string &itemPath)
 	MediaItemRef mediaItemRef(bluez_media_item1_proxy_new_for_bus_sync(
 		G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, "org.bluez", itemPath.c_str(), NULL, &error));
 	BluezMediaItem1 *mediaItem = mediaItemRef.get();
-	if (mediaItem)
-		g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mediaItem), REMOTE_CALL_TIMEOUT_MS);
 	if (error)
 	{
 		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0,
@@ -362,15 +374,30 @@ BluetoothError Bluez5MediaFolder::changePath(const std::string &itemPath)
 
 	if (!mFolderInterface)
 		return BLUETOOTH_ERROR_FAIL;
-	bluez_media_folder1_call_change_folder_sync(
-		mFolderInterface, itemPath.c_str(), NULL, &error);
-	if (error)
+	if (mBrowseRequestPending)
 	{
-		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Not able to change folder: %s", error->message);
-		g_error_free(error);
-		return BLUETOOTH_ERROR_FAIL;
+		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Change folder: another browsing request is waiting for the device");
+		return BLUETOOTH_ERROR_BUSY;
 	}
 
+	// BlueZ answers once the device has: waited for, a phone that did not answer held the whole service.
+	auto changeFolderCallback = [this, alive = mLifetime.token(), itemPath](GObject *source, GAsyncResult *result) {
+		if (!alive.expired())
+			mBrowseRequestPending = false;
+		GError *error = 0;
+		gboolean ret = bluez_media_folder1_call_change_folder_finish(BLUEZ_MEDIA_FOLDER1(source), result, &error);
+		if (error)
+		{
+			ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Not able to change folder to %s: %s", itemPath.c_str(),
+				  error->message);
+			g_error_free(error);
+		}
+		else if (!ret)
+			ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Not able to change folder to %s", itemPath.c_str());
+	};
+	mBrowseRequestPending = true;
+	bluez_media_folder1_call_change_folder(mFolderInterface, itemPath.c_str(), NULL, glibAsyncMethodWrapper,
+										   new GlibAsyncFunctionWrapper(changeFolderCallback));
 	return BLUETOOTH_ERROR_NONE;
 }
 
@@ -380,8 +407,6 @@ BluetoothError Bluez5MediaFolder::playItem(const std::string &itemPath)
 	MediaItemRef mediaItemRef(bluez_media_item1_proxy_new_for_bus_sync(
 		G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, "org.bluez", itemPath.c_str(), NULL, &error));
 	BluezMediaItem1 *mediaItem = mediaItemRef.get();
-	if (mediaItem)
-		g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mediaItem), REMOTE_CALL_TIMEOUT_MS);
 
 	if (error)
 	{
@@ -402,15 +427,29 @@ BluetoothError Bluez5MediaFolder::playItem(const std::string &itemPath)
 		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "MediaItem is not playable");
 		return BLUETOOTH_ERROR_AVRCP_ITEM_NOT_PLAYABLE;
 	}
-
-	bluez_media_item1_call_play_sync(mediaItem, NULL, &error);
-	if (error)
+	if (mBrowseRequestPending)
 	{
-		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0,
-			  "Not able to play media item: %s", error->message);
-		g_error_free(error);
-		return BLUETOOTH_ERROR_FAIL;
+		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Play item: another browsing request is waiting for the device");
+		return BLUETOOTH_ERROR_BUSY;
 	}
+
+	// Answered once the device has, like ChangeFolder. The call holds its own reference to the item proxy.
+	auto playCallback = [this, alive = mLifetime.token(), itemPath](GObject *source, GAsyncResult *result) {
+		if (!alive.expired())
+			mBrowseRequestPending = false;
+		GError *error = 0;
+		gboolean ret = bluez_media_item1_call_play_finish(BLUEZ_MEDIA_ITEM1(source), result, &error);
+		if (error)
+		{
+			ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Not able to play media item %s: %s", itemPath.c_str(),
+				  error->message);
+			g_error_free(error);
+		}
+		else if (!ret)
+			ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Not able to play media item %s", itemPath.c_str());
+	};
+	mBrowseRequestPending = true;
+	bluez_media_item1_call_play(mediaItem, NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(playCallback));
 	return BLUETOOTH_ERROR_NONE;
 }
 
@@ -421,7 +460,7 @@ BluetoothError Bluez5MediaFolder::addToNowPlaying(const std::string &itemPath)
 		G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, "org.bluez", itemPath.c_str(), NULL, &error));
 	BluezMediaItem1 *mediaItem = mediaItemRef.get();
 	if (mediaItem)
-		g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mediaItem), REMOTE_CALL_TIMEOUT_MS);
+		g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mediaItem), LOCAL_CALL_TIMEOUT_MS);
 
 	if (error)
 	{
@@ -442,6 +481,7 @@ BluetoothError Bluez5MediaFolder::addToNowPlaying(const std::string &itemPath)
 		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "MediaItem is not playable");
 		return BLUETOOTH_ERROR_AVRCP_ITEM_NOT_PLAYABLE;
 	}
+	// Synchronous: bluetoothd replies once the command is queued, without waiting for the device.
 	bluez_media_item1_call_addto_now_playing_sync(mediaItem, NULL, &error);
 	if (error)
 	{
@@ -466,14 +506,21 @@ void Bluez5MediaFolder::search(const std::string &searchString,
 		callback(BLUETOOTH_ERROR_FAIL, "");	// never answered, as for ListItems
 		return;
 	}
+	if (mBrowseRequestPending)
+	{
+		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Search: another browsing request is waiting for the device");
+		callback(BLUETOOTH_ERROR_BUSY, "");
+		return;
+	}
 
 	GVariantBuilder *builderFilter = g_variant_builder_new(G_VARIANT_TYPE("a{sv}"));
 
 	GVariant *filters = g_variant_builder_end(builderFilter);
 	g_variant_builder_unref(builderFilter);
 
-	auto searchCallback = [callback](GObject *source, GAsyncResult *result) {
-
+	auto searchCallback = [this, alive = mLifetime.token(), callback](GObject *source, GAsyncResult *result) {
+		if (!alive.expired())
+			mBrowseRequestPending = false;
 		GError *error = 0;
 		gboolean ret;
 		gchar *outFolder = NULL;
@@ -507,6 +554,7 @@ void Bluez5MediaFolder::search(const std::string &searchString,
 
 	};
 
+	mBrowseRequestPending = true;
 	bluez_media_folder1_call_search(mFolderInterface, searchString.c_str(), filters,
 										NULL, glibAsyncMethodWrapper,
 										new GlibAsyncFunctionWrapper(searchCallback));

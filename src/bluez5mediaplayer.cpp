@@ -21,8 +21,14 @@
 #include "logging.h"
 #include <utils.h>
 
-// For calls that BlueZ completes only once the remote device answers.
-static const gint REMOTE_CALL_TIMEOUT_MS = 3000;
+// The calls made synchronously, which bluetoothd answers itself (BlueZ 5.86 profiles/audio/player.c): the
+// pass-through ones (Play, Pause, Next...), replied to once the AVCTP command is queued, and the GetAll property
+// reads from its cache. 3 s bounds how long a hung bluetoothd holds the service.
+static const gint LOCAL_CALL_TIMEOUT_MS = 3000;
+// A Set of a player application setting is completed by BlueZ only when the remote device answers (its own AVCTP
+// timeout is 10 s, retried once): asynchronous, with the default D-Bus timeout, so that it does not give up while
+// BlueZ still waits.
+static const gint REMOTE_CALL_TIMEOUT_MS = -1;
 
 const std::map<BluetoothAvrcpPassThroughKeyCode, bluezSendPassThroughCommand> Bluez5MediaPlayer::mPassThroughCmd = {
 	{KEY_CODE_PLAY, &bluez_media_player1_call_play_sync},
@@ -76,10 +82,8 @@ Bluez5MediaPlayer::Bluez5MediaPlayer(Bluez5ProfileAvcrp *avrcp,
 		return;
 	}
 
-	// Calls that BlueZ answers only after the remote device does (pass-through, Set of a player setting): an
-	// unresponsive phone held the whole service for the default 25 s per call.
-	g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mPlayerInterface), REMOTE_CALL_TIMEOUT_MS);
-	g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mPropertiesProxy), REMOTE_CALL_TIMEOUT_MS);
+	g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mPlayerInterface), LOCAL_CALL_TIMEOUT_MS);
+	g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mPropertiesProxy), LOCAL_CALL_TIMEOUT_MS);
 
 	g_signal_connect(G_OBJECT(mPropertiesProxy), "properties-changed",
 					 G_CALLBACK(handlePropertiesChanged), this);
@@ -393,6 +397,9 @@ BluetoothError Bluez5MediaPlayer::sendPassThroughCommand(
 	auto passThroughCmdIt = mPassThroughCmd.find(keyCode);
 	if (passThroughCmdIt != mPassThroughCmd.end())
 	{
+		if (!mPlayerInterface)
+			return BLUETOOTH_ERROR_FAIL;
+		// Synchronous: bluetoothd replies once the AVCTP command is queued, not when the device answers.
 		passThroughCmdIt->second(mPlayerInterface, NULL, &error);
 		if (error)
 		{
@@ -514,60 +521,91 @@ BluetoothPlayerApplicationSettingsEqualizer Bluez5MediaPlayer::equalizerStringTo
 		return BluetoothPlayerApplicationSettingsEqualizer::EQUALIZER_UNKNOWN;
 }
 
-BluetoothError Bluez5MediaPlayer::setPlayerApplicationSettingsProperties(
-	const BluetoothPlayerApplicationSettingsPropertiesList &properties)
+void Bluez5MediaPlayer::setPlayerApplicationSettingsProperties(
+	const BluetoothPlayerApplicationSettingsPropertiesList &properties,
+	BluetoothResultCallback callback)
 {
-	GError *error = 0;
-	std::string property;
-	std::string value;
+	auto settings = std::make_shared<PlayerSettings>();
 	for (auto prop : properties)
 	{
 		switch (prop.getType())
 		{
 			case BluetoothPlayerApplicationSettingsProperty::Type::EQUALIZER:
-				{
-					property = "Equalizer";
-					value = equalizerEnumToString(
-						prop.getValue<BluetoothPlayerApplicationSettingsEqualizer>());
-					break;
-				}
+				settings->emplace_back("Equalizer", equalizerEnumToString(
+					prop.getValue<BluetoothPlayerApplicationSettingsEqualizer>()));
+				break;
 			case BluetoothPlayerApplicationSettingsProperty::Type::REPEAT:
-				{
-					property = "Repeat";
-					value = repeatEnumToString(
-						prop.getValue<BluetoothPlayerApplicationSettingsRepeat>());
-					break;
-				}
+				settings->emplace_back("Repeat", repeatEnumToString(
+					prop.getValue<BluetoothPlayerApplicationSettingsRepeat>()));
+				break;
 			case BluetoothPlayerApplicationSettingsProperty::Type::SHUFFLE:
-				{
-					property = "Shuffle";
-					value = shuffleEnumToString(
-						prop.getValue<BluetoothPlayerApplicationSettingsShuffle>());
-					break;
-				}
+				settings->emplace_back("Shuffle", shuffleEnumToString(
+					prop.getValue<BluetoothPlayerApplicationSettingsShuffle>()));
+				break;
 			case BluetoothPlayerApplicationSettingsProperty::Type::SCAN:
-				{
-					property = "Scan";
-					value = scanEnumToString(
-						prop.getValue<BluetoothPlayerApplicationSettingsScan>());
-					break;
-				}
+				settings->emplace_back("Scan", scanEnumToString(
+					prop.getValue<BluetoothPlayerApplicationSettingsScan>()));
+				break;
 			default:
-				continue;	// no setting: it was sent to BlueZ as a property with an empty name
-		}
-		GVariant *var = g_variant_new_string(value.c_str());
-		free_desktop_dbus_properties_call_set_sync(mPropertiesProxy,
-				"org.bluez.MediaPlayer1", property.c_str(),
-				g_variant_new_variant(var), NULL, &error);
-		if (error)
-		{
-			DEBUG ("%s: error is %s for prop: %s, value: %s",
-					__func__, error->message, property.c_str(), value.c_str());
-			g_error_free(error);
-			return BLUETOOTH_ERROR_FAIL;
+				break;	// no setting: it was sent to BlueZ as a property with an empty name
 		}
 	}
-	return BLUETOOTH_ERROR_NONE;
+	setNextPlayerSetting(settings, 0, callback);
+}
+
+// BlueZ completes each Set only when the device has answered: waited for, an unresponsive phone held the whole
+// service. One after the other as before, stopping at the first failure.
+void Bluez5MediaPlayer::setNextPlayerSetting(std::shared_ptr<const PlayerSettings> settings, size_t index,
+		BluetoothResultCallback callback)
+{
+	if (index >= settings->size())
+	{
+		callback(BLUETOOTH_ERROR_NONE);
+		return;
+	}
+	if (!mPropertiesProxy)
+	{
+		callback(BLUETOOTH_ERROR_FAIL);
+		return;
+	}
+
+	const auto &setting = (*settings)[index];
+	auto setCallback = [this, alive = mLifetime.token(), settings, index, callback](GObject *source,
+			GAsyncResult *result) {
+		const auto &done = (*settings)[index];
+		GError *error = 0;
+		GVariant *reply = g_dbus_proxy_call_finish(G_DBUS_PROXY(source), result, &error);
+		const bool ok = reply && !error;
+		if (reply)
+			g_variant_unref(reply);
+		if (!ok)
+		{
+			DEBUG("setPlayerApplicationSettingsProperties: error is %s for prop: %s, value: %s",
+				  error ? error->message : "no reply",
+				  done.first.c_str(), done.second.c_str());
+			g_clear_error(&error);
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
+		if (index + 1 >= settings->size())
+		{
+			callback(BLUETOOTH_ERROR_NONE);
+			return;
+		}
+		// The player went with its device: the remaining settings cannot be made.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
+		setNextPlayerSetting(settings, index + 1, callback);
+	};
+
+	g_dbus_proxy_call(G_DBUS_PROXY(mPropertiesProxy), "Set",
+			g_variant_new("(ssv)", "org.bluez.MediaPlayer1", setting.first.c_str(),
+						  g_variant_new_string(setting.second.c_str())),
+			G_DBUS_CALL_FLAGS_NONE, REMOTE_CALL_TIMEOUT_MS, NULL, glibAsyncMethodWrapper,
+			new GlibAsyncFunctionWrapper(setCallback));
 }
 
 bool Bluez5MediaPlayer::updatePlayerProperties()

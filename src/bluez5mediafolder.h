@@ -20,6 +20,8 @@
 #include <bluetooth-sil-api.h>
 #include <string>
 
+#include "asyncutils.h"
+
 extern "C" {
 #include "freedesktop-interface.h"
 #include "bluez-interface.h"
@@ -37,6 +39,9 @@ public:
 	void getNumberOfItems(BluetoothAvrcpBrowseTotalNumberOfItemsCallback callback);
 	void getFolderItems(uint32_t startIndex, uint32_t endIndex,
 						BluetoothAvrcpBrowseFolderItemsCallback callback);
+	// Sent without waiting for the remote device: NONE means the request went out, and its outcome shows in the
+	// folder's Name (currentFolderReceived) and the player's status and track. BUSY while another browsing request
+	// of this folder is waiting for the remote device.
 	BluetoothError changePath(const std::string &itemPath);
 	BluetoothError playItem(const std::string &itemPath);
 	BluetoothError addToNowPlaying(const std::string &itemPath);
@@ -55,7 +60,10 @@ private:
 			gpointer userData);
 	void mediaFolderPropertiesChanged(GVariant* changedProperties);
 	static BluetoothAvrcpItemType itemTypeStringToEnum(const std::string type);
-
+	// BlueZ keeps one browsing request per folder (ChangeFolder, MediaItem1.Play, ListItems, Search) and fails
+	// another with EBUSY: true while one of ours is waiting for its reply.
+	bool mBrowseRequestPending;
+	LifetimeGuard mLifetime;	// last: replies after the folder went see it expire first
 
 };
 #endif //BLUEZ5MEDIAFOLDER_H

@@ -529,7 +529,8 @@ void Bluez5ProfileAvcrp::setPlayerApplicationSettingsProperties(
 		callback(BLUETOOTH_ERROR_NOT_ALLOWED);
 		return;
 	}
-	callback(player->setPlayerApplicationSettingsProperties(properties));
+	// Answered once the remote device has: asynchronously.
+	player->setPlayerApplicationSettingsProperties(properties, callback);
 }
 
 BluetoothError Bluez5ProfileAvcrp::sendPassThroughCommand(

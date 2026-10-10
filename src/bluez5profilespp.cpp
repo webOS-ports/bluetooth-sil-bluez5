@@ -197,6 +197,10 @@ int Bluez5ProfileSpp::registerProfile(spDeviceInfo &deviceInfo, std::string objP
 	g_variant_builder_close(&profileBuilder);
 	profileVariant = g_variant_builder_end(&profileBuilder);
 
+	// Synchronous on purpose: bluetoothd answers RegisterProfile itself (BlueZ 5.86 src/profile.c
+	// register_profile: the profile and its SDP record and listening socket are set up locally, nothing is sent to
+	// a device or waited for). The same holds for the UnregisterProfile calls in this file (unregister_profile and
+	// remove_ext; a RequestDisconnection to us is sent without waiting for our reply).
 	GVariant *ret = g_dbus_proxy_call_sync (G_DBUS_PROXY(proxy),
 				"RegisterProfile",
 				profileVariant,
