@@ -18,7 +18,6 @@
 #include "bluez5adapter.h"
 #include "logging.h"
 #include "utils.h"
-#include "bluez5mediacontrol.h"
 #include "bluez5mprisplayer.h"
 #include "bluez5profilea2dp.h"
 #include "bluez5mediaplayer.h"
@@ -238,25 +237,38 @@ void Bluez5ProfileAvcrp::getProperty(const std::string &address, BluetoothProper
 		return;
 	}
 
-	bool connected = (device->getAddress() == mConnectedDeviceAddress);
+	bool connected = isDeviceConnected(device->getAddress());
 	prop.setValue<bool>(connected);
 	callback(BLUETOOTH_ERROR_NONE, prop);
 }
 
 void Bluez5ProfileAvcrp::supplyMediaMetaData(BluetoothAvrcpRequestId /*requestId*/, const BluetoothMediaMetaData &metaData, BluetoothResultCallback callback)
 {
-	mAdapter->getPlayer()->setMediaMetaData(metaData);
+	// No player until org.bluez.Media1 is there, and none again once it goes: it was dereferenced anyway.
+	auto player = mAdapter->getPlayer();
+	if (!player)
+	{
+		callback(BLUETOOTH_ERROR_NOT_READY);
+		return;
+	}
+	player->setMediaMetaData(metaData);
 	callback(BLUETOOTH_ERROR_NONE);
 }
 
 void Bluez5ProfileAvcrp::supplyMediaPlayStatus(BluetoothAvrcpRequestId /*requestId*/, const BluetoothMediaPlayStatus &playStatus, BluetoothResultCallback callback)
 {
-	mAdapter->getPlayer()->setMediaPlayStatus(playStatus);
+	auto player = mAdapter->getPlayer();
+	if (!player)
+	{
+		callback(BLUETOOTH_ERROR_NOT_READY);
+		return;
+	}
+	player->setMediaPlayStatus(playStatus);
 	if (playStatus.getStatus() == BluetoothMediaPlayStatus::MEDIA_PLAYSTATUS_STOPPED)
-		mAdapter->getPlayer()->setMediaPosition(0);
+		player->setMediaPosition(0);
 	else
-		mAdapter->getPlayer()->setMediaPosition(playStatus.getPosition());
-	mAdapter->getPlayer()->setMediaDuration(playStatus.getDuration());
+		player->setMediaPosition(playStatus.getPosition());
+	player->setMediaDuration(playStatus.getDuration());
 	callback(BLUETOOTH_ERROR_NONE);
 }
 
@@ -268,12 +280,18 @@ void Bluez5ProfileAvcrp::notifyMediaPlayStatus(const BluetoothMediaPlayStatus &p
 		callback(BLUETOOTH_ERROR_NOT_ALLOWED);
 		return;
 	}
-	mAdapter->getPlayer()->setMediaPlayStatus(playStatus);
+	auto player = mAdapter->getPlayer();
+	if (!player)
+	{
+		callback(BLUETOOTH_ERROR_NOT_READY);
+		return;
+	}
+	player->setMediaPlayStatus(playStatus);
 	if (playStatus.getStatus() == BluetoothMediaPlayStatus::MEDIA_PLAYSTATUS_STOPPED)
-		mAdapter->getPlayer()->setMediaPosition(0);
+		player->setMediaPosition(0);
 	else
-		mAdapter->getPlayer()->setMediaPosition(playStatus.getPosition());
-	mAdapter->getPlayer()->setMediaDuration(playStatus.getDuration());
+		player->setMediaPosition(playStatus.getPosition());
+	player->setMediaDuration(playStatus.getDuration());
 	callback(BLUETOOTH_ERROR_NONE);
 }
 
@@ -295,40 +313,50 @@ void Bluez5ProfileAvcrp::updateConnectionStatus(const std::string &address, bool
 	DEBUG("AVRCP isConnected %d:%s, mConnected:%d", status, uuid.c_str(), mConnected);
 	BluetoothPropertiesList properties;
 
+	std::string key = convertAddressToUpperCase(address);
+	auto &roles = mDeviceRoles[key];
+	bool wasConnected = roles.first || roles.second;
 	if (BLUETOOTH_PROFILE_AVRCP_TARGET_UUID == uuid)
-		mConnectedController = status;
+		roles.first = status;
 	else
-		mConnectedTarget = status;
-	if (status)
-	{
-		if (!mConnected)
-		{
-			DEBUG("AVRCP: Notifying upper layer avrcp connected");
-			/* Inform upper layer if previous status is not connected and current status is
-			 * at least one of the roles is connected. */
-			mConnected = status;
-			properties.push_back(BluetoothProperty(BluetoothProperty::Type::CONNECTED, status));
-			getObserver()->propertiesChanged(convertAddressToLowerCase(mAdapter->getAddress()),
-					convertAddressToLowerCase(address), properties);
-			mConnectedDeviceAddress = address;
-		}
-	}
-	else
-	{
-		if (mConnected && !mConnectedController && !mConnectedTarget)
-		{
-			mConnectedDeviceAddress = "";
+		roles.second = status;
+	bool isConnected = roles.first || roles.second;
+	if (!isConnected)
+		mDeviceRoles.erase(key);
 
-			DEBUG("AVRCP: Notifying upper layer avrcp disconnected");
-			/* Inform upper layer if previous status is connected and current status is
-			   both the roles are not connected. */
-			mConnected = status;
-			properties.push_back(BluetoothProperty(BluetoothProperty::Type::CONNECTED, status));
-			getObserver()->propertiesChanged(convertAddressToLowerCase(mAdapter->getAddress()),
-					convertAddressToLowerCase(address), properties);
-		}
+	mConnectedController = mConnectedTarget = false;
+	for (auto &entry : mDeviceRoles)
+	{
+		mConnectedController |= entry.second.first;
+		mConnectedTarget |= entry.second.second;
 	}
+	mConnected = !mDeviceRoles.empty();
 
+	if (isConnected && !wasConnected)
+	{
+		DEBUG("AVRCP: Notifying upper layer avrcp connected");
+		/* Inform upper layer when the first of this device's roles connects. */
+		properties.push_back(BluetoothProperty(BluetoothProperty::Type::CONNECTED, true));
+		getObserver()->propertiesChanged(convertAddressToLowerCase(mAdapter->getAddress()),
+				convertAddressToLowerCase(address), properties);
+		mConnectedDeviceAddress = address;
+	}
+	else if (!isConnected && wasConnected)
+	{
+		if (convertAddressToUpperCase(mConnectedDeviceAddress) == key)
+			mConnectedDeviceAddress = mDeviceRoles.empty() ? "" : mDeviceRoles.begin()->first;
+
+		DEBUG("AVRCP: Notifying upper layer avrcp disconnected");
+		/* Inform upper layer when both of this device's roles are disconnected. */
+		properties.push_back(BluetoothProperty(BluetoothProperty::Type::CONNECTED, false));
+		getObserver()->propertiesChanged(convertAddressToLowerCase(mAdapter->getAddress()),
+				convertAddressToLowerCase(address), properties);
+	}
+}
+
+bool Bluez5ProfileAvcrp::isDeviceConnected(const std::string &address) const
+{
+	return !address.empty() && mDeviceRoles.count(convertAddressToUpperCase(address));
 }
 
 void Bluez5ProfileAvcrp::updateSupportedNotificationEvents(uint16_t notificationEvents, const std::string& address)
@@ -403,7 +431,7 @@ void Bluez5ProfileAvcrp::updateRemoteFeatures(uint8_t features, const std::strin
 	if (features & REMOTE_DEVICE_AVRCP_FEATURE_BROWSE)
 	{
 		remoteFeatures = FEATURE_BROWSE;
-		if (mConnected && mConnectedDeviceAddress == address)
+		if (isDeviceConnected(address))
 			getAvrcpObserver()->remoteFeaturesReceived(remoteFeatures,
 				convertAddressToLowerCase(mAdapter->getAddress()),
 				convertAddressToLowerCase(address), role);
@@ -411,7 +439,7 @@ void Bluez5ProfileAvcrp::updateRemoteFeatures(uint8_t features, const std::strin
 	if (features & REMOTE_DEVICE_AVRCP_FEATURE_ABSOLUTE_VOLUME)
 	{
 		remoteFeatures = FEATURE_ABSOLUTE_VOLUME;
-		if (mConnected && mConnectedDeviceAddress == address)
+		if (isDeviceConnected(address))
 			getAvrcpObserver()->remoteFeaturesReceived(remoteFeatures,
 				convertAddressToLowerCase(mAdapter->getAddress()),
 				convertAddressToLowerCase(address), role);
@@ -420,7 +448,7 @@ void Bluez5ProfileAvcrp::updateRemoteFeatures(uint8_t features, const std::strin
 	if (features & REMOTE_DEVICE_AVRCP_FEATURE_METADATA)
 	{
 		remoteFeatures = FEATURE_METADATA;
-		if (mConnected && mConnectedDeviceAddress == address)
+		if (isDeviceConnected(address))
 			getAvrcpObserver()->remoteFeaturesReceived(remoteFeatures,
 				convertAddressToLowerCase(mAdapter->getAddress()),
 				convertAddressToLowerCase(address), role);
@@ -470,6 +498,8 @@ void Bluez5ProfileAvcrp::recievePassThroughCommand(std::string address, std::str
 		//TODO: Remove setMediaPlayStatus() call from this code block, after
 		//proper implementation in media application
 		BluetoothMediaPlayStatus status;
+		if (!mAdapter->getPlayer())
+			return;
 		if (key == "PLAY")
 		{
 			status.setStatus(BluetoothMediaPlayStatus::MEDIA_PLAYSTATUS_PLAYING);
@@ -488,11 +518,19 @@ void Bluez5ProfileAvcrp::recievePassThroughCommand(std::string address, std::str
 	}
 }
 
-BluetoothError Bluez5ProfileAvcrp::setAbsoluteVolume(const std::string &/*address*/, int volume)
+BluetoothError Bluez5ProfileAvcrp::setAbsoluteVolume(const std::string &address, int volume)
 {
+	// AVRCP absolute volume is 0..127: -1 became 255 and 256 became 0, and BlueZ refuses >127 later while NONE
+	// was returned. Without a transport the property was set on NULL.
+	if (volume < 0 || volume > 127)
+		return BLUETOOTH_ERROR_PARAM_INVALID;
+
 	Bluez5ProfileA2dp *a2dp = dynamic_cast<Bluez5ProfileA2dp*> (mAdapter->getProfile(BLUETOOTH_PROFILE_ID_A2DP));
-	if (a2dp)
-		bluez_media_transport1_set_volume(a2dp->getMediaTransport(), (uint8_t)volume);
+	BluezMediaTransport1 *transport = a2dp ? a2dp->getMediaTransport(address) : nullptr;
+	if (!transport)
+		return BLUETOOTH_ERROR_NOT_READY;
+
+	bluez_media_transport1_set_volume(transport, (guint16)volume);
 	return BLUETOOTH_ERROR_NONE;
 }
 

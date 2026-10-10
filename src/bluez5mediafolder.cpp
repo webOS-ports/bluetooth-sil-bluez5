@@ -20,6 +20,14 @@
 #include "logging.h"
 #include "asyncutils.h"
 
+// ChangeFolder, Play, AddtoNowPlaying and NumberOfItems are answered by BlueZ only once the remote device is: an
+// unresponsive phone held the whole service for the default 25 s per call.
+static const gint REMOTE_CALL_TIMEOUT_MS = 3000;
+
+// A MediaItem1 proxy, owned for the scope: one leaked per changePath/playItem/addToNowPlaying, each with its own
+// match rule on the bus.
+typedef GObjectRef<BluezMediaItem1> MediaItemRef;
+
 Bluez5MediaFolder::Bluez5MediaFolder(Bluez5ProfileAvcrp *avrcp,
 		const std::string &playerPath) :
 	mAvrcp(avrcp),
@@ -47,6 +55,9 @@ Bluez5MediaFolder::Bluez5MediaFolder(Bluez5ProfileAvcrp *avrcp,
 		g_error_free(error);
 		return;
 	}
+
+	g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mFolderInterface), REMOTE_CALL_TIMEOUT_MS);
+	g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mPropertiesProxy), REMOTE_CALL_TIMEOUT_MS);
 
 	g_signal_connect(G_OBJECT(mPropertiesProxy), "properties-changed",
 			G_CALLBACK(handlePropertiesChanged), this);
@@ -104,12 +115,17 @@ void Bluez5MediaFolder::mediaFolderPropertiesChanged(GVariant* changedProperties
 		std::string key = g_variant_get_string(keyVar, NULL);
 		if ("Name" == key)
 		{
-			std::string currentFolder = g_variant_get_string(g_variant_get_variant(valueVar), NULL);
+			GVariant *nameVar = g_variant_get_variant(valueVar);	// leaked
+			std::string currentFolder = g_variant_get_string(nameVar, NULL);
+			g_variant_unref(nameVar);
 			DEBUG("Bluez5MediaFolder:: CurrentFolder: %s", currentFolder.c_str());
+			// The device of this folder's player, not the one address the profile keeps for all devices.
+			std::string deviceAddress;
+			objPathToDevAddress(mPlayerObjPath, deviceAddress);
 			mAvrcp->getAvrcpObserver()->currentFolderReceived(
 					currentFolder,
 					convertAddressToLowerCase(mAvrcp->getAdapterAddress()),
-					convertAddressToLowerCase(mAvrcp->getConnectedDeviceAddress()));
+					convertAddressToLowerCase(deviceAddress));
 		}
 		g_variant_unref(valueVar);
 		g_variant_unref(keyVar);
@@ -151,6 +167,13 @@ void Bluez5MediaFolder::getNumberOfItems(BluetoothAvrcpBrowseTotalNumberOfItemsC
 void Bluez5MediaFolder::getFolderItems(uint32_t startIndex, uint32_t endIndex,
 										BluetoothAvrcpBrowseFolderItemsCallback callback)
 {
+	if (!mFolderInterface)
+	{
+		// The call failed on the NULL proxy without its completion: never answered, wrapper and callback leaked.
+		callback(BLUETOOTH_ERROR_FAIL, BluetoothFolderItemList());
+		return;
+	}
+
 	GVariantBuilder *builderFilter = g_variant_builder_new(G_VARIANT_TYPE("a{sv}"));
 	g_variant_builder_add(builderFilter, "{sv}", "start", g_variant_new_uint32(startIndex));
 	g_variant_builder_add(builderFilter, "{sv}", "end", g_variant_new_uint32(endIndex));
@@ -280,16 +303,9 @@ void Bluez5MediaFolder::getFolderItems(uint32_t startIndex, uint32_t endIndex,
 		return;
 	};
 
-	GError *error = 0;
 	bluez_media_folder1_call_list_items(mFolderInterface, filters, NULL,
 										glibAsyncMethodWrapper,
 										new GlibAsyncFunctionWrapper(listItemsCallback));
-	if (error)
-	{
-		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Not able to listItems: %s", error->message);
-		g_error_free(error);
-		callback(BLUETOOTH_ERROR_FAIL, itemList);
-	}
 	return;
 }
 
@@ -313,8 +329,11 @@ BluetoothAvrcpItemType Bluez5MediaFolder::itemTypeStringToEnum(const std::string
 BluetoothError Bluez5MediaFolder::changePath(const std::string &itemPath)
 {
 	GError *error = 0;
-	BluezMediaItem1 *mediaItem = bluez_media_item1_proxy_new_for_bus_sync(
-		G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, "org.bluez", itemPath.c_str(), NULL, &error);
+	MediaItemRef mediaItemRef(bluez_media_item1_proxy_new_for_bus_sync(
+		G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, "org.bluez", itemPath.c_str(), NULL, &error));
+	BluezMediaItem1 *mediaItem = mediaItemRef.get();
+	if (mediaItem)
+		g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mediaItem), REMOTE_CALL_TIMEOUT_MS);
 	if (error)
 	{
 		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0,
@@ -341,6 +360,8 @@ BluetoothError Bluez5MediaFolder::changePath(const std::string &itemPath)
 		return BLUETOOTH_ERROR_AVRCP_NOT_A_FOLDER;
 	}
 
+	if (!mFolderInterface)
+		return BLUETOOTH_ERROR_FAIL;
 	bluez_media_folder1_call_change_folder_sync(
 		mFolderInterface, itemPath.c_str(), NULL, &error);
 	if (error)
@@ -356,8 +377,11 @@ BluetoothError Bluez5MediaFolder::changePath(const std::string &itemPath)
 BluetoothError Bluez5MediaFolder::playItem(const std::string &itemPath)
 {
 	GError *error = 0;
-	BluezMediaItem1 *mediaItem = bluez_media_item1_proxy_new_for_bus_sync(
-		G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, "org.bluez", itemPath.c_str(), NULL, &error);
+	MediaItemRef mediaItemRef(bluez_media_item1_proxy_new_for_bus_sync(
+		G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, "org.bluez", itemPath.c_str(), NULL, &error));
+	BluezMediaItem1 *mediaItem = mediaItemRef.get();
+	if (mediaItem)
+		g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mediaItem), REMOTE_CALL_TIMEOUT_MS);
 
 	if (error)
 	{
@@ -393,8 +417,11 @@ BluetoothError Bluez5MediaFolder::playItem(const std::string &itemPath)
 BluetoothError Bluez5MediaFolder::addToNowPlaying(const std::string &itemPath)
 {
 	GError *error = 0;
-	BluezMediaItem1 *mediaItem = bluez_media_item1_proxy_new_for_bus_sync(
-		G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, "org.bluez", itemPath.c_str(), NULL, &error);
+	MediaItemRef mediaItemRef(bluez_media_item1_proxy_new_for_bus_sync(
+		G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, "org.bluez", itemPath.c_str(), NULL, &error));
+	BluezMediaItem1 *mediaItem = mediaItemRef.get();
+	if (mediaItem)
+		g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mediaItem), REMOTE_CALL_TIMEOUT_MS);
 
 	if (error)
 	{
@@ -434,6 +461,12 @@ BluetoothError Bluez5MediaFolder::addToNowPlaying(const std::string &itemPath)
 void Bluez5MediaFolder::search(const std::string &searchString,
                 BluetoothAvrcpBrowseSearchListCallback callback)
 {
+	if (!mFolderInterface)
+	{
+		callback(BLUETOOTH_ERROR_FAIL, "");	// never answered, as for ListItems
+		return;
+	}
+
 	GVariantBuilder *builderFilter = g_variant_builder_new(G_VARIANT_TYPE("a{sv}"));
 
 	GVariant *filters = g_variant_builder_end(builderFilter);

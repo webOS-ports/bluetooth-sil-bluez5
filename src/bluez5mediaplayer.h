@@ -70,6 +70,10 @@ private:
 	Bluez5ProfileAvcrp *mAvrcp;
 	BluezMediaPlayer1 *mPlayerInterface;
 	FreeDesktopDBusProperties *mPropertiesProxy;
+	GDBusObject *mObject;	// for its interface-added/removed handlers
+	// The device this player belongs to, from its object path: events were reported under the one address the
+	// profile kept, whichever device sent them.
+	std::string mDeviceAddress;
 	BluetoothMediaPlayStatus mMediaPlayStatus;
 	BluetoothPlayerInfo mPlayerInfo;
 	Bluez5MediaFolder *mMediaFolder;
@@ -82,6 +86,8 @@ private:
 	static void handleInterfaceRemoved(GDBusObject *object,
 			GDBusInterface *interface, gpointer userData);
 	void mediaPlayerPropertiesChanged(GVariant *changedProperties);
+	void updateMediaFolder(GDBusObject *object);
+	bool reporting() const;
 
 	/* Player application settings helper functions */
 	BluetoothPlayerApplicationSettingsRepeat repeatStringToEnum(std::string repeatVal);

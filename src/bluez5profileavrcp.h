@@ -19,6 +19,7 @@
 
 #include <bluetooth-sil-api.h>
 #include <bluez5profilebase.h>
+#include <map>
 #include <string>
 
 extern "C" {
@@ -72,6 +73,7 @@ public:
 	void addMediaPlayer(GDBusObject *object);
 	void removeMediaPlayer(const std::string &playerPath);
 	std::string getConnectedDeviceAddress() { return mConnectedDeviceAddress ; }
+	bool isDeviceConnected(const std::string &address) const;
 	std::string getAdapterAddress();
 	BluetoothAvrcpStatusObserver* getAvrcpObserver() { return BluetoothAvrcpProfile::getAvrcpObserver(); }
 	void updatePlayerInfo();
@@ -103,6 +105,9 @@ private:
 	/* TRUE if either of the roles is connected. FALSE if both the roles are disconnected*/
 	bool mConnected;
 	std::string mConnectedDeviceAddress;
+	// Roles per device (upper-case address): {controller, target}. The two flags above are "any device"; with
+	// one flag pair for all devices, A as target and B as controller hid A's disconnect.
+	std::map<std::string, std::pair<bool, bool>> mDeviceRoles;
 	GDBusObjectManager *mObjectManager;
 	std::list<Bluez5MediaPlayer *> mMediaPlayerList;
 	Bluez5MediaPlayer *mAddressedMediaPlayer;
