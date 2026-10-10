@@ -27,6 +27,17 @@ std::string lower(std::string s)
 	return s;
 }
 
+// A 16- or 32-bit UUID in its 128-bit form, which is how BlueZ reports a device's UUIDs; anything else unchanged.
+std::string toFullUuid(const std::string &uuid)
+{
+	bool hex = !uuid.empty() && std::all_of(uuid.begin(), uuid.end(), [](unsigned char c) { return std::isxdigit(c); });
+	if (hex && uuid.size() == 4)
+		return "0000" + uuid + "-0000-1000-8000-00805f9b34fb";
+	if (hex && uuid.size() == 8)
+		return uuid + "-0000-1000-8000-00805f9b34fb";
+	return uuid;
+}
+
 } // namespace
 
 // Every index is bounded by both sides. The device's data was indexed up to the filter's length, reading past it
@@ -35,7 +46,9 @@ std::string lower(std::string s)
 bool matchServiceUuid(const std::string &filterUuid, const std::string &filterMask,
                       const std::vector<std::string> &deviceUuids)
 {
-	std::string wanted = lower(filterUuid);
+	// Unmasked, a short UUID ("180d") is compared in its 128-bit form: it never matched. A mask is applied to the
+	// UUID as given.
+	std::string wanted = lower(filterMask.empty() ? toFullUuid(filterUuid) : filterUuid);
 
 	for (auto &uuid : deviceUuids)
 	{

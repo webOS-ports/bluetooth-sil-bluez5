@@ -41,6 +41,15 @@ TEST(LeAdvFilter, ServiceUuidExact)
 	EXPECT_FALSE(matchServiceUuid(heartRate, "", {}));
 }
 
+TEST(LeAdvFilter, ServiceUuidShortForm)
+{
+	EXPECT_TRUE(matchServiceUuid("180d", "", {battery, heartRate}));
+	EXPECT_TRUE(matchServiceUuid("180D", "", {heartRate}));
+	EXPECT_TRUE(matchServiceUuid("0000180d", "", {heartRate}));
+	EXPECT_FALSE(matchServiceUuid("180f", "", {heartRate}));
+	EXPECT_FALSE(matchServiceUuid("18g0", "", {heartRate}));
+}
+
 TEST(LeAdvFilter, ServiceUuidMasked)
 {
 	// Only the first 8 characters count.

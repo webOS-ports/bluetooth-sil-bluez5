@@ -25,7 +25,8 @@
 #include <string>
 #include <vector>
 
-// A service UUID: equal (case-insensitive), or with a mask, equal at every position where the mask has '1'.
+// A service UUID: equal (case-insensitive; a 16- or 32-bit one in its 128-bit form), or with a mask, equal at every
+// position where the mask has '1'.
 bool matchServiceUuid(const std::string &filterUuid, const std::string &filterMask,
                       const std::vector<std::string> &deviceUuids);
 
