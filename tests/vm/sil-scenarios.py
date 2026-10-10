@@ -497,6 +497,149 @@ def opp_accept_reject_and_unanswered():
     check(reply and not reply.get('returnValue'), 'a late accept succeeded: %r' % reply)
 
 
+def push_accepted(a, path, timeout=60.0):
+    """B pushes path to A, which accepts. Returns (request, answer reply)."""
+    waiting = client('opp/awaitTransferRequest', {'adapterAddress': a, 'subscribe': True})
+    check(waiting.wait(1), 'awaitTransferRequest did not answer')
+    result = {}
+
+    def answer_it():
+        requests = waiting.wait(timeout=30, until=lambda r: 'request' in r)
+        request = next((r['request'] for r in requests if 'request' in r), None)
+        result['request'] = request
+        if request:
+            result['answer'] = call('opp/acceptTransferRequest', {'adapterAddress': a, 'requestId': request['requestId']})
+
+    answerer = threading.Thread(target=answer_it)
+    answerer.start()
+    obexctl_push(a, path, timeout)
+    answerer.join(35)
+    waiting.stop()
+    return result.get('request'), result.get('answer')
+
+
+def opp_same_name_kept_and_dotfile_refused():
+    """A second push of the same name lands under a free name, leaving the first; a dot-file is refused."""
+    a, b = pair_a_with_b()
+    set_state(a, discoverable=True, discoverableTimeout=0)
+    discover(b, a)
+    name = 'sil-opp-dup.bin'
+    first, second = os.path.join(OPP_ROOT, name), os.path.join(OPP_ROOT, 'sil-opp-dup (1).bin')
+    for p in (first, second):
+        if os.path.exists(p):
+            os.remove(p)
+    contents = []
+    try:
+        for _ in range(2):
+            data = os.urandom(32 * 1024)
+            contents.append(data)
+            with open('/tmp/' + name, 'wb') as f:
+                f.write(data)
+            request, reply = push_accepted(a, '/tmp/' + name)
+            check(request and reply and reply.get('returnValue'), 'push not accepted: %r %r' % (request, reply))
+            settle(2.0)
+        check(os.path.exists(first) and open(first, 'rb').read() == contents[0], 'the first file was replaced')
+        check(os.path.exists(second) and open(second, 'rb').read() == contents[1],
+              'the second push did not land under a free name')
+    finally:
+        for p in (first, second, '/tmp/' + name):
+            if os.path.exists(p):
+                os.remove(p)
+
+    dot = '.sil-opp-hidden'
+    with open('/tmp/' + dot, 'wb') as f:
+        f.write(os.urandom(1024))
+    try:
+        waiting = client('opp/awaitTransferRequest', {'adapterAddress': a, 'subscribe': True})
+        check(waiting.wait(1), 'awaitTransferRequest did not answer')
+        lines = obexctl_push(a, '/tmp/' + dot, 30)
+        requests = [r for r in waiting.wait(timeout=3, until=lambda r: 'request' in r) if 'request' in r]
+        waiting.stop()
+        check(not os.path.exists(os.path.join(OPP_ROOT, dot)), 'a dot-file landed: %r' % lines[-3:])
+        check(not requests, 'a dot-file was offered to the user: %r' % requests)
+    finally:
+        os.remove('/tmp/' + dot)
+        if os.path.exists(os.path.join(OPP_ROOT, dot)):
+            os.remove(os.path.join(OPP_ROOT, dot))
+
+
+def spp_server_data_both_ways():
+    """Paired A and B: B serves an SPP channel through the SIL, A connects with rfcomm(1) (one bluetoothd takes a
+    UUID only once, so A cannot be an SPP client of the same UUID through the SIL as well), and data goes both
+    ways; A closing is seen as a disconnect."""
+    import base64
+    a, b = pair_a_with_b()
+    discover(a, b)
+    out, _ = pair(a, b)
+    settle(1.5)
+    check((device(a, b) or {}).get('paired'), 'pairing failed: %r' % out)
+    uuid = '7b6c8a2e-1d8e-4c1a-9a49-5b2f6c1d0e01'
+    server = client('spp/createChannel', {'name': 'sil-test', 'uuid': uuid, 'adapterAddress': b, 'subscribe': True})
+    check(server.wait(1) and server.all()[0].get('returnValue'), 'createChannel failed: %r' % server.all())
+    settle(1.0)
+    # rfcomm(1) makes the RFCOMM link a tty (Python here has no Bluetooth sockets). The SIL's RFCOMM channel is
+    # not reported: read from B's SDP record for the UUID.
+    sdp = subprocess.run(['sdptool', 'browse', b], capture_output=True, text=True).stdout
+    record = next((r for r in re.split(r'\n\s*\n', sdp) if uuid in r.lower()), '')
+    found = re.search(r'Channel: (\d+)', record)
+    check(found, 'no SDP record with an RFCOMM channel for the UUID: %r' % record[-300:])
+    link = None
+    for channel in [int(found.group(1))]:
+        subprocess.run(['rfcomm', 'release', '0'], capture_output=True)
+        link = subprocess.Popen(['rfcomm', '-i', a, 'connect', '/dev/rfcomm0', b, str(channel)],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        end = time.time() + 8
+        while time.time() < end and link.poll() is None and not os.path.exists('/dev/rfcomm0'):
+            settle(0.2)
+        settle(1.0)
+        if link.poll() is None and os.path.exists('/dev/rfcomm0'):
+            break
+        link.kill()
+        link.wait()
+        link = None
+    check(link, 'no RFCOMM channel of B accepted a connection')
+    tty = os.open('/dev/rfcomm0', os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        subprocess.run(['stty', '-F', '/dev/rfcomm0', 'raw', '-echo'], capture_output=True)
+        served = server.wait(timeout=10, until=lambda r: r.get('connected') is True)
+        up = next((r for r in served if r.get('connected') is True), None)
+        check(up and up.get('channelId'), 'the SIL reported no connection: %r' % served)
+        channel_b = up['channelId']
+
+        reader = client('spp/readData', {'channelId': channel_b, 'adapterAddress': b, 'subscribe': True})
+        settle(1.0)	# no first reply: it answers with data
+        payload = b'hello from A ' + os.urandom(16).hex().encode()
+        os.write(tty, payload)
+        got = b''
+        end = time.time() + 10
+        while time.time() < end and len(got) < len(payload):
+            got = b''.join(base64.b64decode(r['data']) for r in reader.all() if r.get('data'))
+            settle(0.2)
+        reader.stop()
+        check(got == payload, 'B received %r' % got[:40])
+
+        payload = b'hello from B ' + os.urandom(16).hex().encode()
+        reply = call('spp/writeData', {'channelId': channel_b, 'adapterAddress': b,
+                                       'data': base64.b64encode(payload).decode()})
+        check(reply and reply.get('returnValue'), 'writeData failed: %r' % reply)
+        got = b''
+        end = time.time() + 10
+        while time.time() < end and len(got) < len(payload):
+            try:
+                got += os.read(tty, 4096)
+            except BlockingIOError:
+                settle(0.1)
+        check(got == payload, 'A received %r' % got[:40])
+    finally:
+        os.close(tty)
+        link.kill()
+        link.wait()
+        subprocess.run(['rfcomm', 'release', '0'], capture_output=True)
+    down = server.wait(timeout=10, until=lambda r: r.get('connected') is False)
+    server.stop()
+    check(any(r.get('connected') is False for r in down), 'the SIL saw no disconnect: %r' % down)
+
+
 def service_restarts():
     """The service stopped and started five times on the real SIL; each time both adapters come back."""
     for _ in range(5):
@@ -513,6 +656,8 @@ SCENARIOS = [
     bluetoothd_killed_and_back,
     controllers_vanish_mid_pairing,
     opp_accept_reject_and_unanswered,
+    opp_same_name_kept_and_dotfile_refused,
+    spp_server_data_both_ways,
     service_restarts,
 ]
 
