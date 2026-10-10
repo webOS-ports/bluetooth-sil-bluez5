@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include "mpristime.h"
 #include "glib.h"
 #include "bluez5mprisplayer.h"
 #include "bluez5adapter.h"
@@ -124,7 +125,7 @@ bool Bluez5MprisPlayer::setMediaPlayStatus(const BluetoothMediaPlayStatus &statu
 
 bool Bluez5MprisPlayer::setMediaPosition(uint64_t pos)
 {
-	bluez_org_mpris_media_player2_player_set_position(mPlayerInterface, pos);
+	bluez_org_mpris_media_player2_player_set_position(mPlayerInterface, msToMprisMicroseconds(pos));
 	return true;
 }
 
@@ -184,7 +185,7 @@ bool Bluez5MprisPlayer::setMediaMetaDataOnMprisInterface()
 	g_variant_builder_add (builder, "{sv}", "xesam:trackNumber", g_variant_new_int32(mTrackNumber));
 
 	//Duration
-	g_variant_builder_add (builder, "{sv}", "mpris:length", g_variant_new_int64(mLength));
+	g_variant_builder_add (builder, "{sv}", "mpris:length", g_variant_new_int64(msToMprisMicroseconds(mLength)));
 
 	GVariant *arguments = g_variant_builder_end(builder);
 	g_variant_builder_unref(builder);
