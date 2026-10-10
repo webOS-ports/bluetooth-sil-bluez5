@@ -218,7 +218,11 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 	}
 	else if (key == "Paired")
 	{
-		mPaired = g_variant_get_boolean(valueVar);
+		bool paired = g_variant_get_boolean(valueVar);
+		// An incoming pairing that only displayed a secret has no other end.
+		if (paired != mPaired && mAdapter && mAdapter->getAgent())
+			mAdapter->getAgent()->pairedStateChanged(this);
+		mPaired = paired;
 		changed = true;
 	}
 	else if (key == "Connected")
@@ -530,6 +534,7 @@ void Bluez5Device::pair(BluetoothResultCallback callback)
 		      "Not able to pair with device %s because no agent was yet assigned to our adapter",
 		      mAddress.c_str());
 
+		mAdapter->setPairing(false);	// stayed set, and every later pair() was BUSY
 		callback(BLUETOOTH_ERROR_NOT_READY);
 		return;
 	}

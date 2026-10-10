@@ -45,6 +45,7 @@ public:
 	bool supplyPairingSecret(const std::string &address, const std::string &pin);
 	bool supplyPairingSecret(const std::string &address, BluetoothPasskey passkey);
 	bool cancelPairing(const std::string address);
+	void pairedStateChanged(Bluez5Device *device);
 
 	static void handleBusAcquired(GDBusConnection *connection, const gchar *name, gpointer user_data);
 
@@ -68,6 +69,8 @@ public:
 
 
 private:
+	void finishIncomingPairing(Bluez5AgentPairingInfo *pairingInfo);
+
 	Bluez5AgentPairingInfo* findPairingInfoForDevice(const std::string &objectPath);
 	Bluez5AgentPairingInfo* findPairingInfoForAddress(const std::string &address);
 	Bluez5AgentPairingInfo* initiatePairing(GDBusMethodInvocation *invocation, const gchar *objectPath);

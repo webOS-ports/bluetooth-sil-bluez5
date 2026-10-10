@@ -130,7 +130,7 @@ public:
 
 	BluetoothAdapterStatusObserver* getObserver() { return observer; }
 
-	void setPairing(bool pairing) { mPairing = pairing; }
+	void setPairing(bool pairing) { mPairing = pairing; if (!pairing) mCurrentPairingDevice = nullptr; }
 
 	Bluez5ObexClient* getObexClient() const { return mObexClient; }
 

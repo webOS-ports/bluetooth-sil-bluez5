@@ -51,8 +51,7 @@ public:
 		incoming(false),
 		requestConfirmation(0),
 		requestAuthorization(0),
-		requestPairingSecret(0),
-		displayPairingSecret(0)
+		requestPairingSecret(0)
 	{
 	}
 
@@ -63,11 +62,36 @@ public:
 	std::string deviceAddress;
 	bool incoming;
 
+	// Requests from BlueZ still waiting for the user's answer. Completing an invocation frees it: every place
+	// that answers one takes it out of its slot (takeInvocation), so none is answered twice.
 	GDBusMethodInvocation *requestConfirmation;
 	GDBusMethodInvocation *requestAuthorization;
 	GDBusMethodInvocation *requestPairingSecret;
-	GDBusMethodInvocation *displayPairingSecret;
 };
+
+namespace {
+
+GDBusMethodInvocation *takeInvocation(GDBusMethodInvocation *&slot)
+{
+	GDBusMethodInvocation *invocation = slot;
+	slot = nullptr;
+	return invocation;
+}
+
+void cancelInvocation(GDBusMethodInvocation *&slot, const char *message)
+{
+	if (GDBusMethodInvocation *invocation = takeInvocation(slot))
+		g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_AGENT_ERROR_CANCELED, message);
+}
+
+void cancelPendingRequests(Bluez5AgentPairingInfo *pairingInfo, const char *message)
+{
+	cancelInvocation(pairingInfo->requestConfirmation, message);
+	cancelInvocation(pairingInfo->requestAuthorization, message);
+	cancelInvocation(pairingInfo->requestPairingSecret, message);
+}
+
+} // namespace
 
 Bluez5Agent::Bluez5Agent(BluezAgentManager1 *agentManager, Bluez5SIL *sil) :
 	mBusId(0),
@@ -86,6 +110,14 @@ Bluez5Agent::Bluez5Agent(BluezAgentManager1 *agentManager, Bluez5SIL *sil) :
 
 Bluez5Agent::~Bluez5Agent()
 {
+	// Pairing infos were never freed, and their requests never answered.
+	for (auto &pairing : mDevicePairings)
+	{
+		cancelPendingRequests(pairing.second, "Agent going away");
+		delete pairing.second;
+	}
+	mDevicePairings.clear();
+
 	if (mInterface)
 	{
 		g_object_unref(mInterface);
@@ -217,6 +249,7 @@ Bluez5AgentPairingInfo* Bluez5Agent::initiatePairing(GDBusMethodInvocation *invo
 		if (!adapter)
 		{
 			DEBUG ("default adapter is not set");
+			g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_AGENT_ERROR_CANCELED, "No adapter for device");
 			return NULL;
 		}
 
@@ -242,11 +275,13 @@ Bluez5AgentPairingInfo* Bluez5Agent::initiatePairing(GDBusMethodInvocation *invo
 	return pairingInfo;
 }
 
+// Every handler returns TRUE once it has answered the invocation: on FALSE the generated skeleton answers it a
+// second time (UnknownMethod), and the invocation, freed by the first answer, is released again.
 gboolean Bluez5Agent::handleRelease(BluezAgent1 *proxy, GDBusMethodInvocation *invocation, gpointer user_data)
 {
 	DEBUG("Agent release method was called");
-	g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_AGENT_ERROR_NOT_IMPLEMENTED, "Not implemented yet");
-	return FALSE;
+	bluez_agent1_complete_release(proxy, invocation);
+	return TRUE;
 }
 
 gboolean Bluez5Agent::handleCancel(BluezAgent1 *proxy, GDBusMethodInvocation *invocation, gpointer user_data)
@@ -254,6 +289,22 @@ gboolean Bluez5Agent::handleCancel(BluezAgent1 *proxy, GDBusMethodInvocation *in
 	DEBUG("Agent cancel method was called");
 
 	Bluez5Agent *agent = static_cast<Bluez5Agent*>(user_data);
+
+	// BlueZ no longer waits for any request: answer what is pending, and end incoming pairings, which nothing
+	// else ends (outgoing ones end with the reply to Pair).
+	for (auto iter = agent->mDevicePairings.begin(); iter != agent->mDevicePairings.end(); )
+	{
+		Bluez5AgentPairingInfo *pairingInfo = iter->second;
+		cancelPendingRequests(pairingInfo, "Canceled by BlueZ");
+		if (pairingInfo->incoming)
+		{
+			pairingInfo->adapter->setPairing(false);
+			delete pairingInfo;
+			iter = agent->mDevicePairings.erase(iter);
+		}
+		else
+			++iter;
+	}
 
 	//TODO how to handle this? We don't know which adapter pairing cancel
 	Bluez5Adapter *defaultAdapter = agent->mSIL->getDefaultBluez5Adapter();
@@ -281,9 +332,10 @@ gboolean Bluez5Agent::handleRequestAuthorization(BluezAgent1 *proxy, GDBusMethod
                                                  const gchar *address, gpointer user_data)
 {
 	DEBUG("Agent request authorize method was called");
+	// Still refused, as before, but answered once.
 	g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_AGENT_ERROR_NOT_IMPLEMENTED, "Not implemented yet");
 
-	return FALSE;
+	return TRUE;
 }
 
 gboolean Bluez5Agent::handleDisplayPasskey(BluezAgent1 *proxy, GDBusMethodInvocation *invocation,
@@ -295,9 +347,7 @@ gboolean Bluez5Agent::handleDisplayPasskey(BluezAgent1 *proxy, GDBusMethodInvoca
 
 	Bluez5AgentPairingInfo* pairingInfo = agent->initiatePairing(invocation, objectPath);
 	if (!pairingInfo)
-		return FALSE;
-
-	pairingInfo->displayPairingSecret = invocation;
+		return TRUE;	// initiatePairing() has answered it
 
 	BluetoothAdapterStatusObserver *observer = pairingInfo->adapter->getObserver();
 	if (observer)
@@ -318,9 +368,7 @@ gboolean Bluez5Agent::handleDisplayPinCode(BluezAgent1 *proxy, GDBusMethodInvoca
 	Bluez5AgentPairingInfo* pairingInfo = agent->initiatePairing(invocation, objectPath);
 
 	if (!pairingInfo)
-		return FALSE;
-
-	pairingInfo->displayPairingSecret = invocation;
+		return TRUE;	// initiatePairing() has answered it
 
 	BluetoothAdapterStatusObserver *observer = pairingInfo->adapter->getObserver();
 	if (observer)
@@ -343,8 +391,9 @@ gboolean Bluez5Agent::handleRequestConfirmation(BluezAgent1 *proxy, GDBusMethodI
 	Bluez5AgentPairingInfo* pairingInfo = agent->initiatePairing(invocation, objectPath);
 
 	if (!pairingInfo)
-		return FALSE;
+		return TRUE;	// initiatePairing() has answered it
 
+	cancelInvocation(pairingInfo->requestConfirmation, "Superseded by a new request");
 	pairingInfo->requestConfirmation = invocation;
 
 	BluetoothAdapterStatusObserver *observer = pairingInfo->adapter->getObserver();
@@ -367,8 +416,9 @@ gboolean Bluez5Agent::handleRequestPasskey(BluezAgent1 *proxy, GDBusMethodInvoca
 	Bluez5AgentPairingInfo* pairingInfo = agent->initiatePairing(invocation, objectPath);
 
 	if (!pairingInfo)
-		return FALSE;
+		return TRUE;	// initiatePairing() has answered it
 
+	cancelInvocation(pairingInfo->requestPairingSecret, "Superseded by a new request");
 	pairingInfo->requestPairingSecret = invocation;
 
 	BluetoothAdapterStatusObserver *observer = pairingInfo->adapter->getObserver();
@@ -391,8 +441,9 @@ gboolean Bluez5Agent::handleRequestPinCode(BluezAgent1 *proxy, GDBusMethodInvoca
 	Bluez5AgentPairingInfo* pairingInfo = agent->initiatePairing(invocation, objectPath);
 
 	if (!pairingInfo)
-		return FALSE;
+		return TRUE;	// initiatePairing() has answered it
 
+	cancelInvocation(pairingInfo->requestPairingSecret, "Superseded by a new request");
 	pairingInfo->requestPairingSecret = invocation;
 
 	BluetoothAdapterStatusObserver *observer = pairingInfo->adapter->getObserver();
@@ -403,6 +454,35 @@ gboolean Bluez5Agent::handleRequestPinCode(BluezAgent1 *proxy, GDBusMethodInvoca
 	}
 
 	return TRUE;
+}
+
+// An incoming pairing has no reply to Pair() that would end it: it ends once its request is answered.
+void Bluez5Agent::finishIncomingPairing(Bluez5AgentPairingInfo *pairingInfo)
+{
+	if (!pairingInfo->incoming)
+		return;
+
+	for (auto iter = mDevicePairings.begin(); iter != mDevicePairings.end(); ++iter)
+	{
+		if (iter->second == pairingInfo)
+		{
+			pairingInfo->adapter->setPairing(false);
+			delete pairingInfo;
+			mDevicePairings.erase(iter);
+			return;
+		}
+	}
+}
+
+// The device became paired or unpaired: an incoming pairing that only displayed a passkey or pin is over.
+void Bluez5Agent::pairedStateChanged(Bluez5Device *device)
+{
+	auto iter = mDevicePairings.find(device->getObjectPath());
+	if (iter == mDevicePairings.end() || !iter->second->incoming)
+		return;
+
+	cancelPendingRequests(iter->second, "Pairing finished");
+	finishIncomingPairing(iter->second);
 }
 
 bool Bluez5Agent::startPairingForDevice(Bluez5Device *device, bool incoming)
@@ -446,6 +526,7 @@ void Bluez5Agent::stopPairingForDevice(Bluez5Device *device)
 		return;
 	}
 
+	cancelPendingRequests(iter->second, "Pairing stopped");
 	delete iter->second;
 
 	mDevicePairings.erase(iter);
@@ -465,14 +546,14 @@ bool Bluez5Agent::supplyPairingConfirmation(Bluez5Adapter *adapter, const std::s
 		return false;
 	}
 
+	GDBusMethodInvocation *invocation = takeInvocation(pairingInfo->requestConfirmation);
 	if (!accept)
 	{
-		g_dbus_method_invocation_return_dbus_error(pairingInfo->requestConfirmation,
-                                                           BLUEZ5_AGENT_ERROR_REJECTED, "User rejected confirmation");
+		g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_AGENT_ERROR_REJECTED, "User rejected confirmation");
 	}
 	else
 	{
-		bluez_agent1_complete_request_confirmation(mInterface, pairingInfo->requestConfirmation);
+		bluez_agent1_complete_request_confirmation(mInterface, invocation);
 	}
 
 	// For incoming pairing requests we can remove the pairing info here
@@ -504,7 +585,8 @@ bool Bluez5Agent::supplyPairingSecret(const std::string &address, BluetoothPassk
 	if (!(pairingInfo && pairingInfo->requestPairingSecret))
 		return false;
 
-	bluez_agent1_complete_request_passkey(mInterface, pairingInfo->requestPairingSecret, passkey);
+	bluez_agent1_complete_request_passkey(mInterface, takeInvocation(pairingInfo->requestPairingSecret), passkey);
+	finishIncomingPairing(pairingInfo);
 
 	return true;
 }
@@ -519,7 +601,8 @@ bool Bluez5Agent::supplyPairingSecret(const std::string &address, const std::str
 	if (pin.empty())
 		return false;
 
-	bluez_agent1_complete_request_pin_code(mInterface, pairingInfo->requestPairingSecret, pin.c_str());
+	bluez_agent1_complete_request_pin_code(mInterface, takeInvocation(pairingInfo->requestPairingSecret), pin.c_str());
+	finishIncomingPairing(pairingInfo);
 
 	return true;
 }
@@ -527,23 +610,12 @@ bool Bluez5Agent::supplyPairingSecret(const std::string &address, const std::str
 bool Bluez5Agent::cancelPairing(const std::string address)
 {
 	auto pairingInfo = findPairingInfoForAddress(address);
-	GDBusMethodInvocation *invocation = 0;
-	if (pairingInfo)
+	if (pairingInfo && (pairingInfo->requestConfirmation || pairingInfo->requestAuthorization || pairingInfo->requestPairingSecret))
 	{
-		if (pairingInfo->requestConfirmation)
-			invocation = pairingInfo->requestConfirmation;
-		else if (pairingInfo->requestAuthorization)
-			invocation = pairingInfo->requestAuthorization;
-		else if (pairingInfo->requestPairingSecret)
-			invocation = pairingInfo->requestPairingSecret;
-
-		if (invocation)
-		{
-			DEBUG("Sending cancel signal to remote device");
-			g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_AGENT_ERROR_CANCELED,
-                                                                   "Pairing canceled by user");
-			return true;
-		}
+		DEBUG("Sending cancel signal to remote device");
+		cancelPendingRequests(pairingInfo, "Pairing canceled by user");
+		finishIncomingPairing(pairingInfo);
+		return true;
 	}
 	return false;
 }

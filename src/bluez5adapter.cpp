@@ -1341,10 +1341,12 @@ void Bluez5Adapter::addDevice(const std::string &objectPath)
 
 void Bluez5Adapter::removeDevice(const std::string &objectPath)
 {
-	std::string leaddress, address;
+	std::string address;
 
 	for ( auto it = mLeScanFilters.begin(); it != mLeScanFilters.end(); ++it)
 	{
+		// Per scan: it was kept from an earlier scan, and scans that never saw the device were told it went.
+		std::string leaddress;
 		uint32_t scanId;
 		scanId = it->first;
 		auto devicesIter = mLeDevicesByScanId.find(scanId);
@@ -1376,6 +1378,10 @@ void Bluez5Adapter::removeDevice(const std::string &objectPath)
 				if (gattprofile)
 					gattprofile->updateDeviceProperties(address);
 			}
+			if (mAgent)
+				mAgent->stopPairingForDevice(device);	// its pairing info pointed at it
+			if (mCurrentPairingDevice == device)
+				mCurrentPairingDevice = nullptr;
 			mDevices.erase(iter);
 			delete device;
 			break;
