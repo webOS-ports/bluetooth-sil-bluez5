@@ -163,6 +163,8 @@ void Bluez5ObexClient::createSession(Bluez5ObexSession::Type type, const std::st
 		}
 		if (!ret || error || !objectPath)
 		{
+			ERROR(MSGID_FAILED_TO_CREATE_OBEX_SESSION_PROXY, 0, "Failed to create OBEX session with %s: %s",
+			      deviceAddress.c_str(), error ? error->message : "no session path");
 			g_clear_error(&error);
 			g_free(objectPath);
 			callback(0);
@@ -176,6 +178,8 @@ void Bluez5ObexClient::createSession(Bluez5ObexSession::Type type, const std::st
 		// the session from obexd.
 		if (!session->isValid())
 		{
+			ERROR(MSGID_FAILED_TO_CREATE_OBEX_SESSION_PROXY, 0, "OBEX session %s with %s could not be set up",
+			      session->getObjectPath().c_str(), deviceAddress.c_str());
 			delete session;
 			callback(0);
 			return;
