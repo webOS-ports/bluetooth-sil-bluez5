@@ -59,14 +59,25 @@ mAddressedMediaPlayer(nullptr)
 
 Bluez5ProfileAvcrp::~Bluez5ProfileAvcrp()
 {
+	/* Stops watching a name: first, so that its callbacks do not run on what is torn down */
+	if (mWatcherId)
+	{
+		g_bus_unwatch_name(mWatcherId);
+		mWatcherId = 0;
+	}
+
 	if (mObjectManager)
 	{
+		g_signal_handlers_disconnect_by_data(mObjectManager, this);
 		g_object_unref(mObjectManager);
 		mObjectManager = nullptr;
 	}
-	/* Stops watching a name */
-	if (mWatcherId)
-		g_bus_unwatch_name(mWatcherId);
+
+	// The players were never deleted: their proxies follow org.bluez, and when the phone played again after a
+	// bluetoothd restart their handlers called into this deleted profile.
+	for (auto player : mMediaPlayerList)
+		delete player;
+	mMediaPlayerList.clear();
 }
 
 void Bluez5ProfileAvcrp::connect(const std::string& address, BluetoothResultCallback callback)

@@ -80,13 +80,16 @@ Bluez5MediaPlayer::Bluez5MediaPlayer(Bluez5ProfileAvcrp *avrcp,
 
 Bluez5MediaPlayer::~Bluez5MediaPlayer()
 {
+	// A pending call keeps a proxy, and its handlers' pointer to this player, alive.
 	if (mPlayerInterface)
 	{
+		g_signal_handlers_disconnect_by_data(mPlayerInterface, this);
 		g_object_unref(mPlayerInterface);
 		mPlayerInterface = nullptr;
 	}
 	if (mPropertiesProxy)
 	{
+		g_signal_handlers_disconnect_by_data(mPropertiesProxy, this);
 		g_object_unref(mPropertiesProxy);
 		mPropertiesProxy = nullptr;
 	}
@@ -99,13 +102,18 @@ Bluez5MediaPlayer::~Bluez5MediaPlayer()
 
 void Bluez5MediaPlayer::getAllProperties()
 {
-	GVariant *propsVar;
+	// Set only on success: on a failure (the player gone again, a timeout) stack garbage was tested and unreffed.
+	GVariant *propsVar = nullptr;
+	if (!mPropertiesProxy)
+		return;
 	free_desktop_dbus_properties_call_get_all_sync(
 		mPropertiesProxy,
 		"org.bluez.MediaPlayer1", &propsVar, NULL, NULL);
 	if (propsVar != NULL)
+	{
 		mediaPlayerPropertiesChanged(propsVar);
-	g_variant_unref(propsVar);
+		g_variant_unref(propsVar);
+	}
 }
 
 void Bluez5MediaPlayer::handlePropertiesChanged(
@@ -526,7 +534,7 @@ bool Bluez5MediaPlayer::updatePlayerProperties()
 	if (mPropertiesProxy)
 	{
 		DEBUG("Getting the player properties");
-		GVariant *changedProperties;
+		GVariant *changedProperties = nullptr;	// set only on success
 		free_desktop_dbus_properties_call_get_all_sync(
 			mPropertiesProxy,
 			"org.bluez.MediaPlayer1", &changedProperties, NULL, NULL);

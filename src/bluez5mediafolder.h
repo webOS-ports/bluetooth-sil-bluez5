@@ -54,7 +54,7 @@ private:
 			GVariant *changedProperties, GVariant *invalidatedProperties,
 			gpointer userData);
 	void mediaFolderPropertiesChanged(GVariant* changedProperties);
-	BluetoothAvrcpItemType itemTypeStringToEnum(const std::string type);
+	static BluetoothAvrcpItemType itemTypeStringToEnum(const std::string type);
 
 
 };

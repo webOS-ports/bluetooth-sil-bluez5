@@ -50,24 +50,28 @@ Bluez5MediaFolder::Bluez5MediaFolder(Bluez5ProfileAvcrp *avrcp,
 
 	g_signal_connect(G_OBJECT(mPropertiesProxy), "properties-changed",
 			G_CALLBACK(handlePropertiesChanged), this);
-	GVariant *propsVar;
+	GVariant *propsVar = nullptr;	// set only on success: garbage was unreffed on a failure
 	free_desktop_dbus_properties_call_get_all_sync(
 			mPropertiesProxy,
 			"org.bluez.MediaFolder1", &propsVar, NULL, NULL);
 	if (propsVar != NULL)
+	{
 		mediaFolderPropertiesChanged(propsVar);
-	g_variant_unref(propsVar);
+		g_variant_unref(propsVar);
+	}
 }
 
 Bluez5MediaFolder::~Bluez5MediaFolder()
 {
 	if (mFolderInterface)
 	{
+		g_signal_handlers_disconnect_by_data(mFolderInterface, this);
 		g_object_unref(mFolderInterface);
 		mFolderInterface = nullptr;
 	}
 	if (mPropertiesProxy)
 	{
+		g_signal_handlers_disconnect_by_data(mPropertiesProxy, this);	// it can outlive the folder
 		g_object_unref(mPropertiesProxy);
 		mPropertiesProxy = nullptr;
 	}
@@ -116,21 +120,27 @@ void Bluez5MediaFolder::mediaFolderPropertiesChanged(GVariant* changedProperties
 void Bluez5MediaFolder::getNumberOfItems(BluetoothAvrcpBrowseTotalNumberOfItemsCallback callback)
 {
 	GError *error = 0;
-	GVariant *var;
-	free_desktop_dbus_properties_call_get_sync(
-		mPropertiesProxy,
-		"org.bluez.MediaFolder1", "NumberOfItems",
-		&var, NULL, &error);
-	if (error)
+	GVariant *var = nullptr;
+	if (mPropertiesProxy)
+		free_desktop_dbus_properties_call_get_sync(
+			mPropertiesProxy,
+			"org.bluez.MediaFolder1", "NumberOfItems",
+			&var, NULL, &error);
+	// With no proxy no error was set, and the uninitialised result was used.
+	if (error || !var)
 	{
-		ERROR(MSGID_PROFILE_MANAGER_ERROR, 0, "get numberOfItems failed: %s", error->message);
-		g_error_free(error);
+		ERROR(MSGID_PROFILE_MANAGER_ERROR, 0, "get numberOfItems failed: %s", error ? error->message : "no proxy");
+		g_clear_error(&error);
+		if (var)
+			g_variant_unref(var);
 		callback(BLUETOOTH_ERROR_FAIL, 0);
 		return;
 	}
 
 	GVariant *realPropVar = g_variant_get_variant(var);
-	uint32_t numOfItems = g_variant_get_uint32(realPropVar);
+	uint32_t numOfItems = g_variant_is_of_type(realPropVar, G_VARIANT_TYPE_UINT32) ? g_variant_get_uint32(realPropVar) : 0;
+	g_variant_unref(realPropVar);	// both leaked
+	g_variant_unref(var);
 	DEBUG("Bluez5MediaFolder: Number of items: %d", numOfItems);
 
 	callback(BLUETOOTH_ERROR_NONE, numOfItems);
@@ -149,14 +159,21 @@ void Bluez5MediaFolder::getFolderItems(uint32_t startIndex, uint32_t endIndex,
 	g_variant_builder_unref(builderFilter);
 	BluetoothFolderItemList itemList;
 
-	auto listItemsCallback = [this, callback](GAsyncResult *result) {
+	// Answered over AVRCP browsing, possibly after the phone switched player and this folder was deleted: the
+	// reply finishes on its own proxy and uses nothing of the folder (it read the freed folder's interface).
+	auto listItemsCallback = [callback](GObject *source, GAsyncResult *result) {
 		DEBUG("listItemsCallback");
 		GError *error = 0;
 		gboolean ret;
 		BluetoothFolderItemList itemList;
 
 		GVariant *items = NULL;
-		ret = bluez_media_folder1_call_list_items_finish(mFolderInterface, &items, result, &error);
+		ret = bluez_media_folder1_call_list_items_finish(BLUEZ_MEDIA_FOLDER1(source), &items, result, &error);
+		if (!error && (!ret || !items))
+		{
+			callback(BLUETOOTH_ERROR_FAIL, itemList);	// was never answered
+			return;
+		}
 		if (error)
 		{
 			ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "List items failed: %s", error->message);
@@ -257,6 +274,7 @@ void Bluez5MediaFolder::getFolderItems(uint32_t startIndex, uint32_t endIndex,
 				}
 				itemList.push_back(item);
 			}
+			g_variant_unref(items);	// leaked on every listing
 			callback(BLUETOOTH_ERROR_NONE, itemList);
 		}
 		return;
@@ -422,15 +440,20 @@ void Bluez5MediaFolder::search(const std::string &searchString,
 	GVariant *filters = g_variant_builder_end(builderFilter);
 	g_variant_builder_unref(builderFilter);
 
-	auto searchCallback = [this, callback](GAsyncResult *result) {
+	auto searchCallback = [callback](GObject *source, GAsyncResult *result) {
 
 		GError *error = 0;
 		gboolean ret;
 		gchar *outFolder = NULL;
 
-		GVariant *items = NULL;
 		ret = bluez_media_folder1_call_search_finish(
-			mFolderInterface, &outFolder, result, &error);
+			BLUEZ_MEDIA_FOLDER1(source), &outFolder, result, &error);
+		if (!error && (!ret || !outFolder))
+		{
+			g_free(outFolder);
+			callback(BLUETOOTH_ERROR_FAIL, "");	// a NULL folder made a std::string
+			return;
+		}
 		if (error)
 		{
 			ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Search failed: %s", error->message);
@@ -441,6 +464,7 @@ void Bluez5MediaFolder::search(const std::string &searchString,
 
 		/* Modify the item path to not include bluez info */
 		std::string itemPath = outFolder;
+		g_free(outFolder);
 		size_t pos = itemPath.find("player");
 		if (pos != std::string::npos)
 		{
