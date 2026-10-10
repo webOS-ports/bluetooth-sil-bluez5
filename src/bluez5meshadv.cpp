@@ -66,19 +66,38 @@ mToken(0)
 {
 	GError *error = 0;
 
-	mDbusConn = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
-	if (error)
-	{
-		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Failed to setup dbus: %s", error->message);
-		g_error_free(error);
-		return;
-	}
-
+	// First: the agent and provisioner are used without a check, also when there is no connection.
 	mMeshAdvProv = new Bluez5MeshAdvProvisioner(mAdapter, mMesh);
 	mMeshAdvProvAgent = new Bluez5MeshAdvProvAgent(mAdapter, mMesh);
 	mMeshApplication = new Bluez5MeshApplication(mAdapter, mMesh);
 
-	mWatcherId = g_bus_watch_name(G_BUS_TYPE_SYSTEM, BLUEZ_MESH_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
+	// A system bus connection of its own for each adapter's profile. They all exported the application at "/" on
+	// the process's shared connection, where only the first could: with a second adapter (a second controller, or
+	// one bluetoothd had before meshd took it), meshd's JoinComplete for a network made through the other one went
+	// to the first one's handler, the network id was reported for the wrong adapter, and the caller never got it.
+	// Once, when such an adapter went again, nothing was left at "/" for meshd to read ("Failed to get app's dbus
+	// objects" on CreateNetwork).
+	// The application stays at "/": meshd 5.86 adds the remote provisioning client, without which no scan result
+	// arrives, only when it meets the Provisioner1 object before the element in GetManagedObjects. That holds for
+	// these paths, and did not for an application under /silbluez/mesh/hci0 (tried).
+	gchar *address = g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
+	if (address)
+	{
+		mDbusConn = g_dbus_connection_new_for_address_sync(address,
+			static_cast<GDBusConnectionFlags>(G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
+			                                  G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
+			NULL, NULL, &error);
+		g_free(address);
+	}
+	if (!mDbusConn)
+	{
+		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Failed to setup dbus: %s", error ? error->message : "no address");
+		if (error)
+			g_error_free(error);
+		return;
+	}
+
+	mWatcherId = g_bus_watch_name_on_connection(mDbusConn, BLUEZ_MESH_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
 					 handleBluezMeshServiceStarted, handleBluezMeshServiceStopped, this, NULL);
 }
 
@@ -117,7 +136,11 @@ Bluez5MeshAdv::~Bluez5MeshAdv()
 	releaseMeshProxies();
 
 	if (mDbusConn)
-		g_object_unref(mDbusConn);	// a new reference from g_bus_get_sync
+	{
+		// Its own: closed, so that meshd sees the application go now, not when the last pending call lets go of it.
+		g_dbus_connection_close_sync(mDbusConn, NULL, NULL);
+		g_object_unref(mDbusConn);
+	}
 }
 
 void Bluez5MeshAdv::releaseObjectManagerServer()
@@ -195,6 +218,7 @@ BluetoothError Bluez5MeshAdv::attach()
 		GVariant *configuration = 0;
 		bluez_mesh_network1_call_attach_finish(BLUEZ_MESH_NETWORK1(source), &node, &configuration, result, &error);
 		BluetoothError status = BLUETOOTH_ERROR_NONE;
+		std::string nodePath;
 		if (error)
 		{
 			ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Attach failed: %s", error->message);
@@ -204,12 +228,15 @@ BluetoothError Bluez5MeshAdv::attach()
 		else
 		{
 			DEBUG("attached node: %s", node);
+			nodePath = node ? node : "";
 			g_free(node);	// both leaked
 			if (configuration)
 				g_variant_unref(configuration);
 		}
 		if (alive.expired())	// the profile went with its adapter
 			return;
+		if (!nodePath.empty())
+			useNodeProxies(nodePath);
 		mMesh->getMeshObserver()->attachResult(status, convertAddressToLowerCase(mAdapter->getAddress()));
 	};
 	bluez_mesh_network1_call_attach(mNetworkInterface, BLUEZ_MESH_APP_PATH, mToken, NULL,
@@ -317,8 +344,8 @@ void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const g
 		{
 			DEBUG("org.bluez.mesh.Network1 interface added");
 			GError *proxyError = 0;
-			meshAdv->mNetworkInterface = bluez_mesh_network1_proxy_new_for_bus_sync(
-				G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
+			meshAdv->mNetworkInterface = bluez_mesh_network1_proxy_new_sync(
+				conn, G_DBUS_PROXY_FLAGS_NONE,
 				BLUEZ_MESH_NAME, objectPath.c_str(), NULL, &proxyError);
 			if (proxyError)
 			{
@@ -330,6 +357,15 @@ void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const g
 			g_object_unref(networkInterface);
 	}
 	g_list_free_full(objects, g_object_unref);
+
+	// meshd came back (restarted, or after a crash) while this adapter had a node: attached again. The node's
+	// proxies went with the old meshd and come only with an Attach, so every call after a meshd restart failed as
+	// NOT_ALLOWED until the service was restarted. The result goes to attachResult.
+	if (meshAdv->mToken && meshAdv->mNetworkInterface)
+	{
+		DEBUG("mesh daemon is back: attaching again");
+		meshAdv->attach();
+	}
 }
 
 // It did nothing: the next start made a second object manager and exported a second time next to the first.
@@ -346,10 +382,10 @@ namespace {
 
 // A proxy for an interface meshd added, or NULL (logged) when it could not be made.
 template <typename T, typename F>
-T *meshProxy(F create, const std::string &objectPath, const char *name)
+T *meshProxy(F create, GDBusConnection *conn, const std::string &objectPath, const char *name)
 {
 	GError *error = 0;
-	T *proxy = create(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, BLUEZ_MESH_NAME, objectPath.c_str(), NULL, &error);
+	T *proxy = create(conn, G_DBUS_PROXY_FLAGS_NONE, BLUEZ_MESH_NAME, objectPath.c_str(), NULL, &error);
 	if (error)
 	{
 		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Not able to get %s: %s", name, error->message);
@@ -364,6 +400,27 @@ bool proxyIsFor(gpointer proxy, const std::string &objectPath)
 }
 
 } // namespace
+
+// The proxies for the node an Attach returned. They came only from an object-added signal: after a service restart
+// meshd still listed the node's object (it removes the interfaces when the application goes, and adds them back
+// with the next Attach), no object-added came, and every call needing the node failed as NOT_ALLOWED although the
+// attach succeeded.
+void Bluez5MeshAdv::useNodeProxies(const std::string &nodePath)
+{
+	if (!proxyIsFor(mNodeInterface, nodePath))
+	{
+		if (mNodeInterface)
+			g_object_unref(mNodeInterface);
+		mNodeInterface = meshProxy<BluezMeshNode1>(bluez_mesh_node1_proxy_new_sync, mDbusConn, nodePath, "Node1");
+	}
+	if (!proxyIsFor(mMgmtInterface, nodePath))
+	{
+		if (mMgmtInterface)
+			g_object_unref(mMgmtInterface);
+		mMgmtInterface = meshProxy<BluezMeshManagement1>(bluez_mesh_management1_proxy_new_sync, mDbusConn, nodePath,
+		                                                 "Management1");
+	}
+}
 
 // The interfaces looked up are new references, released here (all three leaked), and a proxy replaced is
 // released first (overwritten before). One GError was reused for three calls and never checked.
@@ -380,8 +437,8 @@ void Bluez5MeshAdv::handleObjectAdded(GDBusObjectManager */*objectManager*/,
 	{
 		DEBUG("org.bluez.mesh.Network1 interface added");
 		if (!meshAdv->mNetworkInterface)
-			meshAdv->mNetworkInterface = meshProxy<BluezMeshNetwork1>(bluez_mesh_network1_proxy_new_for_bus_sync,
-			                                                          objectPath, "Network1");
+			meshAdv->mNetworkInterface = meshProxy<BluezMeshNetwork1>(bluez_mesh_network1_proxy_new_sync,
+			                                                          meshAdv->mDbusConn, objectPath, "Network1");
 		g_object_unref(networkInterface);
 	}
 
@@ -391,8 +448,8 @@ void Bluez5MeshAdv::handleObjectAdded(GDBusObjectManager */*objectManager*/,
 		DEBUG("org.bluez.mesh.Management1 interface added");
 		if (meshAdv->mMgmtInterface)
 			g_object_unref(meshAdv->mMgmtInterface);
-		meshAdv->mMgmtInterface = meshProxy<BluezMeshManagement1>(bluez_mesh_management1_proxy_new_for_bus_sync,
-		                                                          objectPath, "Management1");
+		meshAdv->mMgmtInterface = meshProxy<BluezMeshManagement1>(bluez_mesh_management1_proxy_new_sync,
+		                                                          meshAdv->mDbusConn, objectPath, "Management1");
 		g_object_unref(meshManagementInterface);
 	}
 
@@ -402,8 +459,8 @@ void Bluez5MeshAdv::handleObjectAdded(GDBusObjectManager */*objectManager*/,
 		DEBUG("org.bluez.mesh.Node1 interface added");
 		if (meshAdv->mNodeInterface)
 			g_object_unref(meshAdv->mNodeInterface);
-		meshAdv->mNodeInterface = meshProxy<BluezMeshNode1>(bluez_mesh_node1_proxy_new_for_bus_sync,
-		                                                     objectPath, "Node1");
+		meshAdv->mNodeInterface = meshProxy<BluezMeshNode1>(bluez_mesh_node1_proxy_new_sync,
+		                                                     meshAdv->mDbusConn, objectPath, "Node1");
 		g_object_unref(meshNodeInterface);
 	}
 }
