@@ -658,6 +658,17 @@ def service_restarts():
         wait_adapters()
 
 
+def power_off_during_startup_repower():
+    """The SIL power-cycles each new adapter. An adapter switched off by a client meanwhile stays off; the other one
+    ends up powered."""
+    subprocess.run(['systemctl', 'restart', SERVICE], check=False)
+    found = wait_adapters()
+    set_state(found['hci0']['adapterAddress'], powered=False)
+    settle(3.0)
+    now = adapters()
+    check(not now['hci0']['powered'], 'hci0 switched back on by the repower')
+    check(now['hci1']['powered'], 'hci1 not powered after the repower')
+
 SCENARIOS = [
     power_cycles,
     discovery_finds_the_other_adapter,
@@ -670,6 +681,7 @@ SCENARIOS = [
     opp_same_name_kept_and_dotfile_refused,
     spp_server_data_both_ways,
     service_restarts,
+    power_off_during_startup_repower,
 ]
 
 
