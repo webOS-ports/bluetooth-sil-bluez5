@@ -141,6 +141,8 @@ Bluez5Adapter::~Bluez5Adapter()
 	resetDiscoveryTimeout();
 	if (mCancelDiscTimeoutSource)
 		g_source_remove(mCancelDiscTimeoutSource);
+	if (mRepowerTimeoutSource)
+		g_source_remove(mRepowerTimeoutSource);
 
 	for(auto profile = mProfiles.begin(); profile != mProfiles.end(); profile++)
 	{
@@ -783,39 +785,65 @@ void Bluez5Adapter::setDeviceProperties(const std::string& address, const Blueto
 	callback(BLUETOOTH_ERROR_NONE);
 }
 
+// Power-cycles the controller once it appears (added by webOS for bluetoothd and bluetooth-meshd running side by
+// side). It used to be two sync Set calls with sleep(1) between them on the only main loop. Now each step runs from
+// the previous one's reply. An enable() or disable() meanwhile ends the cycle, so a saved "off" applied by the service
+// at startup is not switched back on by the second half.
 BluetoothError Bluez5Adapter::forceRepower()
 {
-	GVariant *valueVar = g_variant_new_boolean(FALSE);
-	GError *error = 0;
-
-	free_desktop_dbus_properties_call_set_sync(mPropertiesProxy, "org.bluez.Adapter1",
-						"Powered", g_variant_new_variant(valueVar),
-						NULL, &error);
-	if (error)
-	{
-		g_error_free(error);
-		return BLUETOOTH_ERROR_FAIL;
-	}
-
-	sleep(1);
-
-	valueVar = g_variant_new_boolean(TRUE);
-	free_desktop_dbus_properties_call_set_sync(mPropertiesProxy, "org.bluez.Adapter1",
-						"Powered", g_variant_new_variant(valueVar),
-						NULL, &error);
-	if (error)
-	{
-		g_error_free(error);
-		return BLUETOOTH_ERROR_FAIL;
-	}
-
-	mAdvertise->assignAdvertiseManager(mObjectPath);
-
+	mRepowerPending = true;
+	setPoweredAsync(false, [this](bool ok) {
+		if (!ok || !mRepowerPending)
+		{
+			mRepowerPending = false;
+			mAdvertise->assignAdvertiseManager(mObjectPath);
+			return;
+		}
+		mRepowerTimeoutSource = g_timeout_add_seconds(1, handleRepowerTimeout, this);
+	});
 	return BLUETOOTH_ERROR_NONE;
+}
+
+gboolean Bluez5Adapter::handleRepowerTimeout(gpointer user_data)
+{
+	Bluez5Adapter *self = static_cast<Bluez5Adapter*>(user_data);
+	self->mRepowerTimeoutSource = 0;
+
+	if (!self->mRepowerPending)
+	{
+		self->mAdvertise->assignAdvertiseManager(self->mObjectPath);
+		return G_SOURCE_REMOVE;
+	}
+
+	self->setPoweredAsync(true, [self](bool) {
+		self->mRepowerPending = false;
+		self->mAdvertise->assignAdvertiseManager(self->mObjectPath);
+	});
+	return G_SOURCE_REMOVE;
+}
+
+// done runs only while this adapter exists.
+void Bluez5Adapter::setPoweredAsync(bool powered, std::function<void(bool ok)> done)
+{
+	auto setCallback = [alive = mLifetime.token(), done](GObject *source, GAsyncResult *result) {
+		GError *error = 0;
+
+		gboolean ret = free_desktop_dbus_properties_call_set_finish(FREE_DESKTOP_DBUS_PROPERTIES(source), result, &error);
+		bool ok = ret && !error;
+		g_clear_error(&error);
+		if (alive.expired())
+			return;
+		done(ok);
+	};
+
+	free_desktop_dbus_properties_call_set(mPropertiesProxy, "org.bluez.Adapter1", "Powered",
+					g_variant_new_variant(g_variant_new_boolean(powered)), NULL,
+					glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(setCallback));
 }
 
 BluetoothError Bluez5Adapter::enable()
 {
+	mRepowerPending = false;	// the caller decides from here on
 	if (mPowered)
 		return BLUETOOTH_ERROR_NONE;
 
@@ -836,6 +864,7 @@ BluetoothError Bluez5Adapter::enable()
 
 BluetoothError Bluez5Adapter::disable()
 {
+	mRepowerPending = false;	// the caller decides from here on
 	if (!mPowered)
 		return BLUETOOTH_ERROR_NONE;
 

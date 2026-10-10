@@ -225,6 +225,10 @@ private:
 	guint mCancelDiscTimeoutSource;
 	void completeCancelDiscovery();
 	static gboolean handleCancelDiscoveryTimeout(gpointer user_data);
+	bool mRepowerPending = false;
+	guint mRepowerTimeoutSource = 0;
+	static gboolean handleRepowerTimeout(gpointer user_data);
+	void setPoweredAsync(bool powered, std::function<void(bool ok)> done);
 	[[maybe_unused]] bool mAdvertising;
 	std::vector <std::string> mUuids;
 	Bluez5MprisPlayer *mPlayer;
