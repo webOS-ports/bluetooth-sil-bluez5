@@ -19,8 +19,10 @@
 
 #include <glib.h>
 #include <gio/gio.h>
+#include <cstddef>
 #include <functional>
 #include <memory>
+#include <utility>
 
 typedef std::function<void(GAsyncResult *result)> GlibAsyncFunction;
 // With the object the call was made on: finishing a call on a proxy kept in a member, which by the time of the
@@ -60,6 +62,26 @@ public:
 
 private:
 	std::shared_ptr<char> mAlive;
+};
+
+// Joins several asynchronous results into one: done(all succeeded) is called once, when the last of `count`
+// results has come in through a function from part(). Each of those is called once; calls beyond `count` are
+// ignored. With a count of 0, done(true) is called at once.
+class ResultJoin
+{
+public:
+	ResultJoin(size_t count, std::function<void(bool allSucceeded)> done);
+
+	std::function<void(bool success)> part() const;
+
+private:
+	struct State
+	{
+		size_t pending;
+		bool allSucceeded;
+		std::function<void(bool)> done;
+	};
+	std::shared_ptr<State> mState;
 };
 
 class GlibSourceFunctionWrapper

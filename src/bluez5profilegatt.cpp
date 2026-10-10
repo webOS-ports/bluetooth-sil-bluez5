@@ -16,6 +16,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "logging.h"
 #include "bluez5adapter.h"
@@ -1272,7 +1273,6 @@ void Bluez5ProfileGatt::changeCharacteristicWatchStatus(const std::string &addre
 										BluetoothResultCallback callback)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
-	bool result = false;
 	auto deviceServicesIter = mDeviceServicesMap.find(convertAddressToLowerCase(address));
 
 	if (deviceServicesIter == mDeviceServicesMap.end())
@@ -1282,33 +1282,36 @@ void Bluez5ProfileGatt::changeCharacteristicWatchStatus(const std::string &addre
 		return;
 	}
 
-	auto &servicesList = deviceServicesIter->second;
-	for (auto serviceIt : servicesList)
+	// The characteristic in every instance of the service, as before.
+	std::vector<GattRemoteCharacteristic*> targets;
+	for (auto remoteService : deviceServicesIter->second)
 	{
-		if (serviceIt->service.getUuid() == service)
-		{
-			for (auto charIt = serviceIt->gattRemoteCharacteristics.begin(); charIt != serviceIt->gattRemoteCharacteristics.end(); charIt++)
-			{
-				if ((*charIt)->characteristic.getUuid() == characteristic)
-				{
-					if (enabled)
-					{
-						result = (*charIt)->startNotify();
-					}
-					else
-					{
-						result = (*charIt)->stopNotify();
-					}
-					break;
-				}
-			}
-		}
+		if (remoteService->service.getUuid() != service)
+			continue;
+		GattRemoteCharacteristic *remoteChar = findCharacteristic(remoteService, characteristic);
+		if (remoteChar)
+			targets.push_back(remoteChar);
+	}
+	if (targets.empty())
+	{
+		ERROR(MSGID_GATT_PROFILE_ERROR, 0, "remote GATT characteristic not found");
+		callback(BLUETOOTH_ERROR_FAIL);
+		return;
 	}
 
-	if (result)
-		callback(BLUETOOTH_ERROR_NONE);
-	else
-		callback(BLUETOOTH_ERROR_FAIL);
+	// Asynchronous: StartNotify is answered when the device has acknowledged its CCCD write, and a device that did
+	// not answer stopped the service for 25 s. One answer, after the last call, failing when any failed (the last
+	// call's result was taken before), or when the profile has gone meanwhile, as for reads and writes.
+	ResultJoin join(targets.size(), [alive = mLifetime.token(), callback](bool allSucceeded) {
+		callback(allSucceeded && !alive.expired() ? BLUETOOTH_ERROR_NONE : BLUETOOTH_ERROR_FAIL);
+	});
+	for (auto remoteChar : targets)
+	{
+		if (enabled)
+			remoteChar->startNotify(join.part());
+		else
+			remoteChar->stopNotify(join.part());
+	}
 }
 
 void Bluez5ProfileGatt::readCharacteristic(const std::string &address, const BluetoothUuid& service,

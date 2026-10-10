@@ -35,11 +35,12 @@ class Bluez5ProfileGatt;
 // Remote GATT attributes, as BlueZ exports them. Each owns its proxy and its children: they were never freed on
 // several paths, and the characteristics' signal handler then pointed at a deleted profile.
 //
-// Reads and writes are asynchronous: they were synchronous calls on the only main loop, so a peripheral that did
-// not answer stopped the service for the 25 s D-Bus timeout per attribute. Their callbacks capture nothing of the
+// Reads, writes and StartNotify/StopNotify are asynchronous: they were synchronous calls on the only main loop, so a
+// peripheral that did not answer stopped the service for the 25 s D-Bus timeout per attribute. Their callbacks capture nothing of the
 // attribute, which may be gone by the answer: the caller looks it up again.
 typedef std::function<void(bool success, const std::vector<unsigned char> &value)> GattRemoteReadCallback;
-typedef std::function<void(bool success)> GattRemoteWriteCallback;
+typedef std::function<void(bool success)> GattRemoteResultCallback;
+typedef GattRemoteResultCallback GattRemoteWriteCallback;
 
 class GattRemoteDescriptor
 {
@@ -75,9 +76,9 @@ public:
 	GattRemoteCharacteristic(const GattRemoteCharacteristic &) = delete;
 	GattRemoteCharacteristic &operator=(const GattRemoteCharacteristic &) = delete;
 
-	// Still synchronous: the service's callbacks for watches keep raw pointers to its watch list entries.
-	bool startNotify();
-	bool stopNotify();
+	// Asynchronous as well: StartNotify waits for the device to acknowledge its CCCD write.
+	void startNotify(GattRemoteResultCallback callback);
+	void stopNotify(GattRemoteResultCallback callback);
 	void readValue(GattRemoteReadCallback callback);
 	// withoutResponse: a Write Command, for characteristics that only allow those.
 	void writeValue(const std::vector<unsigned char> &characteristicValue, bool withoutResponse,

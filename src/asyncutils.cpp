@@ -53,3 +53,29 @@ guint glibTimeoutAdd(guint interval, GlibSourceFunction func)
 	return g_timeout_add_full(G_PRIORITY_DEFAULT, interval, ownedSourceDispatch,
 	                          new GlibSourceFunctionWrapper(func), ownedSourceDestroy);
 }
+
+ResultJoin::ResultJoin(size_t count, std::function<void(bool allSucceeded)> done)
+	: mState(std::make_shared<State>(State{count, true, std::move(done)}))
+{
+	if (count == 0)
+	{
+		auto finish = std::move(mState->done);
+		mState->done = nullptr;
+		finish(true);
+	}
+}
+
+std::function<void(bool success)> ResultJoin::part() const
+{
+	return [state = mState](bool success) {
+		if (state->pending == 0)
+			return;
+		state->allSucceeded = state->allSucceeded && success;
+		if (--state->pending > 0)
+			return;
+		// Moved out first: done may drop the last reference to the parts, and so to the state.
+		auto finish = std::move(state->done);
+		state->done = nullptr;
+		finish(state->allSucceeded);
+	};
+}

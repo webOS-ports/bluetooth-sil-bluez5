@@ -62,3 +62,72 @@ TEST(AsyncUtils, TimeoutAddFreesItsCallbackWhenRemoved)
 	g_source_remove(id);
 	EXPECT_EQ(token.use_count(), 1);
 }
+
+// ResultJoin: one answer for several asynchronous calls, after the last of them, whatever their order.
+
+TEST(ResultJoin, ReportsOnceAfterTheLastPart)
+{
+	int calls = 0;
+	bool result = false;
+	ResultJoin join(3, [&](bool allSucceeded) { ++calls; result = allSucceeded; });
+	auto first = join.part(), second = join.part(), third = join.part();
+	second(true);
+	first(true);
+	EXPECT_EQ(calls, 0);
+	third(true);
+	EXPECT_EQ(calls, 1);
+	EXPECT_TRUE(result);
+}
+
+TEST(ResultJoin, AnyFailureFailsTheWhole)
+{
+	for (int failing = 0; failing < 3; failing++)
+	{
+		int calls = 0;
+		bool result = true;
+		ResultJoin join(3, [&](bool allSucceeded) { ++calls; result = allSucceeded; });
+		for (int i = 0; i < 3; i++)
+			join.part()(i != failing);
+		EXPECT_EQ(calls, 1) << "failing part " << failing;
+		EXPECT_FALSE(result) << "failing part " << failing;
+	}
+}
+
+TEST(ResultJoin, ExtraCallsAreIgnored)
+{
+	int calls = 0;
+	bool result = false;
+	ResultJoin join(1, [&](bool allSucceeded) { ++calls; result = allSucceeded; });
+	auto part = join.part();
+	part(true);
+	part(false);
+	join.part()(false);
+	EXPECT_EQ(calls, 1);
+	EXPECT_TRUE(result);
+}
+
+TEST(ResultJoin, NoPartsReportsSuccessAtOnce)
+{
+	int calls = 0;
+	bool result = false;
+	ResultJoin join(0, [&](bool allSucceeded) { ++calls; result = allSucceeded; });
+	EXPECT_EQ(calls, 1);
+	EXPECT_TRUE(result);
+	join.part()(false);
+	EXPECT_EQ(calls, 1);
+}
+
+TEST(ResultJoin, PartsOutliveTheJoinAndDoneIsReleased)
+{
+	auto token = std::make_shared<int>(0);
+	int calls = 0;
+	std::function<void(bool)> part;
+	{
+		ResultJoin join(1, [token, &calls](bool) { ++calls; });
+		part = join.part();
+	}
+	EXPECT_EQ(token.use_count(), 2);	// held by done, through the part
+	part(true);
+	EXPECT_EQ(calls, 1);
+	EXPECT_EQ(token.use_count(), 1);	// done is let go once called
+}

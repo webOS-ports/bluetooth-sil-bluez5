@@ -41,30 +41,43 @@ const std::map <BluetoothGattPermission, std::string> GattRemoteDescriptor::desc
 	{ PERMISSION_WRITE_SIGNED, "secure-write"}
 };
 
-bool GattRemoteCharacteristic::startNotify()
+// StartNotify writes the remote's Client Characteristic Configuration descriptor and is answered only when the
+// device has acknowledged it. Like reads and writes, the callback keeps nothing of the characteristic: the call
+// holds its own reference to the proxy, and the reply is finished on that.
+void GattRemoteCharacteristic::startNotify(GattRemoteResultCallback callback)
 {
-	GError *error = NULL;
-	bool result = bluez_gatt_characteristic1_call_start_notify_sync(mInterface, NULL, &error);
-	if (error)
-	{
-		ERROR(MSGID_GATT_PROFILE_ERROR, 0, "startNotify failed due to %s for path %s", error->message, objectPath.c_str());
-		g_error_free(error);
-		return false;
-	}
-	return result;
+	auto notifyCallback = [callback, path = objectPath](GObject *source, GAsyncResult *result) {
+		GError *error = NULL;
+		gboolean ret = bluez_gatt_characteristic1_call_start_notify_finish(BLUEZ_GATT_CHARACTERISTIC1(source), result, &error);
+		if (!ret || error)
+		{
+			ERROR(MSGID_GATT_PROFILE_ERROR, 0, "StartNotify failed on %s: %s", path.c_str(), error ? error->message : "no result");
+			g_clear_error(&error);
+			callback(false);
+			return;
+		}
+		callback(true);
+	};
+	bluez_gatt_characteristic1_call_start_notify(mInterface, NULL, glibAsyncMethodWrapper,
+	                                             new GlibAsyncFunctionWrapper(notifyCallback));
 }
 
-bool GattRemoteCharacteristic::stopNotify()
+void GattRemoteCharacteristic::stopNotify(GattRemoteResultCallback callback)
 {
-	GError *error = NULL;
-	bool result = bluez_gatt_characteristic1_call_stop_notify_sync(mInterface, NULL, &error);
-	if (error)
-	{
-		ERROR(MSGID_GATT_PROFILE_ERROR, 0, "stopNotify failed due to %s for path %s", error->message, objectPath.c_str());
-		g_error_free(error);
-		return false;
-	}
-	return result;
+	auto notifyCallback = [callback, path = objectPath](GObject *source, GAsyncResult *result) {
+		GError *error = NULL;
+		gboolean ret = bluez_gatt_characteristic1_call_stop_notify_finish(BLUEZ_GATT_CHARACTERISTIC1(source), result, &error);
+		if (!ret || error)
+		{
+			ERROR(MSGID_GATT_PROFILE_ERROR, 0, "StopNotify failed on %s: %s", path.c_str(), error ? error->message : "no result");
+			g_clear_error(&error);
+			callback(false);
+			return;
+		}
+		callback(true);
+	};
+	bluez_gatt_characteristic1_call_stop_notify(mInterface, NULL, glibAsyncMethodWrapper,
+	                                            new GlibAsyncFunctionWrapper(notifyCallback));
 }
 
 void GattRemoteCharacteristic::onCharacteristicPropertiesChanged(GDBusProxy */*proxy*/, GVariant *changed_properties, GStrv /*invalidated_properties*/, gpointer userdata)
