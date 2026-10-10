@@ -122,7 +122,6 @@ file(GLOB SOURCES
      src/bluez5obexagent.cpp
      src/bluez5profilea2dp.cpp
      src/bluez5profileavrcp.cpp
-     src/bluez5mediacontrol.cpp
      src/bluez5mprisplayer.cpp
      src/bluez5profilehfp.cpp
      src/bluez5profilemap.cpp
