@@ -17,6 +17,7 @@
 #ifndef BLUEZ5PROFILEA2DP_H
 #define BLUEZ5PROFILEA2DP_H
 
+#include <map>
 #include <string>
 
 #include <bluetooth-sil-api.h>
@@ -39,7 +40,7 @@ public:
 	BluetoothError stopStreaming(const std::string &address) override;
 	void connect(const std::string &address, BluetoothResultCallback callback) override;
 	void disconnect(const std::string &address, BluetoothResultCallback callback) override;
-	void updateA2dpUuid(const std::string &address, BluetoothResultCallback callback);
+	bool updateA2dpUuid(const std::string &address);
 	void enable(const std::string &uuid, BluetoothResultCallback callback) override;
 	void disable(const std::string &uuid, BluetoothResultCallback callback) override;
 	void updateConnectionStatus(const std::string &address, bool status,
@@ -53,21 +54,35 @@ public:
 											const gchar *nameOwner, gpointer user_data);
 	static void handleBluezServiceStopped(GDBusConnection *conn, const gchar *name,
 											gpointer user_data);
-	static void handlePropertiesChanged(BluezMediaTransport1 *, gchar *interface,  GVariant *changedProperties,
-										GVariant *invalidatedProperties, gpointer userData);
+	static void handlePropertiesChanged(FreeDesktopDBusProperties *propertiesProxy, gchar *interface,
+										GVariant *changedProperties, GVariant *invalidatedProperties, gpointer userData);
 	void setA2dpUuid(const std::string &uuid);
 
-	static void updateTransportProperties(Bluez5ProfileA2dp *pA2dp);
-	BluezMediaTransport1* getMediaTransport() { return mInterface; }
+	// The transport of this device, NULL when it has none.
+	BluezMediaTransport1* getMediaTransport(const std::string &address);
 
 	void delayReportChanged(const std::string &adapterAddress, const std::string &deviceAddress, guint16 delay);
 
 private:
+	// One per MediaTransport1 object of this adapter, by its object path: with two devices, or a reconnect whose new
+	// transport appears before the old one goes, there are several.
+	struct Transport
+	{
+		BluezMediaTransport1 *transport;
+		FreeDesktopDBusProperties *properties;
+	};
+
+	void addTransport(const std::string &objectPath);
+	void removeTransport(const std::string &objectPath);
+	void clearTransports();
+	void releaseObjectManager();
+	Bluez5Device *findTransportDevice(BluezMediaTransport1 *transport);
+	void updateTransportProperties(FreeDesktopDBusProperties *properties);
+
 	bool mConnected;
 	GDBusObjectManager *mObjectManager;
 	BluetoothA2dpProfileState mState;
-	FreeDesktopDBusProperties *mPropertiesProxy;
-	BluezMediaTransport1 *mInterface;
+	std::map<std::string, Transport> mTransports;
 	std::string mTransportUuid;
 	guint mWatcherId;
 };

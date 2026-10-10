@@ -26,9 +26,7 @@ Bluez5ProfileA2dp::Bluez5ProfileA2dp(Bluez5Adapter *adapter) :
 	Bluez5ProfileBase(adapter, BLUETOOTH_PROFILE_A2DP_SINK_UUID),
 	mConnected(false),
 	mObjectManager(0),
-	mState(NOT_PLAYING),
-	mPropertiesProxy(0),
-	mInterface(nullptr)
+	mState(NOT_PLAYING)
 {
 	mWatcherId = g_bus_watch_name(G_BUS_TYPE_SYSTEM, "org.bluez", G_BUS_NAME_WATCHER_FLAGS_NONE,
 					 handleBluezServiceStarted, handleBluezServiceStopped, this, NULL);
@@ -41,16 +39,90 @@ void Bluez5ProfileA2dp::delayReportChanged(const std::string &adapterAddress, co
 
 Bluez5ProfileA2dp::~Bluez5ProfileA2dp()
 {
-	if (mObjectManager)
-		g_object_unref(mObjectManager);
-	if (mPropertiesProxy)
-	{
-		g_object_unref(mPropertiesProxy);
-		mPropertiesProxy = 0;
-	}
 	/* Stops watching a name */
 	if (mWatcherId)
 		g_bus_unwatch_name(mWatcherId);
+	clearTransports();
+	releaseObjectManager();
+}
+
+void Bluez5ProfileA2dp::releaseObjectManager()
+{
+	if (!mObjectManager)
+		return;
+	g_signal_handlers_disconnect_by_data(mObjectManager, this);
+	g_object_unref(mObjectManager);
+	mObjectManager = nullptr;
+}
+
+void Bluez5ProfileA2dp::addTransport(const std::string &objectPath)
+{
+	// Under this adapter only; "/org/bluez/hci1" is also a prefix of hci10's paths.
+	std::string adapterPath = mAdapter->getObjectPath() + "/";
+	if (objectPath.compare(0, adapterPath.length(), adapterPath) || mTransports.count(objectPath))
+		return;
+
+	GError *error = 0;
+	BluezMediaTransport1 *transport = bluez_media_transport1_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM,
+	                                  G_DBUS_PROXY_FLAGS_NONE, "org.bluez", objectPath.c_str(), NULL, &error);
+	if (!transport)
+	{
+		DEBUG("Not able to get media transport interface");
+		g_clear_error(&error);
+		return;
+	}
+
+	FreeDesktopDBusProperties *properties = free_desktop_dbus_properties_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM,
+	                                        G_DBUS_PROXY_FLAGS_NONE, "org.bluez", objectPath.c_str(), NULL, &error);
+	if (!properties)
+	{
+		DEBUG("Not able to get property interface");
+		g_clear_error(&error);
+		g_object_unref(transport);
+		return;
+	}
+
+	g_signal_connect(G_OBJECT(properties), "properties-changed", G_CALLBACK(handlePropertiesChanged), this);
+	mTransports[objectPath] = {transport, properties};
+	updateTransportProperties(properties);
+}
+
+// Only the transport that went: removing any one dropped the newest, even when that was another device's.
+void Bluez5ProfileA2dp::removeTransport(const std::string &objectPath)
+{
+	auto it = mTransports.find(objectPath);
+	if (it == mTransports.end())
+		return;
+
+	g_signal_handlers_disconnect_by_data(it->second.properties, this);
+	g_object_unref(it->second.properties);
+	g_object_unref(it->second.transport);
+	mTransports.erase(it);
+	if (mTransports.empty())
+		mTransportUuid = "";
+}
+
+void Bluez5ProfileA2dp::clearTransports()
+{
+	while (!mTransports.empty())
+		removeTransport(mTransports.begin()->first);
+}
+
+Bluez5Device *Bluez5ProfileA2dp::findTransportDevice(BluezMediaTransport1 *transport)
+{
+	const char *deviceObjectPath = bluez_media_transport1_get_device(transport);
+	return deviceObjectPath ? mAdapter->findDeviceByObjectPath(deviceObjectPath) : nullptr;
+}
+
+BluezMediaTransport1 *Bluez5ProfileA2dp::getMediaTransport(const std::string &address)
+{
+	Bluez5Device *device = mAdapter->findDevice(address);
+	if (!device)
+		return nullptr;
+	for (auto &entry : mTransports)
+		if (findTransportDevice(entry.second.transport) == device)
+			return entry.second.transport;
+	return nullptr;
 }
 
 void Bluez5ProfileA2dp::getProperties(const std::string &/*address*/, BluetoothPropertiesResultCallback callback)
@@ -74,18 +146,9 @@ void Bluez5ProfileA2dp::getProperty(const std::string &address, BluetoothPropert
 		return;
 	}
 
-	if (mInterface)
-	{
-		const char* deviceObjectPath = bluez_media_transport1_get_device(mInterface);
-		if (deviceObjectPath)
-		{
-			Bluez5Device* interfaceDevice = mAdapter->findDeviceByObjectPath(deviceObjectPath);
-			if (interfaceDevice && interfaceDevice == device)
-			{
-				isConnected = true;
-			}
-		}
-	}
+	for (auto &entry : mTransports)
+		if (findTransportDevice(entry.second.transport) == device)
+			isConnected = true;
 
 	prop.setValue<bool>(isConnected);
 	callback(BLUETOOTH_ERROR_NONE, prop);
@@ -115,7 +178,12 @@ void Bluez5ProfileA2dp::connect(const std::string &address, BluetoothResultCallb
 
 	if (!mConnected)
 	{
-		updateA2dpUuid(address, connectCallback);
+		// Unknown address: answered here once. It was answered by updateA2dpUuid and again by the base class.
+		if (!updateA2dpUuid(address))
+		{
+			callback(BLUETOOTH_ERROR_PARAM_INVALID);
+			return;
+		}
 		Bluez5ProfileBase::connect(address, connectCallback);
 	}
 	else
@@ -133,18 +201,20 @@ void Bluez5ProfileA2dp::disconnect(const std::string &address, BluetoothResultCa
 		DEBUG("A2DP disconnected succesfully");
 		callback(BLUETOOTH_ERROR_NONE);
 	};
-	updateA2dpUuid(address, disConnectCallback);
-	Bluez5ProfileBase::disconnect(address, disConnectCallback);
-}
-
-void Bluez5ProfileA2dp::updateA2dpUuid(const std::string &address, BluetoothResultCallback callback)
-{
-	Bluez5Device *device = mAdapter->findDevice(address);
-	if (!device)
+	if (!updateA2dpUuid(address))
 	{
 		callback(BLUETOOTH_ERROR_PARAM_INVALID);
 		return;
 	}
+	Bluez5ProfileBase::disconnect(address, disConnectCallback);
+}
+
+// False when the address is unknown.
+bool Bluez5ProfileA2dp::updateA2dpUuid(const std::string &address)
+{
+	Bluez5Device *device = mAdapter->findDevice(address);
+	if (!device)
+		return false;
 
 #ifndef WEBOS_AUTO
 	for(auto tempUuid : device->getUuids())
@@ -167,6 +237,7 @@ void Bluez5ProfileA2dp::updateA2dpUuid(const std::string &address, BluetoothResu
 		}
 	}
 #endif
+	return true;
 }
 
 void Bluez5ProfileA2dp::setA2dpUuid(const std::string &uuid)
@@ -208,10 +279,12 @@ void Bluez5ProfileA2dp::enable(const std::string &uuid, BluetoothResultCallback 
 			if (strstr(error->message, "org.bluez.Error.AlreadyExists") == NULL)
 			{
 				ERROR("A2DP_ENABLE_ROLE", 0, "Role enable %s failed error %s", role.c_str(), error->message);
+				g_error_free(error);
 				if(callback != NULL)
 				{
 					callback(BLUETOOTH_ERROR_FAIL);
 				}
+				return;	// it was answered NONE as well
 			}
 			g_error_free(error);
 		}
@@ -249,7 +322,9 @@ void Bluez5ProfileA2dp::disable(const std::string &/*uuid*/, BluetoothResultCall
 			if (strstr(error->message, "org.bluez.Error.AlreadyExists") == NULL)
 			{
 				ERROR("A2DP_ENABLE_ROLE", 0, "Role enable %s failed error %s", enableRole.c_str(), error->message);
+				g_error_free(error);
 				callback(BLUETOOTH_ERROR_FAIL);
+				return;	// it was answered NONE as well
 			}
 			g_error_free(error);
 		}
@@ -304,71 +379,32 @@ void Bluez5ProfileA2dp::handleObjectAdded(GDBusObjectManager */*objectManager*/,
 {
 	Bluez5ProfileA2dp *a2dp = static_cast<Bluez5ProfileA2dp*>(userData);
 
-	std::string objectPath = g_dbus_object_get_object_path(object);
-
 	auto mediaTransportInterface = g_dbus_object_get_interface(object, "org.bluez.MediaTransport1");
 	if (mediaTransportInterface)
 	{
-		auto adapterPath = a2dp->mAdapter->getObjectPath();
-		if (objectPath.compare(0, adapterPath.length(), adapterPath))
-			return;
-
-		GError *error = 0;
-		a2dp->mInterface = bluez_media_transport1_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
-													"org.bluez", objectPath.c_str(), NULL, &error);
-		if (error)
-		{
-			DEBUG("Not able to get media transport interface");
-			g_error_free(error);
-			return;
-		}
-
-		a2dp->mPropertiesProxy = free_desktop_dbus_properties_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
-																		   "org.bluez", objectPath.c_str(), NULL, &error);
-		if (error)
-		{
-			DEBUG("Not able to get property interface");
-			g_error_free(error);
-			return;
-		}
-
-		g_signal_connect(G_OBJECT(a2dp->mPropertiesProxy), "properties-changed", G_CALLBACK(handlePropertiesChanged), a2dp);
-
-		updateTransportProperties(a2dp);
-		g_object_unref(mediaTransportInterface);
+		a2dp->addTransport(g_dbus_object_get_object_path(object));
+		g_object_unref(mediaTransportInterface);	// leaked on every early return
 	}
 }
 
 void Bluez5ProfileA2dp::handleObjectRemoved(GDBusObjectManager */*objectManager*/, GDBusObject *object, void *userData)
 {
 	Bluez5ProfileA2dp *a2dp = static_cast<Bluez5ProfileA2dp*>(userData);
-
-	std::string objectPath = g_dbus_object_get_object_path(object);
-
-	auto mediaTransportInterface = g_dbus_object_get_interface(object, "org.bluez.MediaTransport1");
-	if (mediaTransportInterface)
-	{
-		auto adapterPath = a2dp->mAdapter->getObjectPath();
-		if (objectPath.compare(0, adapterPath.length(), adapterPath))
-			return;
-
-		a2dp->mTransportUuid = "";
-		g_object_unref(a2dp->mInterface);
-		g_object_unref(mediaTransportInterface);
-		a2dp->mInterface = 0;
-		if (a2dp->mPropertiesProxy)
-		{
-			g_object_unref(a2dp->mPropertiesProxy);
-			a2dp->mPropertiesProxy = 0;
-		}
-	}
+	a2dp->removeTransport(g_dbus_object_get_object_path(object));
 }
 
-void Bluez5ProfileA2dp::handlePropertiesChanged(BluezMediaTransport1 */*transportInterface*/, gchar *interface,  GVariant *changedProperties,
-												   GVariant */*invalidatedProperties*/, gpointer userData)
+void Bluez5ProfileA2dp::handlePropertiesChanged(FreeDesktopDBusProperties *propertiesProxy, gchar *interface,
+												   GVariant *changedProperties, GVariant */*invalidatedProperties*/,
+												   gpointer userData)
 {
 	Bluez5ProfileA2dp *a2dp = static_cast<Bluez5ProfileA2dp*>(userData);
 	DEBUG("properties changed for interface %s", interface);
+
+	// The device is the one of the transport that changed, not of the newest transport.
+	auto it = a2dp->mTransports.find(g_dbus_proxy_get_object_path(G_DBUS_PROXY(propertiesProxy)));
+	if (it == a2dp->mTransports.end())
+		return;
+	Bluez5Device *device = a2dp->findTransportDevice(it->second.transport);
 
 	for (size_t n = 0; n < g_variant_n_children(changedProperties); n++)
 	{
@@ -393,18 +429,8 @@ void Bluez5ProfileA2dp::handlePropertiesChanged(BluezMediaTransport1 */*transpor
 				a2dp->mState = NOT_PLAYING;
 			}
 
-			if (a2dp->mInterface)
-			{
-				const char* deviceObjectPath = bluez_media_transport1_get_device(a2dp->mInterface);
-				if (deviceObjectPath)
-				{
-					Bluez5Device* device = a2dp->mAdapter->findDeviceByObjectPath(deviceObjectPath);
-					if (device)
-					{
-						a2dp->getA2dpObserver()->stateChanged(convertAddressToLowerCase(a2dp->mAdapter->getAddress()), convertAddressToLowerCase(device->getAddress()), a2dp->mState);
-					}
-				}
-			}
+			if (device)
+				a2dp->getA2dpObserver()->stateChanged(convertAddressToLowerCase(a2dp->mAdapter->getAddress()), convertAddressToLowerCase(device->getAddress()), a2dp->mState);
 			g_variant_unref(tmpVar);
 		}
 
@@ -414,18 +440,8 @@ void Bluez5ProfileA2dp::handlePropertiesChanged(BluezMediaTransport1 */*transpor
 			guint16 volume = g_variant_get_uint16(tmpVar);
 			DEBUG("A2DP Volume %d", volume);
 
-			if (a2dp->mInterface)
-			{
-				const char* deviceObjectPath = bluez_media_transport1_get_device(a2dp->mInterface);
-				if (deviceObjectPath)
-				{
-					Bluez5Device* device = a2dp->mAdapter->findDeviceByObjectPath(deviceObjectPath);
-					if (device)
-					{
-						a2dp->mAdapter->updateAvrcpVolume(device->getAddress(), volume);
-					}
-				}
-			}
+			if (device)
+				a2dp->mAdapter->updateAvrcpVolume(device->getAddress(), volume);
 			g_variant_unref(tmpVar);
 		}
 
@@ -435,18 +451,8 @@ void Bluez5ProfileA2dp::handlePropertiesChanged(BluezMediaTransport1 */*transpor
 			guint16 delay = g_variant_get_uint16(tmpVar);
 			DEBUG("A2DP Volume %d", delay);
 
-			if (a2dp->mInterface)
-			{
-				const char* deviceObjectPath = bluez_media_transport1_get_device(a2dp->mInterface);
-				if (deviceObjectPath)
-				{
-					Bluez5Device* device = a2dp->mAdapter->findDeviceByObjectPath(deviceObjectPath);
-					if (device)
-					{
-						a2dp->delayReportChanged(convertAddressToLowerCase(a2dp->mAdapter->getAddress()), convertAddressToLowerCase(device->getAddress()), delay);
-					}
-				}
-			}
+			if (device)
+				a2dp->delayReportChanged(convertAddressToLowerCase(a2dp->mAdapter->getAddress()), convertAddressToLowerCase(device->getAddress()), delay);
 			g_variant_unref(tmpVar);
 		}
 
@@ -470,6 +476,10 @@ void Bluez5ProfileA2dp::handleBluezServiceStarted(GDBusConnection *conn, const g
 {
 	Bluez5ProfileA2dp *a2dp = static_cast<Bluez5ProfileA2dp*>(user_data);
 
+	// A manager from an earlier appearance was overwritten with its handlers still connected.
+	a2dp->clearTransports();
+	a2dp->releaseObjectManager();
+
 	GError *error = 0;
 	a2dp->mObjectManager = g_dbus_object_manager_client_new_sync(conn, G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
 										  "org.bluez", "/", NULL, NULL, NULL, NULL, &error);
@@ -483,32 +493,15 @@ void Bluez5ProfileA2dp::handleBluezServiceStarted(GDBusConnection *conn, const g
 	g_signal_connect(a2dp->mObjectManager, "object-added", G_CALLBACK(handleObjectAdded), a2dp);
 	g_signal_connect(a2dp->mObjectManager, "object-removed", G_CALLBACK(handleObjectRemoved), a2dp);
 
+	// Every transport of this adapter: one of another adapter listed first ended the scan, leaking the rest.
 	GList *objects = g_dbus_object_manager_get_objects(a2dp->mObjectManager);
-	for (size_t n = 0; n < g_list_length(objects); n++)
+	for (GList *l = objects; l; l = l->next)
 	{
-		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
-		std::string objectPath = g_dbus_object_get_object_path(object);
-
+		auto object = static_cast<GDBusObject*>(l->data);
 		auto mediaTransportInterface = g_dbus_object_get_interface(object, "org.bluez.MediaTransport1");
 		if (mediaTransportInterface)
 		{
-			auto adapterPath = a2dp->mAdapter->getObjectPath();
-			if (objectPath.compare(0, adapterPath.length(), adapterPath))
-				return;
-
-			a2dp->mInterface = bluez_media_transport1_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
-																							"org.bluez", objectPath.c_str(), NULL, &error);
-			a2dp->mPropertiesProxy = free_desktop_dbus_properties_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
-																		   "org.bluez", objectPath.c_str(), NULL, &error);
-			if (error)
-			{
-				ERROR(MSGID_PROFILE_MANAGER_ERROR, 0, "Not able to get property interface");
-				g_error_free(error);
-				return;
-			}
-
-			g_signal_connect(G_OBJECT(a2dp->mPropertiesProxy), "properties-changed", G_CALLBACK(handlePropertiesChanged), a2dp);
-			updateTransportProperties(a2dp);
+			a2dp->addTransport(g_dbus_object_get_object_path(object));
 			g_object_unref(mediaTransportInterface);
 		}
 		g_object_unref(object);
@@ -517,47 +510,44 @@ void Bluez5ProfileA2dp::handleBluezServiceStarted(GDBusConnection *conn, const g
 }
 
 void Bluez5ProfileA2dp::handleBluezServiceStopped(GDBusConnection */*conn*/, const gchar */*name*/,
-											gpointer /*user_data*/)
+											gpointer user_data)
 {
+	Bluez5ProfileA2dp *a2dp = static_cast<Bluez5ProfileA2dp*>(user_data);
+	a2dp->clearTransports();
+	a2dp->releaseObjectManager();
 }
-void Bluez5ProfileA2dp::updateTransportProperties(Bluez5ProfileA2dp *pA2dp)
+
+void Bluez5ProfileA2dp::updateTransportProperties(FreeDesktopDBusProperties *properties)
 {
 	DEBUG("A2DP updateTransportProperties");
-	GVariant *propsVar;
+	GVariant *propsVar = nullptr;
 	GError *error = 0;
 
-	if (!pA2dp->mPropertiesProxy)
-		return;
-
-	free_desktop_dbus_properties_call_get_all_sync(pA2dp->mPropertiesProxy, "org.bluez.MediaTransport1", &propsVar, NULL, &error);
-	if (!error && propsVar != NULL)
-	{
-		for (size_t n = 0; n < g_variant_n_children(propsVar); n++)
-		{
-			GVariant *propertyVar = g_variant_get_child_value(propsVar, n);
-			GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
-			GVariant *valueVar = g_variant_get_child_value(propertyVar, 1);
-
-			std::string key = g_variant_get_string(keyVar, NULL);
-			if (key == "UUID")
-			{
-				GVariant *tmpVar = g_variant_get_variant(valueVar);
-				pA2dp->mTransportUuid = g_variant_get_string(tmpVar, NULL);
-				DEBUG("A2DP transport Connected UUID %s", pA2dp->mTransportUuid.c_str());
-				g_variant_unref(tmpVar);
-			}
-			g_variant_unref(propertyVar);
-			g_variant_unref(keyVar);
-			g_variant_unref(valueVar);
-		}
-	}
-	else
+	free_desktop_dbus_properties_call_get_all_sync(properties, "org.bluez.MediaTransport1", &propsVar, NULL, &error);
+	if (error || !propsVar)
 	{
 		DEBUG("Not able to read MediaTransport1 property interface");
-		g_error_free(error);
+		g_clear_error(&error);	// g_error_free(NULL) when the call gave neither
 		return;
 	}
 
+	for (size_t n = 0; n < g_variant_n_children(propsVar); n++)
+	{
+		GVariant *propertyVar = g_variant_get_child_value(propsVar, n);
+		GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
+		GVariant *valueVar = g_variant_get_child_value(propertyVar, 1);
+
+		std::string key = g_variant_get_string(keyVar, NULL);
+		if (key == "UUID")
+		{
+			GVariant *tmpVar = g_variant_get_variant(valueVar);
+			mTransportUuid = g_variant_get_string(tmpVar, NULL);
+			DEBUG("A2DP transport Connected UUID %s", mTransportUuid.c_str());
+			g_variant_unref(tmpVar);
+		}
+		g_variant_unref(propertyVar);
+		g_variant_unref(keyVar);
+		g_variant_unref(valueVar);
+	}
+	g_variant_unref(propsVar);	// leaked on every transport
 }
-
-
