@@ -654,6 +654,9 @@ def spp_server_data_both_ways():
 def service_restarts():
     """The service stopped and started five times on the real SIL; each time both adapters come back."""
     for _ in range(5):
+        # With the stack restart's start, these are six starts in under 10 s: over the unit's start limit (5 in
+        # 10 s). reset-failed clears the count.
+        subprocess.run(['systemctl', 'reset-failed', SERVICE], check=False)
         subprocess.run(['systemctl', 'restart', SERVICE], check=False)
         wait_adapters()
 
@@ -661,8 +664,17 @@ def service_restarts():
 def power_off_during_startup_repower():
     """The SIL power-cycles each new adapter. An adapter switched off by a client meanwhile stays off; the other one
     ends up powered."""
+    subprocess.run(['systemctl', 'reset-failed', SERVICE], check=False)
     subprocess.run(['systemctl', 'restart', SERVICE], check=False)
-    found = wait_adapters()
+    # The cycle switches the controller off and, 1 s later, on again. Catch it while it is off: polled once a second
+    # (wait_adapters), the switch-off came after the cycle and tested nothing.
+    end = time.time() + 20.0
+    while True:
+        found = adapters()
+        if 'hci0' in found and not found['hci0']['powered']:
+            break
+        check(time.time() < end, 'hci0 never seen switched off by the repower')
+        settle(0.05)
     set_state(found['hci0']['adapterAddress'], powered=False)
     settle(3.0)
     now = adapters()
@@ -739,7 +751,7 @@ def main(argv):
         pid = main_pid()
         try:
             scenario()
-            if scenario is not service_restarts:
+            if scenario not in (service_restarts, power_off_during_startup_repower):
                 check(main_pid() == pid, 'the service restarted (pid %s -> %s)' % (pid, main_pid()))
             print('PASS  %s' % scenario.__name__)
         except (Failure, RuntimeError) as e:
