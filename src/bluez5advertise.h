@@ -85,7 +85,15 @@ public:
 	};
 
 private:
-	void setConnection(GDBusConnection *connection) { mConn = connection; }
+	// Its own reference: the bus-acquired callback only lends the shared system bus connection.
+	void setConnection(GDBusConnection *connection)
+	{
+		if (connection)
+			g_object_ref(connection);
+		if (mConn)
+			g_object_unref(mConn);
+		mConn = connection;
+	}
 	std::string createInterface(uint8_t advId);
 	uint8_t nextAdvId();
 	guint mBusId;

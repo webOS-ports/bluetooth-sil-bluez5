@@ -71,7 +71,7 @@ void Bluez5MprisPlayer::handleBusAcquired(GDBusConnection *connection, const gch
 	Bluez5MprisPlayer *player = static_cast<Bluez5MprisPlayer*>(user_data);
 	player->setConnection(connection);
 	player->createInterface();
-	g_object_unref(connection);
+	// Not owned: it was unreffed here, and once more in the destructor.
 }
 
 void Bluez5MprisPlayer::createInterface()

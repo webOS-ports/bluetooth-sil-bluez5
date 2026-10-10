@@ -82,8 +82,7 @@ void Bluez5Advertise::assignAdvertiseManager(std::string objectPath)
 void Bluez5Advertise::handleBusAcquired(GDBusConnection *connection, const gchar *name, gpointer user_data)
 {
 	Bluez5Advertise *adv = static_cast<Bluez5Advertise*>(user_data);
-	adv->setConnection(connection);
-	g_object_unref(connection);
+	adv->setConnection(connection);	// not owned: it was unreffed here, and once more in the destructor
 }
 
 std::string Bluez5Advertise::createInterface(uint8_t advId)

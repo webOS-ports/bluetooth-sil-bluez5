@@ -195,7 +195,7 @@ void Bluez5Agent::createInterface(GDBusConnection *connection)
 	g_signal_connect(mInterface, "handle-cancel", G_CALLBACK(handleCancel), this);
 	g_signal_connect(mInterface, "handle-release", G_CALLBACK(handleRelease), this);
 
-	g_object_unref(connection);
+	// The connection is lent by the bus-acquired callback: it was unreffed here.
 }
 
 Bluez5AgentPairingInfo* Bluez5Agent::findPairingInfoForDevice(const std::string &objectPath)
