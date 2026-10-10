@@ -373,7 +373,7 @@ gboolean Bluez5ProfileSpp::handleRequestDisconnection (BluezProfile1 *interface,
 		std::string objPath = BASE_OBJ_PATH + std::to_string(devieInfo->mChannelId);
 		auto unRegisterCallback = [this](GAsyncResult *result) {
 			GError *error = nullptr;
-			gboolean ret;
+			[[maybe_unused]] gboolean ret;
 
 			ret = bluez_profile_manager1_call_unregister_profile_finish(mAdapter->getProfileManager(), result, &error);
 			if (error)
@@ -530,7 +530,7 @@ void Bluez5ProfileSpp::disconnectUuid(const BluetoothSppChannelId channelId, Blu
 		return;
 	}
 
-	auto disConnectedCallback = [this, callback, channelId, sppConnectionInfo](BluetoothError error)
+	auto disConnectedCallback = [callback](BluetoothError error)
 	{
 		if (error == BLUETOOTH_ERROR_NONE)
 		{

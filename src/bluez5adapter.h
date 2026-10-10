@@ -223,7 +223,7 @@ private:
 	guint mCancelDiscTimeoutSource;
 	void completeCancelDiscovery();
 	static gboolean handleCancelDiscoveryTimeout(gpointer user_data);
-	bool mAdvertising;
+	[[maybe_unused]] bool mAdvertising;
 	std::vector <std::string> mUuids;
 	Bluez5MprisPlayer *mPlayer;
 	BluezMedia1 *mMediaManager;

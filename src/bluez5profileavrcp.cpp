@@ -82,7 +82,7 @@ Bluez5ProfileAvcrp::~Bluez5ProfileAvcrp()
 
 void Bluez5ProfileAvcrp::connect(const std::string& address, BluetoothResultCallback callback)
 {
-	auto connectCallback = [this, address, callback](BluetoothError error) {
+	auto connectCallback = [address, callback](BluetoothError error) {
 		if (error != BLUETOOTH_ERROR_NONE)
 		{
 			DEBUG("AVRCP connect failed");
@@ -101,8 +101,8 @@ void Bluez5ProfileAvcrp::connect(const std::string& address, BluetoothResultCall
 		connectCallback(BLUETOOTH_ERROR_DEVICE_ALREADY_CONNECTED);
 }
 
-void Bluez5ProfileAvcrp::handleBluezServiceStarted(GDBusConnection* conn, const gchar* name,
-	const gchar* nameOwner, gpointer user_data)
+void Bluez5ProfileAvcrp::handleBluezServiceStarted(GDBusConnection* conn, const gchar* /*name*/,
+	const gchar* /*nameOwner*/, gpointer user_data)
 {
 	DEBUG("handleBluezServiceStarted");
 	Bluez5ProfileAvcrp* avrcp = static_cast<Bluez5ProfileAvcrp*>(user_data);
@@ -121,7 +121,7 @@ void Bluez5ProfileAvcrp::handleBluezServiceStarted(GDBusConnection* conn, const 
 	g_signal_connect(avrcp->mObjectManager, "object-removed", G_CALLBACK(handleObjectRemoved), avrcp);
 
 	GList* objects = g_dbus_object_manager_get_objects(avrcp->mObjectManager);
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
 		std::string objectPath = g_dbus_object_get_object_path(object);
@@ -141,12 +141,12 @@ void Bluez5ProfileAvcrp::handleBluezServiceStarted(GDBusConnection* conn, const 
 	g_list_free(objects);
 }
 
-void Bluez5ProfileAvcrp::handleBluezServiceStopped(GDBusConnection* conn, const gchar* name,
-	gpointer user_data)
+void Bluez5ProfileAvcrp::handleBluezServiceStopped(GDBusConnection* /*conn*/, const gchar* /*name*/,
+	gpointer /*user_data*/)
 {
 }
 
-void Bluez5ProfileAvcrp::handleObjectAdded(GDBusObjectManager* objectManager, GDBusObject* object, void* userData)
+void Bluez5ProfileAvcrp::handleObjectAdded(GDBusObjectManager* /*objectManager*/, GDBusObject* object, void* userData)
 {
 	DEBUG("handleObjectAdded");
 	Bluez5ProfileAvcrp* avrcp = static_cast<Bluez5ProfileAvcrp*>(userData);
@@ -166,7 +166,7 @@ void Bluez5ProfileAvcrp::handleObjectAdded(GDBusObjectManager* objectManager, GD
 	}
 }
 
-void Bluez5ProfileAvcrp::handleObjectRemoved(GDBusObjectManager* objectManager, GDBusObject* object, void* userData)
+void Bluez5ProfileAvcrp::handleObjectRemoved(GDBusObjectManager* /*objectManager*/, GDBusObject* object, void* userData)
 {
 	Bluez5ProfileAvcrp* avrcp = static_cast<Bluez5ProfileAvcrp*>(userData);
 	/* We are not unrefing the mPropertiesProxy and mPlayerInterface here.
@@ -189,7 +189,7 @@ void Bluez5ProfileAvcrp::handleObjectRemoved(GDBusObjectManager* objectManager, 
 
 void Bluez5ProfileAvcrp::disconnect(const std::string& address, BluetoothResultCallback callback)
 {
-	auto disConnectCallback = [this, address, callback](BluetoothError error) {
+	auto disConnectCallback = [address, callback](BluetoothError error) {
 		if (error != BLUETOOTH_ERROR_NONE)
 		{
 			DEBUG("AVRCP disconnect failed");
@@ -217,13 +217,15 @@ void Bluez5ProfileAvcrp::enable(const std::string &uuid, BluetoothResultCallback
 	callback(BLUETOOTH_ERROR_NONE);
 }
 
-void Bluez5ProfileAvcrp::disable(const std::string &uuid, BluetoothResultCallback callback)
+void Bluez5ProfileAvcrp::disable(const std::string &/*uuid*/, BluetoothResultCallback callback)
 {
 	callback(BLUETOOTH_ERROR_UNSUPPORTED);
 }
 
-void Bluez5ProfileAvcrp::getProperties(const std::string &address, BluetoothPropertiesResultCallback  callback)
+void Bluez5ProfileAvcrp::getProperties(const std::string &/*address*/, BluetoothPropertiesResultCallback  callback)
 {
+	// Answered: it was an empty stub, and its caller waited forever.
+	callback(BLUETOOTH_ERROR_UNSUPPORTED, BluetoothPropertiesList());
 }
 
 void Bluez5ProfileAvcrp::getProperty(const std::string &address, BluetoothProperty::Type type, BluetoothPropertyResultCallback callback)
@@ -241,13 +243,13 @@ void Bluez5ProfileAvcrp::getProperty(const std::string &address, BluetoothProper
 	callback(BLUETOOTH_ERROR_NONE, prop);
 }
 
-void Bluez5ProfileAvcrp::supplyMediaMetaData(BluetoothAvrcpRequestId requestId, const BluetoothMediaMetaData &metaData, BluetoothResultCallback callback)
+void Bluez5ProfileAvcrp::supplyMediaMetaData(BluetoothAvrcpRequestId /*requestId*/, const BluetoothMediaMetaData &metaData, BluetoothResultCallback callback)
 {
 	mAdapter->getPlayer()->setMediaMetaData(metaData);
 	callback(BLUETOOTH_ERROR_NONE);
 }
 
-void Bluez5ProfileAvcrp::supplyMediaPlayStatus(BluetoothAvrcpRequestId requestId, const BluetoothMediaPlayStatus &playStatus, BluetoothResultCallback callback)
+void Bluez5ProfileAvcrp::supplyMediaPlayStatus(BluetoothAvrcpRequestId /*requestId*/, const BluetoothMediaPlayStatus &playStatus, BluetoothResultCallback callback)
 {
 	mAdapter->getPlayer()->setMediaPlayStatus(playStatus);
 	if (playStatus.getStatus() == BluetoothMediaPlayStatus::MEDIA_PLAYSTATUS_STOPPED)
@@ -486,7 +488,7 @@ void Bluez5ProfileAvcrp::recievePassThroughCommand(std::string address, std::str
 	}
 }
 
-BluetoothError Bluez5ProfileAvcrp::setAbsoluteVolume(const std::string &address, int volume)
+BluetoothError Bluez5ProfileAvcrp::setAbsoluteVolume(const std::string &/*address*/, int volume)
 {
 	Bluez5ProfileA2dp *a2dp = dynamic_cast<Bluez5ProfileA2dp*> (mAdapter->getProfile(BLUETOOTH_PROFILE_ID_A2DP));
 	if (a2dp)
@@ -627,8 +629,6 @@ void Bluez5ProfileAvcrp::addressedPlayerChanged(const std::string &playerPath)
 
 void Bluez5ProfileAvcrp::updatePlayerInfo()
 {
-	bool changed = false;
-	bool playerExists = false;
 
 	BluetothPlayerInfoList playerInfoList;
 	for (auto player : mMediaPlayerList)

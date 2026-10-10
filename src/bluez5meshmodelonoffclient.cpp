@@ -41,8 +41,8 @@ Bluez5MeshModelOnOffClient::~Bluez5MeshModelOnOffClient()
 {
 }
 
-BluetoothError Bluez5MeshModelOnOffClient::sendData(uint16_t srcAddress, uint16_t destAddress,
-                                         uint16_t appIndex, uint8_t data[])
+BluetoothError Bluez5MeshModelOnOffClient::sendData(uint16_t /*srcAddress*/, uint16_t /*destAddress*/,
+                                         uint16_t /*appIndex*/, uint8_t /*data*/[])
 {
 	return BLUETOOTH_ERROR_UNSUPPORTED;
 }

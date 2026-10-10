@@ -139,7 +139,7 @@ std::string Bluez5Agent::convertPairingIOCapability(BluetoothPairingIOCapability
 	return pairingIOCapability[capability];
 }
 
-void Bluez5Agent::handleBusAcquired(GDBusConnection *connection, const gchar *name, gpointer user_data)
+void Bluez5Agent::handleBusAcquired(GDBusConnection *connection, const gchar */*name*/, gpointer user_data)
 {
 	Bluez5Agent *agent = static_cast<Bluez5Agent*>(user_data);
 
@@ -277,14 +277,14 @@ Bluez5AgentPairingInfo* Bluez5Agent::initiatePairing(GDBusMethodInvocation *invo
 
 // Every handler returns TRUE once it has answered the invocation: on FALSE the generated skeleton answers it a
 // second time (UnknownMethod), and the invocation, freed by the first answer, is released again.
-gboolean Bluez5Agent::handleRelease(BluezAgent1 *proxy, GDBusMethodInvocation *invocation, gpointer user_data)
+gboolean Bluez5Agent::handleRelease(BluezAgent1 *proxy, GDBusMethodInvocation *invocation, gpointer /*user_data*/)
 {
 	DEBUG("Agent release method was called");
 	bluez_agent1_complete_release(proxy, invocation);
 	return TRUE;
 }
 
-gboolean Bluez5Agent::handleCancel(BluezAgent1 *proxy, GDBusMethodInvocation *invocation, gpointer user_data)
+gboolean Bluez5Agent::handleCancel(BluezAgent1 */*proxy*/, GDBusMethodInvocation *invocation, gpointer user_data)
 {
 	DEBUG("Agent cancel method was called");
 
@@ -321,15 +321,15 @@ gboolean Bluez5Agent::handleCancel(BluezAgent1 *proxy, GDBusMethodInvocation *in
 }
 
 gboolean Bluez5Agent::handleAuthorizeService(BluezAgent1 *proxy, GDBusMethodInvocation *invocation,
-                                         const gchar *address, const gchar *service, gpointer user_data)
+                                         const gchar */*address*/, const gchar */*service*/, gpointer /*user_data*/)
 {
 	DEBUG("Agent authorize service method was called");
 	bluez_agent1_complete_authorize_service(proxy, invocation);
 	return TRUE;
 }
 
-gboolean Bluez5Agent::handleRequestAuthorization(BluezAgent1 *proxy, GDBusMethodInvocation *invocation,
-                                                 const gchar *address, gpointer user_data)
+gboolean Bluez5Agent::handleRequestAuthorization(BluezAgent1 */*proxy*/, GDBusMethodInvocation *invocation,
+                                                 const gchar */*address*/, gpointer /*user_data*/)
 {
 	DEBUG("Agent request authorize method was called");
 	// Still refused, as before, but answered once.
@@ -339,7 +339,7 @@ gboolean Bluez5Agent::handleRequestAuthorization(BluezAgent1 *proxy, GDBusMethod
 }
 
 gboolean Bluez5Agent::handleDisplayPasskey(BluezAgent1 *proxy, GDBusMethodInvocation *invocation,
-                                           const gchar *objectPath, const guint passkey, const guint passkey2,
+                                           const gchar *objectPath, const guint passkey, const guint /*passkey2*/,
                                            gpointer user_data)
 {
 	DEBUG("Agent display passkey method was called");
@@ -381,7 +381,7 @@ gboolean Bluez5Agent::handleDisplayPinCode(BluezAgent1 *proxy, GDBusMethodInvoca
 	return TRUE;
 }
 
-gboolean Bluez5Agent::handleRequestConfirmation(BluezAgent1 *proxy, GDBusMethodInvocation *invocation,
+gboolean Bluez5Agent::handleRequestConfirmation(BluezAgent1 */*proxy*/, GDBusMethodInvocation *invocation,
                                                 const gchar *objectPath, const guint passkey, gpointer user_data)
 {
 	DEBUG("Agent request confirmation method was called: objectPath %s passkey %d",
@@ -407,7 +407,7 @@ gboolean Bluez5Agent::handleRequestConfirmation(BluezAgent1 *proxy, GDBusMethodI
 	return TRUE;
 }
 
-gboolean Bluez5Agent::handleRequestPasskey(BluezAgent1 *proxy, GDBusMethodInvocation *invocation,
+gboolean Bluez5Agent::handleRequestPasskey(BluezAgent1 */*proxy*/, GDBusMethodInvocation *invocation,
                                            const gchar *objectPath, gpointer user_data)
 {
 	DEBUG("Agent request passkey method was called");
@@ -432,7 +432,7 @@ gboolean Bluez5Agent::handleRequestPasskey(BluezAgent1 *proxy, GDBusMethodInvoca
 	return TRUE;
 }
 
-gboolean Bluez5Agent::handleRequestPinCode(BluezAgent1 *proxy, GDBusMethodInvocation *invocation,
+gboolean Bluez5Agent::handleRequestPinCode(BluezAgent1 */*proxy*/, GDBusMethodInvocation *invocation,
                                            const gchar *objectPath, gpointer user_data)
 {
 	DEBUG("Agent request pincode method was called");

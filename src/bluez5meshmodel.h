@@ -40,11 +40,11 @@ public:
 	mMeshAdv(meshAdv),
 	mAdapter(adapter) {}
 	virtual ~Bluez5MeshModel() {}
-	virtual BluetoothError sendData(uint16_t srcAddress, uint16_t destAddress,
-									uint16_t appIndex, uint8_t data[])
+	virtual BluetoothError sendData(uint16_t /*srcAddress*/, uint16_t /*destAddress*/,
+									uint16_t /*appIndex*/, uint8_t /*data*/[])
 									{ return BLUETOOTH_ERROR_UNSUPPORTED; }
-	virtual bool recvData(uint16_t srcAddress, uint16_t destAddress, uint16_t appIndex,
-							uint8_t data[], uint32_t datalen) { return false; }
+	virtual bool recvData(uint16_t /*srcAddress*/, uint16_t /*destAddress*/, uint16_t /*appIndex*/,
+							uint8_t /*data*/[], uint32_t /*datalen*/) { return false; }
 
 public:
 	uint32_t mModelId;

@@ -61,7 +61,7 @@ void Bluez5ProfileHfp::getProperty(const std::string &address, BluetoothProperty
 
 void Bluez5ProfileHfp::connect(const std::string &address, BluetoothResultCallback callback)
 {
-	auto connectCallback = [this, address, callback](BluetoothError error) {
+	auto connectCallback = [address, callback](BluetoothError error) {
 		if (error != BLUETOOTH_ERROR_NONE)
 		{
 			callback(error);
@@ -80,7 +80,7 @@ void Bluez5ProfileHfp::connect(const std::string &address, BluetoothResultCallba
 
 void Bluez5ProfileHfp::disconnect(const std::string &address, BluetoothResultCallback callback)
 {
-	auto disConnectCallback = [this, address, callback](BluetoothError error) {
+	auto disConnectCallback = [address, callback](BluetoothError error) {
 		if (error != BLUETOOTH_ERROR_NONE)
 		{
 			callback(error);
@@ -93,7 +93,7 @@ void Bluez5ProfileHfp::disconnect(const std::string &address, BluetoothResultCal
 	Bluez5ProfileBase::disconnect(address, disConnectCallback);
 }
 
-void Bluez5ProfileHfp::updateConnectionStatus(const std::string &address, bool isConnected, const std::string &uuid)
+void Bluez5ProfileHfp::updateConnectionStatus(const std::string &address, bool isConnected, const std::string &/*uuid*/)
 {
 	BluetoothPropertiesList properties;
 	properties.push_back(BluetoothProperty(BluetoothProperty::Type::CONNECTED, isConnected));

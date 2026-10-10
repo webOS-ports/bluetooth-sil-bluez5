@@ -46,7 +46,7 @@ public:
 	bool volumeUp();
 
 private:
-	Bluez5Adapter *mAdapter;
+	[[maybe_unused]] Bluez5Adapter *mAdapter;
 	std::string mObjectPath;
 	BluezMediaControl1 *mInterface;
 	bool mState;

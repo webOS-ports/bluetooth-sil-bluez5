@@ -179,7 +179,7 @@ void Bluez5ObexTransfer::updateFromProperties(GVariant *properties)
 {
 	bool changed = false;
 
-	for (int n = 0; n < g_variant_n_children(properties); n++)
+	for (size_t n = 0; n < g_variant_n_children(properties); n++)
 	{
 		GVariant *propertyVar = g_variant_get_child_value(properties, n);
 		GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -200,8 +200,8 @@ void Bluez5ObexTransfer::updateFromProperties(GVariant *properties)
 		notifyWatcherAboutChangedProperties();
 }
 
-void Bluez5ObexTransfer::handlePropertiesChanged(BluezObexTransfer1 *, gchar *interface,  GVariant *changedProperties,
-												   GVariant *invalidatedProperties, gpointer userData)
+void Bluez5ObexTransfer::handlePropertiesChanged(BluezObexTransfer1 *, gchar */*interface*/,  GVariant *changedProperties,
+												   GVariant */*invalidatedProperties*/, gpointer userData)
 {
 	auto transfer = static_cast<Bluez5ObexTransfer*>(userData);
 

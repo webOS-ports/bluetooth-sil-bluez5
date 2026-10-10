@@ -77,8 +77,8 @@ void Bluez5MeshElement::registerElementInterface(GDBusObjectManagerServer *objec
 	g_dbus_object_manager_server_export(objectManagerServer, elementSkeleton);
 }
 
-gboolean Bluez5MeshElement::handleDevKeyMessageReceived(BluezMeshElement1 *object,
-														GDBusMethodInvocation *invocation,
+gboolean Bluez5MeshElement::handleDevKeyMessageReceived(BluezMeshElement1 */*object*/,
+														GDBusMethodInvocation */*invocation*/,
 														guint16 argSource,
 														gboolean argRemote,
 														guint16 argNetIndex,
@@ -93,7 +93,7 @@ gboolean Bluez5MeshElement::handleDevKeyMessageReceived(BluezMeshElement1 *objec
 
 	data = (uint8_t *)g_variant_get_fixed_array(argData, &dataLen, sizeof(guint8));
 
-	DEBUG("Received msg with length: %d", dataLen);
+	DEBUG("Received msg with length: %" G_GSIZE_FORMAT, dataLen);
 
 	for ( auto model : meshElement->mModels)
 	{
@@ -105,8 +105,8 @@ gboolean Bluez5MeshElement::handleDevKeyMessageReceived(BluezMeshElement1 *objec
 	return true;
 }
 
-gboolean Bluez5MeshElement::handleMessageReceived(BluezMeshElement1 *object,
-												  GDBusMethodInvocation *invocation,
+gboolean Bluez5MeshElement::handleMessageReceived(BluezMeshElement1 */*object*/,
+												  GDBusMethodInvocation */*invocation*/,
 												  guint16 argSource,
 												  guint16 argKeyIndex,
 												  GVariant *argDestination,
@@ -126,7 +126,7 @@ gboolean Bluez5MeshElement::handleMessageReceived(BluezMeshElement1 *object,
 	GVariant *destAddrVar = g_variant_get_variant(argDestination);
 	destAddr = g_variant_get_uint16(destAddrVar);
 
-	DEBUG("Received msg with length: %d", dataLen);
+	DEBUG("Received msg with length: %" G_GSIZE_FORMAT, dataLen);
 
 	for ( auto model : meshElement->mModels)
 	{

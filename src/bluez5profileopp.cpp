@@ -66,7 +66,7 @@ BluetoothOppTransferId Bluez5ProfileOpp::pushFile(const std::string &address,
 
 	auto pushCallback = [this, objectPushProxy, sourcePath, transferId, callback](GAsyncResult *result) {
 		GError *error = 0;
-		gboolean ret;
+		[[maybe_unused]] gboolean ret;
 
 		char *objectPath = 0;
 		ret = bluez_obex_object_push1_call_send_file_finish(objectPushProxy, &objectPath , NULL, result, &error);
@@ -181,8 +181,8 @@ void Bluez5ProfileOpp::supplyTransferConfirmation(BluetoothOppTransferId transfe
 {
 	if (accept)
 	{
-		auto resultCallBack = [this, transferId, callback](BluetoothError error, uint64_t bytesTransferred,
-														   uint64_t totalSize, bool finished)
+		auto resultCallBack = [this, transferId, callback](BluetoothError /*error*/, uint64_t bytesTransferred,
+														   uint64_t /*totalSize*/, bool finished)
 		{
 			if (mTransfersMap[transferId])
 				getOppObserver()->transferStateChanged(transferId, bytesTransferred - mTransfersMap[transferId], finished);

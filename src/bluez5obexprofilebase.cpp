@@ -76,7 +76,7 @@ void Bluez5ObexProfileBase::notifySessionStatus(const std::string &address, bool
 
 void Bluez5ObexProfileBase::handleFailedToCreateSession(const std::string &address, BluetoothResultCallback callback)
 {
-	auto disconnectCallback = [this, address, callback](BluetoothError error) {
+	auto disconnectCallback = [this, address, callback](BluetoothError /*error*/) {
 		DEBUG("Connecting with device %s on uuid %s profile", address.c_str(), getProfileUuid().c_str());
 		// We always return a failure here that is initial thing someone
 		// called this method for
@@ -140,14 +140,14 @@ void Bluez5ObexProfileBase::removeSession(const std::string &address)
 }
 
 
-void Bluez5ObexProfileBase::updateProperties(GVariant *changedProperties)
+void Bluez5ObexProfileBase::updateProperties(GVariant */*changedProperties*/)
 {
 	DEBUG("Bluez5ObexProfileBase::updateProperties");
 
 	return;
 }
 
-void Bluez5ObexProfileBase::handlePropertiesChanged(BluezObexSession1 *proxy, gchar *interface,  GVariant *changedProperties, GVariant *invalidatedProperties, gpointer userData)
+void Bluez5ObexProfileBase::handlePropertiesChanged(BluezObexSession1 *proxy, gchar */*interface*/,  GVariant *changedProperties, GVariant */*invalidatedProperties*/, gpointer userData)
 {
 	DEBUG("handlePropertiesChanged Bluez5ObexProfileBase");
 
@@ -228,7 +228,7 @@ void Bluez5ObexProfileBase::disconnect(const std::string& address, BluetoothResu
 	removeSession(address);
 }
 
-void Bluez5ObexProfileBase::getProperties(const std::string &address, BluetoothPropertiesResultCallback callback)
+void Bluez5ObexProfileBase::getProperties(const std::string &/*address*/, BluetoothPropertiesResultCallback callback)
 {
 	BluetoothPropertiesList properties;
 

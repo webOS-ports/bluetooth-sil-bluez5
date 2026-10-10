@@ -47,7 +47,7 @@ Bluez5MeshAdvProvisioner::~Bluez5MeshAdvProvisioner()
 {
 }
 
-void Bluez5MeshAdvProvisioner::registerProvisionerInterface(GDBusObjectManagerServer *objectManagerServer,
+void Bluez5MeshAdvProvisioner::registerProvisionerInterface(GDBusObjectManagerServer */*objectManagerServer*/,
 															GDBusObjectSkeleton *provSkeleton)
 {
 	BluezMeshProvisioner1 *provInterface = bluez_mesh_provisioner1_skeleton_new();
@@ -74,11 +74,11 @@ static std::string uuidToHex(GVariant *bytes)
 	return std::string(deviceUuid);
 }
 
-gboolean Bluez5MeshAdvProvisioner::handleScanResult(BluezMeshProvisioner1 *interface,
+gboolean Bluez5MeshAdvProvisioner::handleScanResult(BluezMeshProvisioner1 */*interface*/,
 													GDBusMethodInvocation *invocation,
 													gint16 argRssi,
 													GVariant *argData,
-													GVariant *argOptions,
+													GVariant */*argOptions*/,
 													gpointer userData)
 {
 	Bluez5MeshAdvProvisioner *meshAdvProvisioner = (Bluez5MeshAdvProvisioner *)userData;
@@ -96,7 +96,7 @@ gboolean Bluez5MeshAdvProvisioner::handleScanResult(BluezMeshProvisioner1 *inter
 
 	return true;
 }
-gboolean Bluez5MeshAdvProvisioner::handleAddNodeComplete(BluezMeshProvisioner1 *interface,
+gboolean Bluez5MeshAdvProvisioner::handleAddNodeComplete(BluezMeshProvisioner1 */*interface*/,
 														 GDBusMethodInvocation *invocation,
 														 GVariant *uuid,
 														 guint16 unicast,
@@ -117,7 +117,7 @@ gboolean Bluez5MeshAdvProvisioner::handleAddNodeComplete(BluezMeshProvisioner1 *
 
 	return true;
 }
-gboolean Bluez5MeshAdvProvisioner::handleAddNodeFailed(BluezMeshProvisioner1 *interface,
+gboolean Bluez5MeshAdvProvisioner::handleAddNodeFailed(BluezMeshProvisioner1 */*interface*/,
 													   GDBusMethodInvocation *invocation,
 													   GVariant *uuid,
 													   const gchar *reason,
@@ -138,7 +138,7 @@ gboolean Bluez5MeshAdvProvisioner::handleAddNodeFailed(BluezMeshProvisioner1 *in
 
 	return true;
 }
-gboolean Bluez5MeshAdvProvisioner::handleRequestProvData(BluezMeshProvisioner1 *interface,
+gboolean Bluez5MeshAdvProvisioner::handleRequestProvData(BluezMeshProvisioner1 */*interface*/,
 														 GDBusMethodInvocation *invocation,
 														 guchar count,
 														 gpointer userData)

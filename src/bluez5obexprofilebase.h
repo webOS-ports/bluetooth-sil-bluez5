@@ -42,7 +42,7 @@ public:
 	void handleObexSessionStatus(const std::string &address, bool lost);
 	virtual void updateProperties(GVariant *changedProperties);
 	// With the session's properties proxy that emitted the change, to tell which session it is about.
-	virtual void updateSessionProperties(GObject *propertiesProxy, GVariant *changedProperties) { updateProperties(changedProperties); }
+	virtual void updateSessionProperties(GObject */*propertiesProxy*/, GVariant *changedProperties) { updateProperties(changedProperties); }
 	static void handlePropertiesChanged(BluezObexSession1 *, gchar *interface,  GVariant *changedProperties, GVariant *invalidatedProperties, gpointer userData);
 	virtual void notifySessionStatus(const std::string &address, bool createdOrRemoved);
 

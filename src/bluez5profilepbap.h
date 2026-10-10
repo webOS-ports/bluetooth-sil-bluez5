@@ -32,16 +32,16 @@ class Bluez5ProfilePbap : public Bluez5ObexProfileBase,
 public:
     Bluez5ProfilePbap(Bluez5Adapter *adapter);
     ~Bluez5ProfilePbap();
-    void supplyAccessConfirmation(BluetoothPbapAccessRequestId accessRequestId, bool accept, BluetoothResultCallback callback);
-    void setPhoneBook(const std::string &address, const std::string &repository, const std::string &object, BluetoothResultCallback callback);
-    void getPhonebookSize(const std::string &address, BluetoothPbapGetSizeResultCallback callback);
-    void vCardListing(const std::string &address, BluetoothPbapVCardListResultCallback callback);
-    void getPhoneBookProperties(const std::string &address, BluetoothPbapApplicationParameterCallback callback);
-    void getvCardFilters(const std::string &address, BluetoothPbapListFiltersResultCallback callback);
-    void pullvCard(const std::string &address, const std::string &targetFile, const std::string &vCardHandle, const std::string &vCardVersion, BluetoothPbapVCardFilterList &vCardFilters, BluetoothResultCallback callback);
+    void supplyAccessConfirmation(BluetoothPbapAccessRequestId accessRequestId, bool accept, BluetoothResultCallback callback) override;
+    void setPhoneBook(const std::string &address, const std::string &repository, const std::string &object, BluetoothResultCallback callback) override;
+    void getPhonebookSize(const std::string &address, BluetoothPbapGetSizeResultCallback callback) override;
+    void vCardListing(const std::string &address, BluetoothPbapVCardListResultCallback callback) override;
+    void getPhoneBookProperties(const std::string &address, BluetoothPbapApplicationParameterCallback callback) override;
+    void getvCardFilters(const std::string &address, BluetoothPbapListFiltersResultCallback callback) override;
+    void pullvCard(const std::string &address, const std::string &targetFile, const std::string &vCardHandle, const std::string &vCardVersion, BluetoothPbapVCardFilterList &vCardFilters, BluetoothResultCallback callback) override;
     void updateSessionProperties(GObject *propertiesProxy, GVariant *changedProperties) override;
-    void pullPhoneBook(const std::string &address,const std::string &destinationFile,const std::string &vCardVersion,BluetoothPbapVCardFilterList &vCardFilters, const uint16_t &startIndex, const uint16_t &maxCount, BluetoothGetPhoneBookResultCallback callback);
-    void searchPhoneBook (const std::string &address, const std::string &searchOrder, const std::string &searchKey, const std::string &searchValue, BluetoothPbapVCardListResultCallback callback);
+    void pullPhoneBook(const std::string &address,const std::string &destinationFile,const std::string &vCardVersion,BluetoothPbapVCardFilterList &vCardFilters, const uint16_t &startIndex, const uint16_t &maxCount, BluetoothGetPhoneBookResultCallback callback) override;
+    void searchPhoneBook (const std::string &address, const std::string &searchOrder, const std::string &searchKey, const std::string &searchValue, BluetoothPbapVCardListResultCallback callback) override;
 private:
     bool isObjectValid( const std::string &object);
     bool isRepositoryValid( const std::string &repository);

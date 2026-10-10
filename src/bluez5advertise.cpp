@@ -79,7 +79,7 @@ void Bluez5Advertise::assignAdvertiseManager(std::string objectPath)
 	return;
 }
 
-void Bluez5Advertise::handleBusAcquired(GDBusConnection *connection, const gchar *name, gpointer user_data)
+void Bluez5Advertise::handleBusAcquired(GDBusConnection *connection, const gchar */*name*/, gpointer user_data)
 {
 	Bluez5Advertise *adv = static_cast<Bluez5Advertise*>(user_data);
 	adv->setConnection(connection);	// not owned: it was unreffed here, and once more in the destructor
@@ -204,16 +204,12 @@ void Bluez5Advertise::advertiseServiceUuids(uint8_t advId, std::unordered_map<st
 	if (!interface)
 		return;
 
-	const char *uuids[serviceList.size()+1];
-
-	int i = 0;
+	// A vector, not an array on the stack sized by the app's list.
+	std::vector<const char *> uuids;
 	for (auto it = serviceList.begin(); it != serviceList.end(); it++)
-	{
-		uuids[i++] = it->first.c_str();
-	}
-
-	if (i < serviceList.size()+1) uuids[i] = NULL;
-	bluez_leadvertisement1_set_service_uuids (interface, uuids);
+		uuids.push_back(it->first.c_str());
+	uuids.push_back(nullptr);
+	bluez_leadvertisement1_set_service_uuids (interface, uuids.data());
 }
 
 void Bluez5Advertise::advertiseServiceData(uint8_t advId, const char* uuids, std::vector<uint8_t> serviceData)
@@ -283,7 +279,7 @@ void Bluez5Advertise::advertiseManufacturerData(uint8_t advId, std::vector<uint8
 	}
 
 	dataBuilder = g_variant_builder_new (G_VARIANT_TYPE ("ay"));
-	for (int i = 2; i < data.size(); i++)
+	for (size_t i = 2; i < data.size(); i++)
 	{
 		g_variant_builder_add(dataBuilder, "y", data[i]);
 	}
@@ -390,10 +386,9 @@ void Bluez5Advertise::setAdRole(uint8_t advId, std::string role)
 	DEBUG("role %s", role.c_str());
 }
 
-gboolean Bluez5Advertise::handleRelease(BluezLEAdvertisement1 *proxy, GDBusMethodInvocation *invocation, gpointer user_data)
+gboolean Bluez5Advertise::handleRelease(BluezLEAdvertisement1 *proxy, GDBusMethodInvocation *invocation, gpointer /*user_data*/)
 {
 	DEBUG("Advertising released");
-	Bluez5Advertise *pThis = static_cast<Bluez5Advertise*> (user_data);
 	//pThis->unRegisterAdvertisement();
 	bluez_leadvertisement1_complete_release(proxy, invocation);
 	return TRUE;

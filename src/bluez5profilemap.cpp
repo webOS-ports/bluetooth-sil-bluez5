@@ -74,7 +74,7 @@ void Bluez5ProfileMap::connect(const std::string &address, const std::string &in
 	createSession(address, instanceName, callback);
 }
 
-void Bluez5ProfileMap::disconnect(const std::string &sessionKey, const std::string &sessionId, BluetoothMapCallback callback)
+void Bluez5ProfileMap::disconnect(const std::string &sessionKey, const std::string &/*sessionId*/, BluetoothMapCallback callback)
 {
 	DEBUG("Disconnecting with sessionKey %s  ", sessionKey.c_str());
 	std::string instanceName;
@@ -148,7 +148,7 @@ std::string Bluez5ProfileMap::getSessionIdFromSessionPath(const std::string &ses
 	return ( idPos == std::string::npos ? "" : sessionPath.substr(idPos + 1));
 }
 
-void Bluez5ProfileMap::getMessageFilters(const std::string &sessionKey, const std::string &sessionId, BluetoothMapListFiltersResultCallback callback)
+void Bluez5ProfileMap::getMessageFilters(const std::string &sessionKey, const std::string &/*sessionId*/, BluetoothMapListFiltersResultCallback callback)
 {
 
     const Bluez5ObexSession *session = findSession(sessionKey);
@@ -166,24 +166,24 @@ void Bluez5ProfileMap::getMessageFilters(const std::string &sessionKey, const st
         return;
     }
 
-    auto getFilterListCallback = [ = ](GAsyncResult *result) {
+    auto getFilterListCallback = [callback](GObject *source, GAsyncResult *result) {
 
         gchar **out_fields = NULL;
         GError *error = 0;
-        gboolean ret;
         std::list<std::string> filterList;
-        ret = bluez_obex_message_access1_call_list_filter_fields_finish(objectMessageProxy, &out_fields, result, &error);
-        if (error)
+        gboolean ret = bluez_obex_message_access1_call_list_filter_fields_finish(BLUEZ_OBEX_MESSAGE_ACCESS1(source), &out_fields, result, &error);
+        if (!ret || error || !out_fields)
         {
-            g_error_free(error);
+            g_clear_error(&error);
+            g_strfreev(out_fields);
             callback(BLUETOOTH_ERROR_FAIL,filterList);
             return;
         }
 
-        for (int filterBit = 0; *out_fields != NULL /*&& filterBit < MAX_FILTER_BIT*/; filterBit++ )
-        {
-            filterList.push_back(*out_fields++);
-        }
+        // Walked with an index: the array was walked by its own pointer, and never freed.
+        for (size_t field = 0; out_fields[field] != NULL; field++)
+            filterList.push_back(out_fields[field]);
+        g_strfreev(out_fields);
         callback(BLUETOOTH_ERROR_NONE,filterList);
     };
 
@@ -191,7 +191,7 @@ void Bluez5ProfileMap::getMessageFilters(const std::string &sessionKey, const st
 
  }
 
-void Bluez5ProfileMap::getFolderList(const std::string &sessionKey, const std::string &sessionId, const uint16_t &startOffset, const uint16_t &maxCount, BluetoothMapGetFoldersCallback callback)
+void Bluez5ProfileMap::getFolderList(const std::string &sessionKey, const std::string &/*sessionId*/, const uint16_t &startOffset, const uint16_t &maxCount, BluetoothMapGetFoldersCallback callback)
 {
     DEBUG("%s", __FUNCTION__);
     std::vector<std::string> folderList;
@@ -261,7 +261,7 @@ GVariant * Bluez5ProfileMap::buildGetFolderListParam(const uint16_t &startOffset
     return params;
 }
 
-void Bluez5ProfileMap::setFolder(const std::string &sessionKey, const std::string &sessionId, const std::string &folder, BluetoothResultCallback callback)
+void Bluez5ProfileMap::setFolder(const std::string &sessionKey, const std::string &/*sessionId*/, const std::string &folder, BluetoothResultCallback callback)
 {
     DEBUG("%s", __FUNCTION__);
     const Bluez5ObexSession *session = findSession(sessionKey);
@@ -278,10 +278,10 @@ void Bluez5ProfileMap::setFolder(const std::string &sessionKey, const std::strin
         return;
     }
 
-    auto setFolderCallback = [this, tObjectMapProxy, callback](GAsyncResult *result) {
+    auto setFolderCallback = [tObjectMapProxy, callback](GAsyncResult *result) {
 
     GError *error = 0;
-    gboolean ret;
+    [[maybe_unused]] gboolean ret;
     ret = bluez_obex_message_access1_call_set_folder_finish(tObjectMapProxy, result, &error);
     if (error)
     {
@@ -303,7 +303,7 @@ void Bluez5ProfileMap::setFolder(const std::string &sessionKey, const std::strin
                                                  NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(setFolderCallback));
 }
 
-void Bluez5ProfileMap::getMessageList(const std::string &sessionKey, const std::string &sessionId, const std::string &folder, const BluetoothMapPropertiesList &filters, BluetoothMapGetMessageListCallback callback)
+void Bluez5ProfileMap::getMessageList(const std::string &sessionKey, const std::string &/*sessionId*/, const std::string &folder, const BluetoothMapPropertiesList &filters, BluetoothMapGetMessageListCallback callback)
 {
     DEBUG("%s", __FUNCTION__);
     BluetoothMessageList messageList;
@@ -513,7 +513,7 @@ void Bluez5ProfileMap::getMessage(const std::string &sessionKey, const std::stri
     auto getMessageCallback = [this, objectMessageProxy, callback](GAsyncResult *result) {
 
         GError *error = 0;
-        gboolean ret;
+        [[maybe_unused]] gboolean ret;
         gchar *objectPath = 0;
 
         ret = bluez_obex_message1_call_get_finish(objectMessageProxy, &objectPath, NULL, result, &error);
@@ -686,10 +686,10 @@ void Bluez5ProfileMap::pushMessage(const std::string &sessionKey, const std::str
         return;
     }
 
-   auto pushMessageCallback = [=](GAsyncResult *result) {
+   auto pushMessageCallback = [=, this](GAsyncResult *result) {
 
         GError *error = 0;
-        gboolean ret;
+        [[maybe_unused]] gboolean ret;
         gchar *objectPath = 0;
         GVariant *outProperties;
 
@@ -730,7 +730,7 @@ void Bluez5ProfileMap::updateProperties(GVariant *changedProperties)
     BluetoothMessageList messageList;
     std::string sessionId;
 
-    for (int n = 0; n < g_variant_n_children(changedProperties); n++)
+    for (size_t n = 0; n < g_variant_n_children(changedProperties); n++)
     {
         GVariant *propertyVar = g_variant_get_child_value(changedProperties, n);
         GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);

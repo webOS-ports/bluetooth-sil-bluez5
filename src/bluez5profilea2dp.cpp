@@ -53,9 +53,11 @@ Bluez5ProfileA2dp::~Bluez5ProfileA2dp()
 		g_bus_unwatch_name(mWatcherId);
 }
 
-void Bluez5ProfileA2dp::getProperties(const std::string &address, BluetoothPropertiesResultCallback callback)
+void Bluez5ProfileA2dp::getProperties(const std::string &/*address*/, BluetoothPropertiesResultCallback callback)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
+	// Answered: it was an empty stub, and its caller waited forever.
+	callback(BLUETOOTH_ERROR_UNSUPPORTED, BluetoothPropertiesList());
 }
 
 void Bluez5ProfileA2dp::getProperty(const std::string &address, BluetoothProperty::Type type,
@@ -89,19 +91,19 @@ void Bluez5ProfileA2dp::getProperty(const std::string &address, BluetoothPropert
 	callback(BLUETOOTH_ERROR_NONE, prop);
 }
 
-BluetoothError Bluez5ProfileA2dp::startStreaming(const std::string &address)
+BluetoothError Bluez5ProfileA2dp::startStreaming(const std::string &/*address*/)
 {
 	return BLUETOOTH_ERROR_NONE;
 }
 
-BluetoothError Bluez5ProfileA2dp::stopStreaming(const std::string &address)
+BluetoothError Bluez5ProfileA2dp::stopStreaming(const std::string &/*address*/)
 {
 	return BLUETOOTH_ERROR_NONE;
 }
 
 void Bluez5ProfileA2dp::connect(const std::string &address, BluetoothResultCallback callback)
 {
-	auto connectCallback = [this, address, callback](BluetoothError error) {
+	auto connectCallback = [address, callback](BluetoothError error) {
 		if (error != BLUETOOTH_ERROR_NONE)
 		{
 			callback(error);
@@ -122,7 +124,7 @@ void Bluez5ProfileA2dp::connect(const std::string &address, BluetoothResultCallb
 
 void Bluez5ProfileA2dp::disconnect(const std::string &address, BluetoothResultCallback callback)
 {
-	auto disConnectCallback = [this, address, callback](BluetoothError error) {
+	auto disConnectCallback = [address, callback](BluetoothError error) {
 		if (error != BLUETOOTH_ERROR_NONE)
 		{
 			callback(error);
@@ -223,7 +225,7 @@ void Bluez5ProfileA2dp::enable(const std::string &uuid, BluetoothResultCallback 
 
 }
 
-void Bluez5ProfileA2dp::disable(const std::string &uuid, BluetoothResultCallback callback)
+void Bluez5ProfileA2dp::disable(const std::string &/*uuid*/, BluetoothResultCallback callback)
 {
 #ifdef WEBOS_AUTO
 	GError *error = 0;
@@ -298,7 +300,7 @@ void Bluez5ProfileA2dp::updateConnectionStatus(const std::string &address,
 	getObserver()->propertiesChanged(convertAddressToLowerCase(mAdapter->getAddress()), convertAddressToLowerCase(address), properties);
 }
 
-void Bluez5ProfileA2dp::handleObjectAdded(GDBusObjectManager *objectManager, GDBusObject *object, void *userData)
+void Bluez5ProfileA2dp::handleObjectAdded(GDBusObjectManager */*objectManager*/, GDBusObject *object, void *userData)
 {
 	Bluez5ProfileA2dp *a2dp = static_cast<Bluez5ProfileA2dp*>(userData);
 
@@ -337,7 +339,7 @@ void Bluez5ProfileA2dp::handleObjectAdded(GDBusObjectManager *objectManager, GDB
 	}
 }
 
-void Bluez5ProfileA2dp::handleObjectRemoved(GDBusObjectManager *objectManager, GDBusObject *object, void *userData)
+void Bluez5ProfileA2dp::handleObjectRemoved(GDBusObjectManager */*objectManager*/, GDBusObject *object, void *userData)
 {
 	Bluez5ProfileA2dp *a2dp = static_cast<Bluez5ProfileA2dp*>(userData);
 
@@ -362,13 +364,13 @@ void Bluez5ProfileA2dp::handleObjectRemoved(GDBusObjectManager *objectManager, G
 	}
 }
 
-void Bluez5ProfileA2dp::handlePropertiesChanged(BluezMediaTransport1 *transportInterface, gchar *interface,  GVariant *changedProperties,
-												   GVariant *invalidatedProperties, gpointer userData)
+void Bluez5ProfileA2dp::handlePropertiesChanged(BluezMediaTransport1 */*transportInterface*/, gchar *interface,  GVariant *changedProperties,
+												   GVariant */*invalidatedProperties*/, gpointer userData)
 {
 	Bluez5ProfileA2dp *a2dp = static_cast<Bluez5ProfileA2dp*>(userData);
 	DEBUG("properties changed for interface %s", interface);
 
-	for (int n = 0; n < g_variant_n_children(changedProperties); n++)
+	for (size_t n = 0; n < g_variant_n_children(changedProperties); n++)
 	{
 		GVariant *propertyVar = g_variant_get_child_value(changedProperties, n);
 		GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -463,8 +465,8 @@ void Bluez5ProfileA2dp::handlePropertiesChanged(BluezMediaTransport1 *transportI
 	}
 }
 
-void Bluez5ProfileA2dp::handleBluezServiceStarted(GDBusConnection *conn, const gchar *name,
-											  const gchar *nameOwner, gpointer user_data)
+void Bluez5ProfileA2dp::handleBluezServiceStarted(GDBusConnection *conn, const gchar */*name*/,
+											  const gchar */*nameOwner*/, gpointer user_data)
 {
 	Bluez5ProfileA2dp *a2dp = static_cast<Bluez5ProfileA2dp*>(user_data);
 
@@ -482,7 +484,7 @@ void Bluez5ProfileA2dp::handleBluezServiceStarted(GDBusConnection *conn, const g
 	g_signal_connect(a2dp->mObjectManager, "object-removed", G_CALLBACK(handleObjectRemoved), a2dp);
 
 	GList *objects = g_dbus_object_manager_get_objects(a2dp->mObjectManager);
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
 		std::string objectPath = g_dbus_object_get_object_path(object);
@@ -514,8 +516,8 @@ void Bluez5ProfileA2dp::handleBluezServiceStarted(GDBusConnection *conn, const g
 	g_list_free(objects);
 }
 
-void Bluez5ProfileA2dp::handleBluezServiceStopped(GDBusConnection *conn, const gchar *name,
-											gpointer user_data)
+void Bluez5ProfileA2dp::handleBluezServiceStopped(GDBusConnection */*conn*/, const gchar */*name*/,
+											gpointer /*user_data*/)
 {
 }
 void Bluez5ProfileA2dp::updateTransportProperties(Bluez5ProfileA2dp *pA2dp)
@@ -530,7 +532,7 @@ void Bluez5ProfileA2dp::updateTransportProperties(Bluez5ProfileA2dp *pA2dp)
 	free_desktop_dbus_properties_call_get_all_sync(pA2dp->mPropertiesProxy, "org.bluez.MediaTransport1", &propsVar, NULL, &error);
 	if (!error && propsVar != NULL)
 	{
-		for (int n = 0; n < g_variant_n_children(propsVar); n++)
+		for (size_t n = 0; n < g_variant_n_children(propsVar); n++)
 		{
 			GVariant *propertyVar = g_variant_get_child_value(propsVar, n);
 			GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);

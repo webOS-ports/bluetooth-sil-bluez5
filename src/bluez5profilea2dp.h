@@ -31,21 +31,21 @@ class Bluez5ProfileA2dp : public Bluez5ProfileBase,
 public:
 	Bluez5ProfileA2dp(Bluez5Adapter *adapter);
 	~Bluez5ProfileA2dp();
-	void getProperties(const std::string &address, BluetoothPropertiesResultCallback  callback);
+	void getProperties(const std::string &address, BluetoothPropertiesResultCallback  callback) override;
 	void getProperty(const std::string &address, BluetoothProperty::Type type,
-	                         BluetoothPropertyResultCallback callback);
+	                         BluetoothPropertyResultCallback callback) override;
 
-	BluetoothError startStreaming(const std::string &address);
-	BluetoothError stopStreaming(const std::string &address);
-	void connect(const std::string &address, BluetoothResultCallback callback);
-	void disconnect(const std::string &address, BluetoothResultCallback callback);
+	BluetoothError startStreaming(const std::string &address) override;
+	BluetoothError stopStreaming(const std::string &address) override;
+	void connect(const std::string &address, BluetoothResultCallback callback) override;
+	void disconnect(const std::string &address, BluetoothResultCallback callback) override;
 	void updateA2dpUuid(const std::string &address, BluetoothResultCallback callback);
 	void enable(const std::string &uuid, BluetoothResultCallback callback) override;
 	void disable(const std::string &uuid, BluetoothResultCallback callback) override;
 	void updateConnectionStatus(const std::string &address, bool status,
 								const std::string &uuid) override;
-	BluetoothError setDelayReportingState(bool state);
-	BluetoothError getDelayReportingState(bool &state);
+	BluetoothError setDelayReportingState(bool state) override;
+	BluetoothError getDelayReportingState(bool &state) override;
 
 	static void handleObjectAdded(GDBusObjectManager *objectManager, GDBusObject *object, void *user_data);
 	static void handleObjectRemoved(GDBusObjectManager *objectManager, GDBusObject *object, void *user_data);

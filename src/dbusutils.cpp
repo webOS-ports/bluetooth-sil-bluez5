@@ -87,7 +87,7 @@ void NameWatch::watch(StatusCallback callback)
 	mCallback = callback;
 }
 
-void NameWatch::handleNameAppeared(GDBusConnection *conn, const gchar *name, const gchar *nameOwner, gpointer user_data)
+void NameWatch::handleNameAppeared(GDBusConnection */*conn*/, const gchar */*name*/, const gchar */*nameOwner*/, gpointer user_data)
 {
 	NameWatch *self = static_cast<NameWatch*>(user_data);
 
@@ -95,7 +95,7 @@ void NameWatch::handleNameAppeared(GDBusConnection *conn, const gchar *name, con
 		self->mCallback(true);
 }
 
-void NameWatch::handleNameDisappeared(GDBusConnection *conn, const gchar *name, gpointer user_data)
+void NameWatch::handleNameDisappeared(GDBusConnection */*conn*/, const gchar */*name*/, gpointer user_data)
 {
 	NameWatch *self = static_cast<NameWatch*>(user_data);
 
@@ -139,7 +139,7 @@ void ObjectWatch::watchInterfaceRemoved(InterfaceStatusCallback callback)
 	mInterfaceRemovedCallback = callback;
 }
 
-void ObjectWatch::handleInterfaceRemoved(GDBusObjectManager *manager, GDBusObject *object, GDBusInterface *interface, gpointer user_data)
+void ObjectWatch::handleInterfaceRemoved(GDBusObjectManager */*manager*/, GDBusObject *object, GDBusInterface *interface, gpointer user_data)
 {
 	ObjectWatch *watch = static_cast<ObjectWatch*>(user_data);
 
@@ -159,7 +159,7 @@ void ObjectWatch::handleInterfaceRemoved(GDBusObjectManager *manager, GDBusObjec
 	watch->mInterfaceRemovedCallback(std::string(info->name));
 }
 
-void ObjectWatch::handleObjectRemoved(GDBusObjectManager *manager, GDBusObject *object, gpointer user_data)
+void ObjectWatch::handleObjectRemoved(GDBusObjectManager */*manager*/, GDBusObject *object, gpointer user_data)
 {
 	ObjectWatch *watch = static_cast<ObjectWatch*>(user_data);
 

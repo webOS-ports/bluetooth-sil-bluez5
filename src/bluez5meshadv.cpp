@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <cinttypes>
 //#include <dbus/dbus.h>
 #include "bluez5meshadv.h"
 #include "bluez5profilemesh.h"
@@ -153,7 +154,7 @@ void Bluez5MeshAdv::getRandomBytes(unsigned char *buf)
 
 void Bluez5MeshAdv::updateNetworkId()
 {
-	DEBUG("updateNetworkId mToken: %llu", mToken);
+	DEBUG("updateNetworkId mToken: %" PRIu64, mToken);
 	mMesh->getMeshObserver()->updateNetworkId(convertAddressToLowerCase(mAdapter->getAddress()),
 		mToken);
 }
@@ -162,7 +163,7 @@ BluetoothError Bluez5MeshAdv::attachToken(const std::string &token)
 {
 	std::string::size_type sz = 0;
 	mToken = std::stoull(token, &sz, 0);
-	DEBUG("attachToken mToken: %llu", mToken);
+	DEBUG("attachToken mToken: %" PRIu64, mToken);
 	attach();
 	return BLUETOOTH_ERROR_NONE;
 }
@@ -191,7 +192,6 @@ BluetoothError Bluez5MeshAdv::createNetwork()
 	if(!mNetworkInterface)
 		return BLUETOOTH_ERROR_NOT_ALLOWED;
 
-	GError *error = 0;
 	getRandomBytes(mUuid);
 
 	GBytes *bytes = g_bytes_new(mUuid, 16);
@@ -219,11 +219,13 @@ BluetoothError Bluez5MeshAdv::createNetwork()
 
 void Bluez5MeshAdv::getMeshInfo(BleMeshInfoCallback callback)
 {
-
+	// Answered: it was an empty stub, and its caller waited forever.
+	BleMeshInfo meshInfo;
+	callback(BLUETOOTH_ERROR_UNSUPPORTED, meshInfo);
 }
 
-void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const gchar *name,
-												  const gchar *nameOwner, gpointer userData)
+void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const gchar */*name*/,
+												  const gchar */*nameOwner*/, gpointer userData)
 {
 	GError *error = 0;
 	Bluez5MeshAdv *meshAdv = static_cast<Bluez5MeshAdv *>(userData);
@@ -264,7 +266,7 @@ void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const g
 
 	GList* objects = g_dbus_object_manager_get_objects(meshAdv->mObjectManager);
 	DEBUG("Mesh object length: %d", g_list_length(objects));
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
 		std::string objectPath = g_dbus_object_get_object_path(object);
@@ -295,7 +297,7 @@ void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const g
 }
 
 // It did nothing: the next start made a second object manager and exported a second time next to the first.
-void Bluez5MeshAdv::handleBluezMeshServiceStopped(GDBusConnection *conn, const gchar *name,
+void Bluez5MeshAdv::handleBluezMeshServiceStopped(GDBusConnection */*conn*/, const gchar */*name*/,
 												  gpointer userData)
 {
 	Bluez5MeshAdv *meshAdv = static_cast<Bluez5MeshAdv *>(userData);
@@ -320,7 +322,7 @@ void Bluez5MeshAdv::handleBluezMeshServiceStopped(GDBusConnection *conn, const g
 	}
 }
 
-void Bluez5MeshAdv::handleObjectAdded(GDBusObjectManager *objectManager,
+void Bluez5MeshAdv::handleObjectAdded(GDBusObjectManager */*objectManager*/,
 										  GDBusObject *object, void *userData)
 {
 	DEBUG("Bluez5MeshAdv::handleObjectAdded");
@@ -360,8 +362,8 @@ void Bluez5MeshAdv::handleObjectAdded(GDBusObjectManager *objectManager,
 	}
 }
 
-void Bluez5MeshAdv::handleObjectRemoved(GDBusObjectManager *objectManager,
-											GDBusObject *object, void *userData)
+void Bluez5MeshAdv::handleObjectRemoved(GDBusObjectManager */*objectManager*/,
+											GDBusObject */*object*/, void */*userData*/)
 {
 }
 
@@ -398,11 +400,8 @@ BluetoothError Bluez5MeshAdv::unprovisionedScanCancel()
 	return BLUETOOTH_ERROR_NONE;
 }
 
-static unsigned char gethex(const char *s, char **endptr) {
-  return strtoul(s, endptr, 16);
-}
 
-BluetoothError Bluez5MeshAdv::provision(const std::string &uuid, const uint16_t timeout)
+BluetoothError Bluez5MeshAdv::provision(const std::string &uuid, const uint16_t /*timeout*/)
 {
 	const char *uuidStr = uuid.c_str();
 	uint8_t uuidByte[16] = {0};
@@ -462,7 +461,7 @@ BluetoothError Bluez5MeshAdv::createAppKey(uint16_t netKeyIndex, uint16_t appKey
 	return BLUETOOTH_ERROR_NONE;
 }
 
-BluetoothError Bluez5MeshAdv::modelSend(uint16_t srcAddress, uint16_t destAddress,
+BluetoothError Bluez5MeshAdv::modelSend(uint16_t /*srcAddress*/, uint16_t destAddress,
 										uint16_t appKeyIndex,
 										const std::string &command,
 										BleMeshPayload &payload)
@@ -483,8 +482,6 @@ BluetoothError Bluez5MeshAdv::modelSend(uint16_t srcAddress, uint16_t destAddres
 
 BluetoothError Bluez5MeshAdv::sendPassThrough(uint16_t destAddress, uint16_t appIndex, const std::vector<uint8_t> value)
 {
-	uint8_t msg[32];
-	uint16_t n;
 	GError *error = 0;
 	GVariantBuilder *builder = 0;
 	GVariant *params = 0;
@@ -715,7 +712,6 @@ BluetoothError Bluez5MeshAdv::deleteRemoteNodeFromLocalKeyDatabase(uint16_t prim
 	}
 
 	GError *error = 0;
-	BluetoothError silError = BLUETOOTH_ERROR_FAIL;
 
 	bluez_mesh_management1_call_delete_remote_node_sync(mMgmtInterface,
 													primaryAddress, count, NULL, &error);
@@ -863,7 +859,6 @@ void Bluez5MeshAdv::keyRefresh(BluetoothResultCallback callback,
 	std::vector<BleMeshNode> nodes, uint16_t netKeyIndex, int32_t waitTime)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
-	GError *error = 0;
 
 	std::thread t( [this, callback, refreshAppKeys, appKeyIndexesToRefresh,
 									blackListedNodes, nodes, netKeyIndex, waitTime]() mutable
@@ -916,7 +911,7 @@ void Bluez5MeshAdv::keyRefresh(BluetoothResultCallback callback,
 		/* Remove blackilisted node from list of nodes so that keys are distributed to
 		* nodes that are not blacklisted
 		*/
-		for (int i = 0 ; i < blackListedNodes.size(); ++i)
+		for (size_t i = 0 ; i < blackListedNodes.size(); ++i)
 		{
 			for (auto node = nodes.begin(); node != nodes.end();)
 			{

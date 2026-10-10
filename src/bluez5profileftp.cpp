@@ -52,7 +52,7 @@ Bluez5ProfileFtp::~Bluez5ProfileFtp()
 	mSessions.clear();
 }
 
-void Bluez5ProfileFtp::getProperties(const std::string &address, BluetoothPropertiesResultCallback callback)
+void Bluez5ProfileFtp::getProperties(const std::string &/*address*/, BluetoothPropertiesResultCallback callback)
 {
 	BluetoothPropertiesList properties;
 
@@ -93,7 +93,7 @@ void Bluez5ProfileFtp::notifySessionStatus(const std::string &address, bool crea
 
 void Bluez5ProfileFtp::handleFailedToCreateSession(const std::string &address, BluetoothResultCallback callback)
 {
-	auto disconnectCallback = [this, address, callback](BluetoothError error) {
+	auto disconnectCallback = [address, callback](BluetoothError /*error*/) {
 		// We always return a failure here that is initial thing someone
 		// called this method for
 		callback(BLUETOOTH_ERROR_FAIL);
@@ -290,12 +290,12 @@ std::vector<BluetoothFtpElement> Bluez5ProfileFtp::buildElementList(GVariant *en
 {
 	std::vector<BluetoothFtpElement> elements;
 
-	for (int n = 0; n < g_variant_n_children(entries); n++)
+	for (size_t n = 0; n < g_variant_n_children(entries); n++)
 	{
 		GVariant *entry = g_variant_get_child_value(entries, n);
 		BluetoothFtpElement currentElement;
 
-		for (int m = 0; m < g_variant_n_children(entry); m++)
+		for (size_t m = 0; m < g_variant_n_children(entry); m++)
 		{
 			GVariant *propertyVar = g_variant_get_child_value(entry, m);
 
@@ -380,7 +380,7 @@ void Bluez5ProfileFtp::listFolder(const std::string &address, const std::string 
 
 	auto changeFolderCallback = [this, fileTransferProxy, callback](GAsyncResult *result) {
 		GError *error = 0;
-		gboolean ret;
+		[[maybe_unused]] gboolean ret;
 
 		ret = bluez_obex_file_transfer1_call_change_folder_finish(fileTransferProxy, result, &error);
 		if (error)
@@ -392,7 +392,7 @@ void Bluez5ProfileFtp::listFolder(const std::string &address, const std::string 
 
 		auto listFolderCallback = [this, fileTransferProxy, callback](GAsyncResult *result) {
 			GError *error = 0;
-			gboolean ret;
+			[[maybe_unused]] gboolean ret;
 			GVariant *entries = 0;
 
 			ret = bluez_obex_file_transfer1_call_list_folder_finish(fileTransferProxy, &entries, result, &error);
@@ -479,7 +479,7 @@ BluetoothFtpTransferId Bluez5ProfileFtp::pullFile(const std::string &address, co
 
 	auto changeFolderCallback = [this, fileTransferProxy, sourceFileName, targetPath, transferId, callback](GAsyncResult *result) {
 		GError *error = 0;
-		gboolean ret;
+		[[maybe_unused]] gboolean ret;
 
 		ret = bluez_obex_file_transfer1_call_change_folder_finish(fileTransferProxy, result, &error);
 		if (error)
@@ -491,7 +491,7 @@ BluetoothFtpTransferId Bluez5ProfileFtp::pullFile(const std::string &address, co
 
 		auto getFileCallback = [this, fileTransferProxy, transferId, callback](GAsyncResult *result) {
 			GError *error = 0;
-			gboolean ret;
+			[[maybe_unused]] gboolean ret;
 			gchar *objectPath = 0;
 
 			ret = bluez_obex_file_transfer1_call_get_file_finish(fileTransferProxy, &objectPath, NULL, result, &error);
@@ -547,7 +547,7 @@ BluetoothFtpTransferId Bluez5ProfileFtp::pushFile(const std::string &address, co
 
 	auto changeFolderCallback = [this, fileTransferProxy, sourcePath, targetFileName, transferId, callback](GAsyncResult *result) {
 		GError *error = 0;
-		gboolean ret;
+		[[maybe_unused]] gboolean ret;
 
 		ret = bluez_obex_file_transfer1_call_change_folder_finish(fileTransferProxy, result, &error);
 		if (error)
@@ -559,7 +559,7 @@ BluetoothFtpTransferId Bluez5ProfileFtp::pushFile(const std::string &address, co
 
 		auto putFileCallback = [this, transferId, fileTransferProxy, callback](GAsyncResult *result) {
 			GError *error = 0;
-			gboolean ret;
+			[[maybe_unused]] gboolean ret;
 			gchar *objectPath = 0;
 
 			ret = bluez_obex_file_transfer1_call_put_file_finish(fileTransferProxy, &objectPath, NULL, result, &error);

@@ -66,7 +66,7 @@ Bluez5MprisPlayer::~Bluez5MprisPlayer()
 	}
 }
 
-void Bluez5MprisPlayer::handleBusAcquired(GDBusConnection *connection, const gchar *name, gpointer user_data)
+void Bluez5MprisPlayer::handleBusAcquired(GDBusConnection *connection, const gchar */*name*/, gpointer user_data)
 {
 	Bluez5MprisPlayer *player = static_cast<Bluez5MprisPlayer*>(user_data);
 	player->setConnection(connection);

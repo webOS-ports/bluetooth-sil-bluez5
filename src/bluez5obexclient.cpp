@@ -31,7 +31,7 @@ Bluez5ObexClient::Bluez5ObexClient(Bluez5Adapter *adapter) :
 	DBusUtils::waitForBus(BLUEZ5_OBEX_DBUS_BUS_TYPE, [this](bool available) {
 		if (!available) {
 			// register an empty name watch handler
-			mNameWatch.watch([](bool available) { });
+			mNameWatch.watch([](bool /*available*/) { });
 			return;
 		}
 
@@ -190,7 +190,7 @@ void Bluez5ObexClient::destroySession(const std::string &objectPath)
 
 	auto removeSessionCallback = [objectPath](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
-		gboolean ret;
+		[[maybe_unused]] gboolean ret;
 
 		ret = bluez_obex_client1_call_remove_session_finish(BLUEZ_OBEX_CLIENT1(source), result, &error);
 		if (error)

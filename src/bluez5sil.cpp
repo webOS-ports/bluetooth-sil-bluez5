@@ -66,8 +66,8 @@ Bluez5SIL::~Bluez5SIL()
 	mAdapters.clear();
 }
 
-void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *name,
-											  const gchar *nameOwner, gpointer user_data)
+void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar */*name*/,
+											  const gchar */*nameOwner*/, gpointer user_data)
 {
 	Bluez5SIL *sil = static_cast<Bluez5SIL*>(user_data);
 
@@ -95,7 +95,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 	/*Objects may come in any order, first device object then adapter so
 	 better to traverse all objects to adapter then other interfaces*/
 
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
 		auto objectPath = g_dbus_object_get_object_path(object);
@@ -126,7 +126,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 	}
 
 
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
 		auto objectPath = g_dbus_object_get_object_path(object);
@@ -139,7 +139,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 		}
 	}
 
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
 		auto objectPath = g_dbus_object_get_object_path(object);
@@ -152,7 +152,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 		}
 	}
 
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
 		g_object_unref(object);
@@ -160,7 +160,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 	g_list_free(objects);
 }
 
-void Bluez5SIL::handleBluezServiceStopped(GDBusConnection *conn, const gchar *name,
+void Bluez5SIL::handleBluezServiceStopped(GDBusConnection */*conn*/, const gchar */*name*/,
 											gpointer user_data)
 {
 	Bluez5SIL *sil = static_cast<Bluez5SIL*>(user_data);
@@ -195,7 +195,7 @@ void Bluez5SIL::handleBluezServiceStopped(GDBusConnection *conn, const gchar *na
 	sil->deleteObexAgent();
 }
 
-void Bluez5SIL::handleObjectAdded(GDBusObjectManager *objectManager, GDBusObject *object, void *user_data)
+void Bluez5SIL::handleObjectAdded(GDBusObjectManager */*objectManager*/, GDBusObject *object, void *user_data)
 {
 	Bluez5SIL *sil = static_cast<Bluez5SIL*>(user_data);
 
@@ -223,7 +223,7 @@ void Bluez5SIL::handleObjectAdded(GDBusObjectManager *objectManager, GDBusObject
 	}
 }
 
-void Bluez5SIL::handleObjectRemoved(GDBusObjectManager *objectManager, GDBusObject *object, void *user_data)
+void Bluez5SIL::handleObjectRemoved(GDBusObjectManager */*objectManager*/, GDBusObject *object, void *user_data)
 {
 	Bluez5SIL *sil = static_cast<Bluez5SIL*>(user_data);
 
@@ -260,10 +260,9 @@ void Bluez5SIL::handleObjectRemoved(GDBusObjectManager *objectManager, GDBusObje
 
 GDBusObject* Bluez5SIL::findInterface(GList* objects, const gchar *interfaceName)
 {
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		GDBusObject* object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
-		const gchar * objectPath = g_dbus_object_get_object_path(object);
 		auto interface = g_dbus_object_get_interface(object, interfaceName);
 		if (interface)
 		{
@@ -415,7 +414,7 @@ void Bluez5SIL::createAgentManager(const std::string &objectPath)
 		adapter->assignAgent(mAgent);
 }
 
-void Bluez5SIL::removeAgentManager(const std::string &objectPath)
+void Bluez5SIL::removeAgentManager(const std::string &/*objectPath*/)
 {
 	if (!mAgentManager)
 		return;
@@ -453,7 +452,7 @@ void Bluez5SIL::createProfileManager(const std::string &objectPath)
 		adapter->assignProfileManager(mProfileManager);
 }
 
-void Bluez5SIL::removeProfileManager(const std::string &objectPath)
+void Bluez5SIL::removeProfileManager(const std::string &/*objectPath*/)
 {
 	if (!mProfileManager)
 		return;
@@ -544,7 +543,7 @@ BluetoothSIL* createBluetoothSIL(const int version, BluetoothPairingIOCapability
 	if (BLUETOOTH_SIL_API_VERSION != version)
 		return NULL;
 
-	g_type_init();
+	// g_type_init(): a no-op, and deprecated, since GLib 2.36.
 
 	PmLogErr error = PmLogGetContext(logContextName, &bluez5LogContext);
 	if (error != kPmLogErr_None)

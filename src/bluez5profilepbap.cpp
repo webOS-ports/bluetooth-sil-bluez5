@@ -419,7 +419,7 @@ void Bluez5ProfilePbap::updateSessionProperties(GObject *propertiesProxy, GVaria
 
     bool changed = false;
 
-    for (int n = 0; n < g_variant_n_children(changedProperties); n++)
+    for (size_t n = 0; n < g_variant_n_children(changedProperties); n++)
     {
         GVariant *propertyVar = g_variant_get_child_value(changedProperties, n);
         GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -507,7 +507,7 @@ void Bluez5ProfilePbap::initializePbapApplicationParameters()
 void Bluez5ProfilePbap::parseAllProperties(GVariant *propsVar)
 {
 
-    for (int n = 0; n < g_variant_n_children(propsVar); n++)
+    for (size_t n = 0; n < g_variant_n_children(propsVar); n++)
     {
         GVariant *propertyVar = g_variant_get_child_value(propsVar, n);
         GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -530,7 +530,7 @@ void Bluez5ProfilePbap::updateVersion(BluezObexPhonebookAccess1 *phonebookProxy)
         return;
 
     GError *error = 0;
-    gboolean ret;
+    [[maybe_unused]] gboolean ret;
     ret = bluez_obex_phonebook_access1_call_update_version_sync(phonebookProxy, NULL, &error);
     if (error)
     {
@@ -538,9 +538,10 @@ void Bluez5ProfilePbap::updateVersion(BluezObexPhonebookAccess1 *phonebookProxy)
         g_error_free(error);
     }
 }
-void Bluez5ProfilePbap::supplyAccessConfirmation(BluetoothPbapAccessRequestId accessRequestId, bool accept, BluetoothResultCallback callback)
+void Bluez5ProfilePbap::supplyAccessConfirmation(BluetoothPbapAccessRequestId /*accessRequestId*/, bool /*accept*/, BluetoothResultCallback callback)
 {
-
+	// Answered: it was an empty stub, and its caller waited forever.
+	callback(BLUETOOTH_ERROR_UNSUPPORTED);
 }
 
 GVariant * Bluez5ProfilePbap::setFilters(const std::string &vCardVersion, BluetoothPbapVCardFilterList &vCardFilters)
@@ -554,7 +555,7 @@ GVariant * Bluez5ProfilePbap::setFilters(const std::string &vCardVersion, Blueto
 
     if(vCardFilters.size())
     {
-        for(int i = 0; i < vCardFilters.size(); i++)
+        for(size_t i = 0; i < vCardFilters.size(); i++)
         {
             g_variant_builder_add(builderVcardFiltersValue, "s", vCardFilters[i].c_str());
         }
@@ -601,7 +602,7 @@ GVariant * Bluez5ProfilePbap::setPhoneBookFilters(const std::string &vCardVersio
 
     if(vCardFilters.size())
     {
-        for(int i = 0; i < vCardFilters.size(); i++)
+        for(size_t i = 0; i < vCardFilters.size(); i++)
         {
             g_variant_builder_add(builderVcardFiltersValue, "s", vCardFilters[i].c_str());
         }

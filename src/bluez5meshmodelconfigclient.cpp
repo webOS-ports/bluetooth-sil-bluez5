@@ -203,8 +203,8 @@ Bluez5MeshModelConfigClient::~Bluez5MeshModelConfigClient()
 	pendingRequests.clear();
 }
 
-BluetoothError Bluez5MeshModelConfigClient::sendData(uint16_t srcAddress, uint16_t destAddress,
-										 uint16_t appIndex, uint8_t data[])
+BluetoothError Bluez5MeshModelConfigClient::sendData(uint16_t /*srcAddress*/, uint16_t /*destAddress*/,
+										 uint16_t /*appIndex*/, uint8_t /*data*/[])
 {
 	return BLUETOOTH_ERROR_UNSUPPORTED;
 }
@@ -342,7 +342,7 @@ BluetoothError Bluez5MeshModelConfigClient::deletePendingRequest(uint32_t opcode
 BluetoothError Bluez5MeshModelConfigClient::addPendingRequest(uint32_t opcode,
 											   uint16_t destAddr, uint8_t count)
 {
-	for (int i = 0; i < (sizeof(cmds)/sizeof(cmds[0])); ++i)
+	for (size_t i = 0; i < (sizeof(cmds)/sizeof(cmds[0])); ++i)
 	{
 		if (opcode == cmds[i].opcode && NO_RESPONSE != cmds[i].rsp)
 		{
@@ -369,7 +369,7 @@ BluetoothError Bluez5MeshModelConfigClient::addPendingRequest(uint32_t opcode,
 											   uint16_t destAddr,
 												BleMeshKeyRefreshData keyRefreshData)
 {
-	for (int i = 0; i < (sizeof(cmds)/sizeof(cmds[0])); ++i)
+	for (size_t i = 0; i < (sizeof(cmds)/sizeof(cmds[0])); ++i)
 	{
 		if (opcode == cmds[i].opcode && NO_RESPONSE != cmds[i].rsp)
 		{
@@ -576,12 +576,12 @@ void Bluez5MeshModelConfigClient::compositionReceived(uint8_t *data, uint16_t le
 		elements.push_back(element);
 		i++;
 	}
-	DEBUG("Elements size: %d", elements.size());
+	DEBUG("Elements size: %zu", elements.size());
 	compositionData.setElements(elements);
 }
 
 bool Bluez5MeshModelConfigClient::recvData(uint16_t srcAddress, uint16_t destAddress,
-									uint16_t appIndex, uint8_t data[], uint32_t dataLen)
+									uint16_t /*appIndex*/, uint8_t data[], uint32_t dataLen)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
 	DEBUG("srcAddress:%d::destAddress:%d",srcAddress,destAddress);
@@ -691,7 +691,7 @@ bool Bluez5MeshModelConfigClient::recvData(uint16_t srcAddress, uint16_t destAdd
 
 			DEBUG("Node %4.4x  Default TTL %d\n", srcAddress, data[0]);
 			configuration.setTTL(data[0]);
-			DEBUG("Config:%s\n",configuration.getConfig());
+			DEBUG("Config:%s\n", configuration.getConfig().c_str());	// a std::string through varargs: undefined (clang refused it)
 			opCodeHandled = true;
 			break;
 		}
@@ -868,8 +868,6 @@ BluetoothError Bluez5MeshModelConfigClient::configNetKeyUpdate(uint16_t destAddr
 												uint16_t netKeyIndex, int32_t waitTime,
 												int32_t numberOfElements)
 {
-	uint16_t n;
-	uint8_t msg[32];
 	GError *error = 0;
 
 	DEBUG("%s::%s::waitTime: %d",__FILE__,__FUNCTION__, waitTime);

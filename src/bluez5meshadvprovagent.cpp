@@ -44,7 +44,7 @@ void Bluez5MeshAdvProvAgent::registerProvAgentInterface(GDBusObjectManagerServer
 							"twist", "in-numeric", "in-alpha", "static-oob", "public-oob"};
 
 	GVariantBuilder *builder = g_variant_builder_new (G_VARIANT_TYPE ("as"));
-	for(int i =0 ;i < (sizeof(capabilities)/sizeof(capabilities[0]));i++)
+	for(size_t i =0 ;i < (sizeof(capabilities)/sizeof(capabilities[0]));i++)
 	{
 		g_variant_builder_add(builder, "s", capabilities[i]);
 	}
@@ -83,21 +83,22 @@ BluetoothError Bluez5MeshAdvProvAgent::supplyStatic(const std::string &oobData)
 		return BLUETOOTH_ERROR_NOT_ALLOWED;
 	}
 	uint8_t out[16] = {0};
-	for (int i = 0; i < 16; i++)
+	for (size_t i = 0; i < 16; i++)
 	{
 		if (i*2 < oobData.length()) sscanf(&oobData[i * 2], "%02hhx", &out[i]);
 	}
 	GBytes *bytes = g_bytes_new(out, 16);
 	GVariant *oobVar = g_variant_new_from_bytes(G_VARIANT_TYPE_BYTESTRING, bytes, true);
+	g_bytes_unref(bytes);	// the variant holds its own reference: this one leaked
 	GVariant *tuple = g_variant_new_tuple(&oobVar, 1);
 	g_dbus_method_invocation_return_value(supplyStaticInvokation, tuple);
 	supplyStaticInvokation = nullptr;
 	return BLUETOOTH_ERROR_NONE;
 }
 
-gboolean Bluez5MeshAdvProvAgent::handleDisplayNumeric(BluezMeshProvisionAgent1 *object,
-													  GDBusMethodInvocation *invocation,
-													  const gchar *argType,
+gboolean Bluez5MeshAdvProvAgent::handleDisplayNumeric(BluezMeshProvisionAgent1 */*object*/,
+													  GDBusMethodInvocation */*invocation*/,
+													  const gchar */*argType*/,
 													  gint argNumber,
 													  gpointer userData)
 {
@@ -110,8 +111,8 @@ gboolean Bluez5MeshAdvProvAgent::handleDisplayNumeric(BluezMeshProvisionAgent1 *
 	return true;
 }
 
-gboolean Bluez5MeshAdvProvAgent::handleDisplayString(BluezMeshProvisionAgent1 *object,
-													 GDBusMethodInvocation *invocation,
+gboolean Bluez5MeshAdvProvAgent::handleDisplayString(BluezMeshProvisionAgent1 */*object*/,
+													 GDBusMethodInvocation */*invocation*/,
 													 const gchar *argValue,
 													 gpointer userData)
 {
@@ -124,7 +125,7 @@ gboolean Bluez5MeshAdvProvAgent::handleDisplayString(BluezMeshProvisionAgent1 *o
 	return true;
 }
 
-gboolean Bluez5MeshAdvProvAgent::handlePromptNumeric(BluezMeshProvisionAgent1 *object,
+gboolean Bluez5MeshAdvProvAgent::handlePromptNumeric(BluezMeshProvisionAgent1 */*object*/,
 													 GDBusMethodInvocation *invocation,
 													 const gchar *argType,
 													 gpointer userData)
@@ -140,7 +141,7 @@ gboolean Bluez5MeshAdvProvAgent::handlePromptNumeric(BluezMeshProvisionAgent1 *o
 	return true;
 }
 
-gboolean Bluez5MeshAdvProvAgent::handlePromptStatic(BluezMeshProvisionAgent1 *object,
+gboolean Bluez5MeshAdvProvAgent::handlePromptStatic(BluezMeshProvisionAgent1 */*object*/,
 													GDBusMethodInvocation *invocation,
 													const gchar *argType,
 													gpointer userData)

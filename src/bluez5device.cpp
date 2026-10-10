@@ -97,7 +97,7 @@ Bluez5Device::Bluez5Device(Bluez5Adapter *adapter, const std::string &objectPath
 	DEBUG("Before calling g_variant_n_children() propsVar value %p\n", propsVar);
 	if(!error && propsVar != NULL)
 	{
-		for (int n = 0; n < g_variant_n_children(propsVar); n++)
+		for (size_t n = 0; n < g_variant_n_children(propsVar); n++)
 		{
 			GVariant *propertyVar = g_variant_get_child_value(propsVar, n);
 			GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -163,7 +163,7 @@ void Bluez5Device::handleMediaMetaRequest(BluezDevice1 *, gpointer userData)
 }
 
 void Bluez5Device::handlePropertiesChanged(BluezDevice1 *, gchar *interface,  GVariant *changedProperties,
-												   GVariant *invalidatedProperties, gpointer userData)
+												   GVariant */*invalidatedProperties*/, gpointer userData)
 {
 	bool propertiesChanged = false;
 	auto device = static_cast<Bluez5Device*>(userData);
@@ -254,7 +254,7 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 
 		mConnectedUuids.clear();
 
-		for (int m = 0; m < g_variant_n_children(valueVar); m++)
+		for (size_t m = 0; m < g_variant_n_children(valueVar); m++)
 		{
 			GVariant *uuidVar = g_variant_get_child_value(valueVar, m);
 
@@ -270,7 +270,7 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 	{
 		mUuids.clear();
 
-		for (int m = 0; m < g_variant_n_children(valueVar); m++)
+		for (size_t m = 0; m < g_variant_n_children(valueVar); m++)
 		{
 			GVariant *uuidVar = g_variant_get_child_value(valueVar, m);
 
@@ -286,7 +286,7 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 	{
 		mMapInstancesName.clear();
 
-		for (int m = 0; m < g_variant_n_children(valueVar); m++)
+		for (size_t m = 0; m < g_variant_n_children(valueVar); m++)
 		{
 			GVariant *mapInstanceVar = g_variant_get_child_value(valueVar, m);
 
@@ -302,7 +302,7 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 	{
 		mMapSupportedMessageTypes.clear();
 
-		for (int m = 0; m < g_variant_n_children(valueVar) && m < mMapInstancesName.size(); m++)
+		for (size_t m = 0; m < g_variant_n_children(valueVar) && m < mMapInstancesName.size(); m++)
 		{
 			GVariant *mapInstanceVar = g_variant_get_child_value(valueVar, m);
 			std::uint32_t mapInstance = (std::uint32_t)g_variant_get_int32(mapInstanceVar);

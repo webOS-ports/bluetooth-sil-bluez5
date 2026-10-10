@@ -96,6 +96,11 @@ public:
 	void updateDeviceProperties(std::string deviceAddress);
 	uint16_t getConnectId(const std::string &address);
 	std::string getAddress(const uint16_t &connId);
+	// Helpers with the names of BluetoothGattProfile's virtual functions: those stay visible.
+	using BluetoothGattProfile::readCharacteristic;
+	using BluetoothGattProfile::readCharacteristics;
+	using BluetoothGattProfile::readDescriptors;
+	using BluetoothGattProfile::readDescriptor;
 	BluetoothGattCharacteristic readCharacteristic(const std::string &address, const BluetoothUuid& service,
 									 const BluetoothUuid &characteristic);
 	BluetoothGattCharacteristicList readCharacteristics(const std::string &address, const BluetoothUuid& service,

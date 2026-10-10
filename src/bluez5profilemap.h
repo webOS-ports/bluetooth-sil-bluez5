@@ -32,6 +32,9 @@ class Bluez5ProfileMap : public Bluez5ObexProfileBase,
 public:
     Bluez5ProfileMap(Bluez5Adapter *adapter);
     ~Bluez5ProfileMap();
+    // The profile base's connect/disconnect(address, callback) stay visible next to these.
+    using Bluez5ObexProfileBase::connect;
+    using Bluez5ObexProfileBase::disconnect;
     void connect(const std::string &address, const std::string &instanceName, BluetoothMapCallback callback) final;
     void disconnect(const std::string &address, const std::string &sessionId, BluetoothMapCallback callback) final;
     void notifySessionStatus(const std::string &address, bool createdOrRemoved) final;

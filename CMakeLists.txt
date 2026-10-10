@@ -24,8 +24,8 @@ webos_component(0 1 0)
 
 option (USE_SYSTEM_BUS_FOR_OBEX    "Enable using system bus for obexd"   ON)
 
-# Enable C++11 support (still gcc 4.6 so can't use -std=c++11)
-_webos_manipulate_flags(APPEND CXX ALL -std=c++0x)
+# C++23, as com.webos.service.bluetooth2 (it was C++11, from the gcc 4.6 days)
+_webos_manipulate_flags(APPEND CXX ALL -std=c++23 -Wall -Wextra)
 
 find_program(GDBUS_CODEGEN_EXECUTABLE NAMES gdbus-codegen DOC "gdbus-codegen executable")
 if(NOT GDBUS_CODEGEN_EXECUTABLE)

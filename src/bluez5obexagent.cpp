@@ -40,7 +40,7 @@ Bluez5ObexAgent::Bluez5ObexAgent(Bluez5SIL *sil) :
 			return;
 		if (!available) {
 			// register an empty name watch handler
-			mNameWatch.watch([](bool available) { });
+			mNameWatch.watch([](bool /*available*/) { });
 			return;
 		}
 
@@ -177,7 +177,7 @@ void Bluez5ObexAgent::createAgentInterface(const std::string &objectPath)
 	DEBUG("creating interface OBEX agent");
 
 	GError *error = nullptr;
-	gboolean ret;
+	[[maybe_unused]] gboolean ret;
 
 	GDBusConnection *mConn = g_bus_get_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, NULL, &error);
 	if (error)
@@ -256,13 +256,13 @@ gboolean Bluez5ObexAgent::handleAuthorizePush(BluezObexAgent1 *object, GDBusMeth
 	return TRUE;
 }
 
-gboolean Bluez5ObexAgent::handleCancel(BluezObexAgent1 *object, GDBusMethodInvocation *invocation)
+gboolean Bluez5ObexAgent::handleCancel(BluezObexAgent1 */*object*/, GDBusMethodInvocation *invocation)
 {
 	g_dbus_method_invocation_return_dbus_error(invocation, "org.bluez.Error.Canceled", "User cancelled confirmation");
 	return TRUE;
 }
 
-gboolean Bluez5ObexAgent::handleRelease(BluezObexAgent1 *object,GDBusMethodInvocation *invocation)
+gboolean Bluez5ObexAgent::handleRelease(BluezObexAgent1 */*object*/,GDBusMethodInvocation */*invocation*/)
 {
 	return TRUE;
 }

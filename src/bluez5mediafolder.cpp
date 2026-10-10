@@ -78,9 +78,9 @@ Bluez5MediaFolder::~Bluez5MediaFolder()
 }
 
 void Bluez5MediaFolder::handlePropertiesChanged(
-		BluezMediaFolder1 *folderInterface,
+		BluezMediaFolder1 */*folderInterface*/,
 		gchar *interface, GVariant *changedProperties,
-		GVariant *invalidatedProperties, gpointer userData)
+		GVariant */*invalidatedProperties*/, gpointer userData)
 {
 	std::string interfaceName = interface;
 	auto mediaFolder = static_cast<Bluez5MediaFolder *>(userData);
@@ -95,7 +95,7 @@ void Bluez5MediaFolder::handlePropertiesChanged(
 void Bluez5MediaFolder::mediaFolderPropertiesChanged(GVariant* changedProperties)
 {
 	DEBUG("mediaFolderPropertiesChanged");
-	for (int n = 0; n < g_variant_n_children(changedProperties); n++)
+	for (size_t n = 0; n < g_variant_n_children(changedProperties); n++)
 	{
 		GVariant *propertyVar = g_variant_get_child_value(changedProperties, n);
 		GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -434,7 +434,6 @@ BluetoothError Bluez5MediaFolder::addToNowPlaying(const std::string &itemPath)
 void Bluez5MediaFolder::search(const std::string &searchString,
                 BluetoothAvrcpBrowseSearchListCallback callback)
 {
-	GError *error = 0;
 	GVariantBuilder *builderFilter = g_variant_builder_new(G_VARIANT_TYPE("a{sv}"));
 
 	GVariant *filters = g_variant_builder_end(builderFilter);

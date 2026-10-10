@@ -66,7 +66,7 @@ bool GattRemoteCharacteristic::stopNotify()
 	return result;
 }
 
-void GattRemoteCharacteristic::onCharacteristicPropertiesChanged(GDBusProxy *proxy, GVariant *changed_properties, GStrv invalidated_properties, gpointer userdata)
+void GattRemoteCharacteristic::onCharacteristicPropertiesChanged(GDBusProxy */*proxy*/, GVariant *changed_properties, GStrv /*invalidated_properties*/, gpointer userdata)
 {
 	auto characteristic = static_cast<GattRemoteCharacteristic*>(userdata);
 	if (characteristic && characteristic->mGattProfile)

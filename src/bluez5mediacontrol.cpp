@@ -115,14 +115,13 @@ bool Bluez5MediaControl::volumeUp()
 	return true;
 }
 
-void Bluez5MediaControl::handlePropertiesChanged(BluezMediaControl1 *controlInterface, gchar *interface,  GVariant *changedProperties,
-												   GVariant *invalidatedProperties, gpointer userData)
+void Bluez5MediaControl::handlePropertiesChanged(BluezMediaControl1 */*controlInterface*/, gchar *interface,  GVariant *changedProperties,
+												   GVariant */*invalidatedProperties*/, gpointer /*userData*/)
 {
-	Bluez5MediaControl *pThis = static_cast<Bluez5MediaControl*>(userData);
 
 	if (strcmp(interface, "org.bluez.MediaControl1") == 0)
 	{
-		for (int n = 0; n < g_variant_n_children(changedProperties); n++)
+		for (size_t n = 0; n < g_variant_n_children(changedProperties); n++)
 		{
 			GVariant *propertyVar = g_variant_get_child_value(changedProperties, n);
 			GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);

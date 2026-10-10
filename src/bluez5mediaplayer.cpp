@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <cinttypes>
 #include "bluez5mediaplayer.h"
 #include "bluez5profileavrcp.h"
 #include "bluez5mediafolder.h"
@@ -117,9 +118,9 @@ void Bluez5MediaPlayer::getAllProperties()
 }
 
 void Bluez5MediaPlayer::handlePropertiesChanged(
-	BluezMediaPlayer1 *playerInterface,
+	BluezMediaPlayer1 */*playerInterface*/,
 	gchar *interface, GVariant *changedProperties,
-	GVariant *invalidatedProperties, gpointer userData)
+	GVariant */*invalidatedProperties*/, gpointer userData)
 {
 	std::string interfaceName = interface;
 	auto mediaPlayer = static_cast<Bluez5MediaPlayer *>(userData);
@@ -128,7 +129,7 @@ void Bluez5MediaPlayer::handlePropertiesChanged(
 }
 
 void Bluez5MediaPlayer::handleInterfaceAdded(
-	GDBusObject *object, GDBusInterface *interface, gpointer userData)
+	GDBusObject *object, GDBusInterface */*interface*/, gpointer userData)
 {
 	DEBUG("Bluez5MediaPlayer:: handleInterfaceAdded");
 	Bluez5MediaPlayer *mediaPlayer = static_cast<Bluez5MediaPlayer *>(userData);
@@ -143,7 +144,7 @@ void Bluez5MediaPlayer::handleInterfaceAdded(
 }
 
 void Bluez5MediaPlayer::handleInterfaceRemoved(
-	GDBusObject *object, GDBusInterface *interface, gpointer userData)
+	GDBusObject *object, GDBusInterface */*interface*/, gpointer userData)
 {
 	DEBUG("Bluez5MediaPlayer:: handleInterfaceRemoved");
 	Bluez5MediaPlayer *mediaPlayer = static_cast<Bluez5MediaPlayer *>(userData);
@@ -162,7 +163,7 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 	GVariant *changedProperties)
 {
 	BluetoothPlayerApplicationSettingsPropertiesList applicationSettings;
-	for (int n = 0; n < g_variant_n_children(changedProperties); n++)
+	for (size_t n = 0; n < g_variant_n_children(changedProperties); n++)
 	{
 		GVariant *propertyVar = g_variant_get_child_value(changedProperties, n);
 		GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -176,7 +177,7 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 			if (mMediaPlayStatus.getPosition() != position)
 			{
 				mMediaPlayStatus.setPosition(position);
-				DEBUG("Bluez5MediaPlayer::Position: %ld", mMediaPlayStatus.getPosition());
+				DEBUG("Bluez5MediaPlayer::Position: %" PRIu64, mMediaPlayStatus.getPosition());
 				if (!mAvrcp->getConnectedDeviceAddress().empty())
 				{
 					mAvrcp->getAvrcpObserver()->mediaPlayStatusReceived(
@@ -342,7 +343,7 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 
 BluetoothError Bluez5MediaPlayer::sendPassThroughCommand(
 	BluetoothAvrcpPassThroughKeyCode keyCode,
-	BluetoothAvrcpPassThroughKeyStatus keyStatus)
+	BluetoothAvrcpPassThroughKeyStatus /*keyStatus*/)
 {
 	DEBUG("Bluez5MediaPlayer: sendPassThroughCommand");
 	GError *error = 0;
@@ -510,6 +511,8 @@ BluetoothError Bluez5MediaPlayer::setPlayerApplicationSettingsProperties(
 						prop.getValue<BluetoothPlayerApplicationSettingsScan>());
 					break;
 				}
+			default:
+				continue;	// no setting: it was sent to BlueZ as a property with an empty name
 		}
 		GVariant *var = g_variant_new_string(value.c_str());
 		free_desktop_dbus_properties_call_set_sync(mPropertiesProxy,
@@ -529,7 +532,6 @@ BluetoothError Bluez5MediaPlayer::setPlayerApplicationSettingsProperties(
 bool Bluez5MediaPlayer::updatePlayerProperties()
 {
 	bool changed = false;
-	GError *error = 0;
 
 	if (mPropertiesProxy)
 	{
@@ -540,7 +542,7 @@ bool Bluez5MediaPlayer::updatePlayerProperties()
 			"org.bluez.MediaPlayer1", &changedProperties, NULL, NULL);
 		if (changedProperties != NULL)
 		{
-			for (int n = 0; n < g_variant_n_children(changedProperties); n++)
+			for (size_t n = 0; n < g_variant_n_children(changedProperties); n++)
 			{
 				GVariant *propertyVar = g_variant_get_child_value(changedProperties, n);
 				GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);

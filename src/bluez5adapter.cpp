@@ -189,7 +189,7 @@ void Bluez5Adapter::addMediaManager(std::string objectPath)
 	mPlayer = new Bluez5MprisPlayer(mMediaManager, this);
 }
 
-void Bluez5Adapter::removeMediaManager(const std::string &objectPath)
+void Bluez5Adapter::removeMediaManager(const std::string &/*objectPath*/)
 {
 	if (!mMediaManager)
 		return;
@@ -230,14 +230,14 @@ uint32_t Bluez5Adapter::nextScanId()
 	return nextScanId++;
 }
 
-void Bluez5Adapter::handleAdapterPropertiesChanged(BluezAdapter1 *, gchar *interface,  GVariant *changedProperties,
-												   GVariant *invalidatedProperties, gpointer userData)
+void Bluez5Adapter::handleAdapterPropertiesChanged(BluezAdapter1 *, gchar */*interface*/,  GVariant *changedProperties,
+												   GVariant */*invalidatedProperties*/, gpointer userData)
 {
 	auto adapter = static_cast<Bluez5Adapter*>(userData);
 	BluetoothPropertiesList properties;
 	bool changed = false;
 
-	for (int n = 0; n < g_variant_n_children(changedProperties); n++)
+	for (size_t n = 0; n < g_variant_n_children(changedProperties); n++)
 	{
 		GVariant *propertyVar = g_variant_get_child_value(changedProperties, n);
 		GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -385,7 +385,7 @@ bool Bluez5Adapter::addPropertyFromVariant(BluetoothPropertiesList& properties, 
 	{
 		mUuids.clear();
 
-		for (int m = 0; m < g_variant_n_children(valueVar); m++)
+		for (size_t m = 0; m < g_variant_n_children(valueVar); m++)
 		{
 			GVariant *uuidVar = g_variant_get_child_value(valueVar, m);
 
@@ -406,7 +406,7 @@ void Bluez5Adapter::getAdapterProperties(BluetoothPropertiesResultCallback callb
 	auto propertiesGetCallback = [this, callback](GAsyncResult *result) {
 		GVariant *propsVar;
 		GError *error = 0;
-		gboolean ret;
+		[[maybe_unused]] gboolean ret;
 
 		ret = free_desktop_dbus_properties_call_get_all_finish(mPropertiesProxy, &propsVar, result, &error);
 		if (error)
@@ -418,7 +418,7 @@ void Bluez5Adapter::getAdapterProperties(BluetoothPropertiesResultCallback callb
 
 		BluetoothPropertiesList properties;
 
-		for (int n = 0; n < g_variant_n_children(propsVar); n++)
+		for (size_t n = 0; n < g_variant_n_children(propsVar); n++)
 		{
 			GVariant *propertyVar = g_variant_get_child_value(propsVar, n);
 			GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -1756,7 +1756,7 @@ Bluez5Device* Bluez5Adapter::findDeviceByObjectPath(const std::string &objectPat
 	return 0;
 }
 
-void Bluez5Adapter::reportPairingResult(bool success)
+void Bluez5Adapter::reportPairingResult(bool /*success*/)
 {
 }
 
@@ -1867,7 +1867,7 @@ void Bluez5Adapter::unpair(const std::string &address, BluetoothResultCallback c
 
 	auto unPairCallback = [this, callback, address](GAsyncResult *result) {
 		GError *error = 0;
-		gboolean ret;
+		[[maybe_unused]] gboolean ret;
 
 		ret = bluez_adapter1_call_remove_device_finish(mAdapterProxy, result, &error);
 		if (error)
@@ -1932,18 +1932,18 @@ void Bluez5Adapter::cancelPairing(const std::string &address, BluetoothResultCal
 	}
 }
 
-void Bluez5Adapter::configureAdvertisement(bool connectable, bool includeTxPower, bool includeName,
-                                           BluetoothLowEnergyData manufacturerData, BluetoothLowEnergyServiceList services,
-                                           BluetoothResultCallback callback, uint8_t TxPower, BluetoothUuid solicitedService128)
+void Bluez5Adapter::configureAdvertisement(bool /*connectable*/, bool /*includeTxPower*/, bool /*includeName*/,
+                                           BluetoothLowEnergyData /*manufacturerData*/, BluetoothLowEnergyServiceList /*services*/,
+                                           BluetoothResultCallback callback, uint8_t /*TxPower*/, BluetoothUuid /*solicitedService128*/)
 {
 	callback(BLUETOOTH_ERROR_UNSUPPORTED);
 	return;
 }
 
-void Bluez5Adapter::configureAdvertisement(bool connectable, bool includeTxPower, bool includeName, bool isScanResponse,
-                                           BluetoothLowEnergyData manufacturerData, BluetoothLowEnergyServiceList services,
-                                           ProprietaryDataList dataList,
-                                           BluetoothResultCallback callback, uint8_t TxPower, BluetoothUuid solicitedService128)
+void Bluez5Adapter::configureAdvertisement(bool /*connectable*/, bool /*includeTxPower*/, bool /*includeName*/, bool /*isScanResponse*/,
+                                           BluetoothLowEnergyData /*manufacturerData*/, BluetoothLowEnergyServiceList /*services*/,
+                                           ProprietaryDataList /*dataList*/,
+                                           BluetoothResultCallback callback, uint8_t /*TxPower*/, BluetoothUuid /*solicitedService128*/)
 {
 	callback(BLUETOOTH_ERROR_UNSUPPORTED);
 	return;
@@ -2026,20 +2026,20 @@ void Bluez5Adapter::unregisterAdvertiser(uint8_t advertiserId, AdvertiserStatusC
 		callback(BLUETOOTH_ERROR_FAIL);
 }
 
-void Bluez5Adapter::disableAdvertiser(uint8_t advertiserId, AdvertiserStatusCallback callback)
+void Bluez5Adapter::disableAdvertiser(uint8_t /*advertiserId*/, AdvertiserStatusCallback callback)
 {
 	callback(BLUETOOTH_ERROR_NONE);
 }
 
-BluetoothError Bluez5Adapter::updateFirmware(const std::string &deviceName,
-		const std::string &fwFileName,
-		const std::string &miniDriverName,
-		bool isShared)
+BluetoothError Bluez5Adapter::updateFirmware(const std::string &/*deviceName*/,
+		const std::string &/*fwFileName*/,
+		const std::string &/*miniDriverName*/,
+		bool /*isShared*/)
 {
 	return BLUETOOTH_ERROR_UNSUPPORTED;
 }
 
-BluetoothError Bluez5Adapter::resetModule(const std::string &deviceName, bool isShared)
+BluetoothError Bluez5Adapter::resetModule(const std::string &/*deviceName*/, bool /*isShared*/)
 {
 	return BLUETOOTH_ERROR_UNSUPPORTED;
 }

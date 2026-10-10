@@ -79,7 +79,7 @@ Bluez5ProfileGatt::~Bluez5ProfileGatt()
 	}
 }
 
-void Bluez5ProfileGatt::handleBusAcquired(GDBusConnection *connection, const gchar *name, gpointer user_data)
+void Bluez5ProfileGatt::handleBusAcquired(GDBusConnection *connection, const gchar */*name*/, gpointer user_data)
 {
 	Bluez5ProfileGatt *pThis = static_cast<Bluez5ProfileGatt*>(user_data);
 	pThis->setGdbusConnection(connection);
@@ -293,7 +293,7 @@ void Bluez5ProfileGatt::addRemoteDescriptorToCharacteristic(GattRemoteDescriptor
 		auto &characteristicList = remoteService->gattRemoteCharacteristics;
 
 		auto characteristicIter = std::find_if (characteristicList.begin(), characteristicList.end(),
-												[characteristicObjectPath, &remoteService](GattRemoteCharacteristic* characteristic)
+												[characteristicObjectPath](GattRemoteCharacteristic* characteristic)
 		{
 			return characteristic->objectPath == characteristicObjectPath;
 		});
@@ -725,7 +725,7 @@ void Bluez5ProfileGatt::connectGatt(const uint16_t & appId, bool autoConnection,
 	device->connectGatt(isConnectCallback);
 }
 
-void Bluez5ProfileGatt::disconnectGatt(const uint16_t &appId, const uint16_t &connectId, const std::string &address, BluetoothResultCallback callback)
+void Bluez5ProfileGatt::disconnectGatt(const uint16_t &appId, const uint16_t &/*connectId*/, const std::string &address, BluetoothResultCallback callback)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
 	std::string deviceAddress;
@@ -802,9 +802,11 @@ uint16_t Bluez5ProfileGatt::nextDescId()
 	return nextDescId++;
 }
 
-void Bluez5ProfileGatt::getProperties(const std::string &address, BluetoothPropertiesResultCallback  callback)
+void Bluez5ProfileGatt::getProperties(const std::string &/*address*/, BluetoothPropertiesResultCallback  callback)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
+	// Answered: it was an empty stub, and its caller waited forever.
+	callback(BLUETOOTH_ERROR_UNSUPPORTED, BluetoothPropertiesList());
 }
 
 void Bluez5ProfileGatt::getProperty(const std::string &address, BluetoothProperty::Type type,
@@ -827,7 +829,7 @@ void Bluez5ProfileGatt::getProperty(const std::string &address, BluetoothPropert
 	}
 }
 
-uint16_t Bluez5ProfileGatt::addApplication(const BluetoothUuid &appUuid, ApplicationType type)
+uint16_t Bluez5ProfileGatt::addApplication(const BluetoothUuid &/*appUuid*/, ApplicationType type)
 {
 	int appId = nextAppId();
 
@@ -871,7 +873,7 @@ bool Bluez5ProfileGatt::removeApplication(uint16_t appId, ApplicationType type)
 			removeLocalServices(service.get());
 		}
 
-		auto registerCallback = [this](BluetoothError error)
+		auto registerCallback = [](BluetoothError error)
 		{
 			if (error == BLUETOOTH_ERROR_NONE)
 			{
@@ -900,7 +902,7 @@ void Bluez5ProfileGatt::registerLocalApplication(BluetoothResultCallback callbac
 	auto registerCallback = [this, callback](GAsyncResult *result)
 	{
 		GError *error = NULL;
-		gboolean ret;
+		[[maybe_unused]] gboolean ret;
 
 		ret = bluez_gatt_manager1_call_register_application_finish(mAdapter->getGattManager(), result, &error);
 
@@ -930,7 +932,7 @@ void Bluez5ProfileGatt::registerLocalApplication(BluetoothResultCallback callbac
 	bluez_gatt_manager1_call_register_application(mAdapter->getGattManager(), objPath.c_str(), arguments, NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(registerCallback));
 }
 
-gboolean Bluez5ProfileGatt::handleRelease(BluezGattProfile1 *proxy, GDBusMethodInvocation *invocation, gpointer user_data)
+gboolean Bluez5ProfileGatt::handleRelease(BluezGattProfile1 *proxy, GDBusMethodInvocation *invocation, gpointer /*user_data*/)
 {
 	DEBUG("Bluez5ProfileGatt released");
 	bluez_gatt_profile1_complete_release(proxy, invocation);
@@ -1701,7 +1703,7 @@ void Bluez5ProfileGatt::removeService(uint16_t appId, uint16_t serviceId, Blueto
 	removeLocalServices(serviceIt->second.get());
 	services.erase(serviceId);
 
-	auto registerCallback = [this, callback](BluetoothError error)
+	auto registerCallback = [callback](BluetoothError error)
 	{
 		if (error == BLUETOOTH_ERROR_NONE)
 		{
@@ -2156,13 +2158,13 @@ void Bluez5ProfileGatt::notifyDescriptorValueChanged(uint16_t appId, uint16_t se
 	return;
 }
 
-void Bluez5ProfileGatt::startService(uint16_t serviceId, BluetoothGattTransportMode mode, BluetoothResultCallback callback)
+void Bluez5ProfileGatt::startService(uint16_t /*serviceId*/, BluetoothGattTransportMode /*mode*/, BluetoothResultCallback callback)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
 	if (callback) callback(BLUETOOTH_ERROR_NONE);
 }
 
-void Bluez5ProfileGatt::startService(uint16_t appId, uint16_t serviceId, BluetoothGattTransportMode mode, BluetoothResultCallback callback)
+void Bluez5ProfileGatt::startService(uint16_t /*appId*/, uint16_t /*serviceId*/, BluetoothGattTransportMode /*mode*/, BluetoothResultCallback callback)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
 	if (callback) callback(BLUETOOTH_ERROR_NONE);
@@ -2282,8 +2284,8 @@ void Bluez5ProfileGatt::onCharacteristicPropertiesChanged(GattRemoteCharacterist
 
 gboolean Bluez5ProfileGatt::Bluez5GattLocalCharacteristic::onHandleReadValue(BluezGattCharacteristic1* interface,
 																			 GDBusMethodInvocation *invocation,
-																			 GVariant *arg_options,
-																			 gpointer user_data)
+																			 GVariant */*arg_options*/,
+																			 gpointer /*user_data*/)
 {
 	GVariant *value = bluez_gatt_characteristic1_get_value(interface);
 	GVariant *tuple = g_variant_new_tuple(&value, 1);
@@ -2294,7 +2296,7 @@ gboolean Bluez5ProfileGatt::Bluez5GattLocalCharacteristic::onHandleReadValue(Blu
 gboolean Bluez5ProfileGatt::Bluez5GattLocalCharacteristic::onHandleWriteValue(BluezGattCharacteristic1* interface,
 																			  GDBusMethodInvocation *invocation,
 																			  GVariant *arg_value,
-																			  GVariant *arg_options,
+																			  GVariant */*arg_options*/,
 																			  gpointer user_data)
 {
 	bluez_gatt_characteristic1_set_value(interface, arg_value);
@@ -2374,7 +2376,7 @@ void Bluez5ProfileGatt::onHandleCharacteriscticWriteValue(BluezGattCharacteristi
 
 gboolean Bluez5ProfileGatt::Bluez5GattLocalCharacteristic::onHandleStartNotify(BluezGattCharacteristic1 *object,
 																			   GDBusMethodInvocation *invocation,
-																			   gpointer user_data)
+																			   gpointer /*user_data*/)
 {
 	bluez_gatt_characteristic1_set_notifying(object, true);
 	g_dbus_method_invocation_return_value(invocation, NULL);
@@ -2383,7 +2385,7 @@ gboolean Bluez5ProfileGatt::Bluez5GattLocalCharacteristic::onHandleStartNotify(B
 
 gboolean Bluez5ProfileGatt::Bluez5GattLocalCharacteristic::onHandleStopNotify(BluezGattCharacteristic1 *object,
 																			  GDBusMethodInvocation *invocation,
-																			  gpointer user_data)
+																			  gpointer /*user_data*/)
 {
 	bluez_gatt_characteristic1_set_notifying(object, false);
 	g_dbus_method_invocation_return_value(invocation, NULL);
@@ -2392,8 +2394,8 @@ gboolean Bluez5ProfileGatt::Bluez5GattLocalCharacteristic::onHandleStopNotify(Bl
 
 gboolean Bluez5ProfileGatt::Bluez5GattLocalDescriptor::onHandleReadValue(BluezGattDescriptor1* interface,
 																		 GDBusMethodInvocation *invocation,
-																		 GVariant *arg_options,
-																		 gpointer user_data)
+																		 GVariant */*arg_options*/,
+																		 gpointer /*user_data*/)
 {
 	GVariant *value = bluez_gatt_descriptor1_get_value(interface);
 	GVariant *tuple = g_variant_new_tuple(&value, 1);
@@ -2403,7 +2405,7 @@ gboolean Bluez5ProfileGatt::Bluez5GattLocalDescriptor::onHandleReadValue(BluezGa
 gboolean Bluez5ProfileGatt::Bluez5GattLocalDescriptor::onHandleWriteValue(BluezGattDescriptor1* interface,
 																		  GDBusMethodInvocation *invocation,
 																		  GVariant *arg_value,
-																		  GVariant *arg_options,
+																		  GVariant */*arg_options*/,
 																		  gpointer user_data)
 {
 	bluez_gatt_descriptor1_set_value(interface, arg_value);

@@ -34,7 +34,6 @@ Bluez5ProfileMesh::Bluez5ProfileMesh(Bluez5Adapter *adapter) :
 	Bluez5ProfileBase(adapter, ""),
 	mObjectManager(nullptr)
 {
-	GError *error = 0;
 
 	std::vector<uint32_t> sigModelIds = {CONFIG_CLIENT_MODEL_ID, GENERIC_ONOFF_CLIENT_MODEL_ID};
 	std::vector<uint32_t> vendorModelIds;
@@ -277,15 +276,19 @@ BluetoothError Bluez5ProfileMesh::deleteNode(
 	return BLUETOOTH_ERROR_PARAM_INVALID;
 }
 
-void Bluez5ProfileMesh::getProperties(const std::string &address,
+void Bluez5ProfileMesh::getProperties(const std::string &/*address*/,
 									BluetoothPropertiesResultCallback callback)
 {
+	// Answered: it was an empty stub, and its caller waited forever.
+	callback(BLUETOOTH_ERROR_UNSUPPORTED, BluetoothPropertiesList());
 }
 
-void Bluez5ProfileMesh::getProperty(const std::string &address,
+void Bluez5ProfileMesh::getProperty(const std::string &/*address*/,
 								BluetoothProperty::Type type,
 								BluetoothPropertyResultCallback callback)
 {
+	// Answered: it was an empty stub, and its caller waited forever.
+	callback(BLUETOOTH_ERROR_UNSUPPORTED, BluetoothProperty(type));
 }
 
 BluetoothError Bluez5ProfileMesh::updateNodeInfo(const std::string &bearer,
