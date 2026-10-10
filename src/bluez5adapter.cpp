@@ -1661,143 +1661,86 @@ bool Bluez5Adapter::bluezFilterUsageCriteria(unsigned char mFilterType)
 	return false;
 }
 
+// The filter comes from an app, the data from whatever device advertises: every index is bounded by both. The
+// device's data was indexed up to the filter's length, reading past it for a shorter advertisement, and the mask
+// up to the data's length.
 bool Bluez5Adapter::checkServiceUuid(const BluetoothLeDiscoveryFilter &filter, Bluez5Device *device)
 {
+	auto uuids = device->getUuids();
+	std::string srvcUuidStr = convertToLowerCase(filter.getServiceUuid().getUuid());
+
 	if (!filter.getServiceUuid().getMask().empty())
 	{
-		auto uuids = device->getUuids();
 		std::string srvcUuidMasksStr = filter.getServiceUuid().getMask();
-		for(int i = 0; i < uuids.size(); i++)
+		for (auto &uuid : uuids)
 		{
-			uuids[i] = convertToLowerCase(uuids[i]);
-			std::string srvcUuidStr = filter.getServiceUuid().getUuid();
-			srvcUuidStr = convertToLowerCase(srvcUuidStr);
-			int srvcUuidSize = filter.getServiceUuid().getUuid().size();
-			bool isMatching = true;
-			for(int j=0; (j < srvcUuidSize) && isMatching; j++)
-			{
-				if (srvcUuidMasksStr[j] == '1')
-				{
-					if(srvcUuidStr[j] != uuids[i][j])
-					{
-						isMatching = false;
-					}
-				}
+			std::string deviceUuid = convertToLowerCase(uuid);
+			if (srvcUuidStr.size() > srvcUuidMasksStr.size() || srvcUuidStr.size() > deviceUuid.size())
+				continue;
 
-				if (j == srvcUuidSize-1)
-					return true;
-			}
+			// A mismatch at the last position still returned true.
+			bool isMatching = true;
+			for (size_t j = 0; j < srvcUuidStr.size() && isMatching; j++)
+				if (srvcUuidMasksStr[j] == '1' && srvcUuidStr[j] != deviceUuid[j])
+					isMatching = false;
+
+			if (isMatching)
+				return true;
 		}
 		return false;
 	}
-	else
-	{
-		auto uuids = device->getUuids();
-		std::string srvcUuidStr = filter.getServiceUuid().getUuid();
-		srvcUuidStr = convertToLowerCase(srvcUuidStr);
-		for(int i = 0; i < uuids.size(); i++)
-		{
-			uuids[i] = convertToLowerCase(uuids[i]);
-			if (uuids[i] == srvcUuidStr)
-				return true;
-		}
-	}
+
+	for (auto &uuid : uuids)
+		if (convertToLowerCase(uuid) == srvcUuidStr)
+			return true;
 	return false;
 }
 
 bool Bluez5Adapter::checkServiceData(const BluetoothLeDiscoveryFilter &filter, Bluez5Device *device)
 {
-	std::string srvcData_Uuid = device->getServiceDataUuid();
-	std::string srvcUuidStr = filter.getServiceData().getUuid();
-	srvcData_Uuid = convertToLowerCase(srvcData_Uuid);
-	srvcUuidStr = convertToLowerCase(srvcUuidStr);
-	if (srvcData_Uuid == srvcUuidStr)
-	{
-		if (!filter.getServiceData().getMask().empty())
-		{
-			std::vector<uint8_t> srvcDataMask = filter.getServiceData().getMask();
-			std::vector<uint8_t> srvcData = filter.getServiceData().getData();
-			std::vector<uint8_t> srvcDeviceData = device->getScanRecord();
-			int srvcDataSize = filter.getServiceData().getData().size();
-			for(int j=0; j < srvcDataSize; j++)
-			{
-				if (srvcDataMask[j] == 1)
-				{
-					if(srvcData[j] == srvcDeviceData[j])
-					{
-						continue;
-					}
-					else
-					{
-						return false;
-					}
-				}
-			}
-			return true;
-		}
-		else
-		{
-			if ((filter.getServiceData().getData()) == device->getScanRecord())
-				return true;
-		}
-	}
+	std::string srvcData_Uuid = convertToLowerCase(device->getServiceDataUuid());
+	std::string srvcUuidStr = convertToLowerCase(filter.getServiceData().getUuid());
+	if (srvcData_Uuid != srvcUuidStr)
+		return false;
 
-	return false;
+	std::vector<uint8_t> srvcData = filter.getServiceData().getData();
+	std::vector<uint8_t> srvcDeviceData = device->getScanRecord();
+
+	if (filter.getServiceData().getMask().empty())
+		return srvcData == srvcDeviceData;
+
+	std::vector<uint8_t> srvcDataMask = filter.getServiceData().getMask();
+	if (srvcDeviceData.size() < srvcData.size() || srvcDataMask.size() < srvcData.size())
+		return false;
+
+	for (size_t j = 0; j < srvcData.size(); j++)
+		if (srvcDataMask[j] == 1 && srvcData[j] != srvcDeviceData[j])
+			return false;
+	return true;
 }
 
 bool Bluez5Adapter::checkManufacturerData(const BluetoothLeDiscoveryFilter &filter, Bluez5Device *device)
 {
-	if (device->getManufactureData().size() > 2)
-	{
-		std::vector<uint8_t> manufData = device->getManufactureData();
-		uint16_t devManufacturerId = 0;
-		uint16_t manufacturerId = (uint16_t)filter.getManufacturerData().getId();
+	std::vector<uint8_t> deviceData = device->getManufactureData();
+	if (deviceData.size() <= 2)
+		return false;
 
-		uint16_t lsb = manufData[1] & 0XFFFF;
-		uint16_t msb = manufData[0] << 8;
-		devManufacturerId = msb | lsb;
-		if (manufacturerId == devManufacturerId)
-		{
-			std::vector<uint8_t> manuDataMask = filter.getManufacturerData().getMask();
-			std::vector<uint8_t> manuData = filter.getManufacturerData().getData();
-			std::vector<uint8_t> deviceData = device->getManufactureData();
-			int dataSize = filter.getManufacturerData().getData().size();
-			if (!filter.getManufacturerData().getMask().empty())
-			{
-				for(int j=0; j < dataSize; j++)
-				{
-					if (manuDataMask[j] == 1)
-					{
-						if(manuData[j] == deviceData[j + 2])
-						{
-							continue;
-						}
-						else
-						{
-							return false;
-						}
-					}
-				}
-				return true;
-			}
-			else
-			{
-				for(int j=0; j < dataSize; j++)
-				{
-					if(manuData[j] == deviceData[j + 2])
-					{
-						continue;
-					}
-					else
-					{
-						return false;
-					}
-				}
-				return true;
-			}
-		}
-	}
-	return false;
+	uint16_t manufacturerId = (uint16_t)filter.getManufacturerData().getId();
+	uint16_t devManufacturerId = (uint16_t)((deviceData[0] << 8) | deviceData[1]);
+	if (manufacturerId != devManufacturerId)
+		return false;
+
+	// The payload follows the two id bytes.
+	std::vector<uint8_t> manuData = filter.getManufacturerData().getData();
+	std::vector<uint8_t> manuDataMask = filter.getManufacturerData().getMask();
+	bool masked = !manuDataMask.empty();
+	if (deviceData.size() - 2 < manuData.size() || (masked && manuDataMask.size() < manuData.size()))
+		return false;
+
+	for (size_t j = 0; j < manuData.size(); j++)
+		if ((!masked || manuDataMask[j] == 1) && manuData[j] != deviceData[j + 2])
+			return false;
+	return true;
 }
 
 Bluez5Device* Bluez5Adapter::findDeviceByObjectPath(const std::string &objectPath)

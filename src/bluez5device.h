@@ -20,6 +20,8 @@
 #include <string>
 #include <bluetooth-sil-api.h>
 
+#include "asyncutils.h"
+
 extern "C" {
 #include "freedesktop-interface.h"
 #include "bluez-interface.h"
@@ -105,6 +107,7 @@ private:
 
 	ServiceData mServiceData;
 	bool mPaired;
+	LifetimeGuard mLifetime;
 	BluezDevice1 *mDeviceProxy;
 	FreeDesktopDBusProperties *mPropertiesProxy;
 	bool mConnected;
