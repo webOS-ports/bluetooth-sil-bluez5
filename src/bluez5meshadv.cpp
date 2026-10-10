@@ -197,6 +197,7 @@ BluetoothError Bluez5MeshAdv::createNetwork()
 	GBytes *bytes = g_bytes_new(mUuid, 16);
 
 	GVariant *uuidVar = g_variant_new_from_bytes(G_VARIANT_TYPE_BYTESTRING, bytes, true);
+	g_bytes_unref(bytes);	// the variant holds its own reference: this one leaked
 
 	auto createNetworkCallback = [this](GAsyncResult *result) {
 
@@ -403,6 +404,10 @@ BluetoothError Bluez5MeshAdv::unprovisionedScanCancel()
 
 BluetoothError Bluez5MeshAdv::provision(const std::string &uuid, const uint16_t /*timeout*/)
 {
+	// 32 hex digits, from the app: a shorter string was read past its end.
+	if (uuid.size() != 32 || uuid.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+		return BLUETOOTH_ERROR_PARAM_INVALID;
+
 	const char *uuidStr = uuid.c_str();
 	uint8_t uuidByte[16] = {0};
 	int j = 0;
@@ -430,6 +435,7 @@ BluetoothError Bluez5MeshAdv::provision(const std::string &uuid, const uint16_t 
 
 	GBytes *bytes = g_bytes_new(uuidByte, 16);
 	GVariant *uuidVar = g_variant_new_from_bytes(G_VARIANT_TYPE_BYTESTRING, bytes, true);
+	g_bytes_unref(bytes);	// the variant holds its own reference: this one leaked
 
 	bluez_mesh_management1_call_add_node(mMgmtInterface, uuidVar, createEmptyStringArrayVariant(), NULL, glibAsyncMethodWrapper,
 										new GlibAsyncFunctionWrapper(provisionCallback));
