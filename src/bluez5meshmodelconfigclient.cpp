@@ -557,6 +557,10 @@ bool Bluez5MeshModelConfigClient::recvData(uint16_t srcAddress, uint16_t destAdd
 			      modelAppStatus.status, modelAppStatus.elementAddress, modelAppStatus.appKeyIndex,
 			      modelAppStatus.modelId);
 			configuration.setAppKeyIndex(modelAppStatus.appKeyIndex);
+			// The status has no NetKey index: the one the bind or unbind was sent with. (BleMeshConfiguration has
+			// no field for the model id; the reply was matched on it above.)
+			if (request.key.hasNetKey)
+				configuration.setNetKeyIndex(request.key.netKeyIndex);
 			result = meshStatusToError(modelAppStatus.status);
 			opCodeHandled = true;
 			break;
@@ -785,6 +789,8 @@ BluetoothError Bluez5MeshModelConfigClient::configUnBindAppKey(uint16_t destAddr
 		key.hasAppKey = key.hasModel = true;
 		key.appKeyIndex = appKeyIndex;
 		key.modelId = modelId;
+		key.hasNetKey = true;	// not in the status: kept for the result (the reply is matched without it)
+		key.netKeyIndex = netKeyIndex;
 		addPendingRequest(OP_MODEL_APP_UNBIND, destAddress, 0, key);
 	}
 	return btError;
@@ -814,6 +820,8 @@ BluetoothError Bluez5MeshModelConfigClient::configBindAppKey(uint16_t destAddres
 		key.hasAppKey = key.hasModel = true;
 		key.appKeyIndex = appKeyIndex;
 		key.modelId = modelId;
+		key.hasNetKey = true;	// not in the status: kept for the result (the reply is matched without it)
+		key.netKeyIndex = netKeyIndex;
 		addPendingRequest(OP_MODEL_APP_BIND, destAddress, 0, key);
 	}
 	return btError;
