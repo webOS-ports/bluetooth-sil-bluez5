@@ -140,6 +140,7 @@ file(GLOB SOURCES
      src/obextime.cpp
      src/dbuspath.cpp
      src/obexpaths.cpp
+     src/gattlocal.cpp
      )
 
 add_library(bluez5 MODULE ${SOURCES})
