@@ -157,7 +157,13 @@ void Bluez5ProfileGatt::createRemoteGattService(const std::string &serviceObject
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
 	GError *error = 0;
 
-	// Synchronous: bluetoothd answers from its own objects, not from the remote device.
+	// Synchronous, as for characteristics and descriptors: nothing in it waits for the remote device. Making the
+	// proxy asks dbus-daemon for org.bluez (StartServiceByName, GetNameOwner) and bluetoothd for the properties
+	// (GetAll), on a private main context, so nothing of the service runs meanwhile. bluetoothd builds that reply
+	// at once from its GATT cache: its property getters are synchronous, and the cached attributes have no read
+	// callback (BlueZ 5.86: gdbus/object.c properties_get_all, src/gatt-client.c *_get_value,
+	// src/shared/gatt-db.c gatt_db_attribute_read). Asynchronous creation would also have to keep a service
+	// ahead of its characteristics and those ahead of their descriptors, which are looked up by their parent.
 	BluezGattService1 *interface = bluez_gatt_service1_proxy_new_for_bus_sync(
 									G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, "org.bluez",
 									serviceObjectPath.c_str(), NULL, &error);
@@ -255,6 +261,7 @@ void Bluez5ProfileGatt::createRemoteGattCharacteristic(const std::string &charac
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
 
 	GError *error = 0;
+	// Synchronous: see createRemoteGattService.
 	BluezGattCharacteristic1 *interface = bluez_gatt_characteristic1_proxy_new_for_bus_sync(
 											G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
 											"org.bluez", characteristicObjectPath.c_str(), NULL, &error);
@@ -363,6 +370,7 @@ void Bluez5ProfileGatt::createRemoteGattDescriptor(const std::string &descriptor
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
 
 	GError *error = 0;
+	// Synchronous: see createRemoteGattService.
 	BluezGattDescriptor1 *interface = bluez_gatt_descriptor1_proxy_new_for_bus_sync(
 										G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
 										"org.bluez", descriptorObjectPath.c_str(), NULL, &error);
