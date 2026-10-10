@@ -34,8 +34,22 @@ Bluez5ProfileFtp::Bluez5ProfileFtp(Bluez5Adapter *adapter) :
 {
 }
 
+// Its sessions and transfers were never freed, and their watches, bound to this profile, ran after it was gone.
 Bluez5ProfileFtp::~Bluez5ProfileFtp()
 {
+	for (auto &transfer : mTransfers)
+	{
+		transfer.second->watch(nullptr);
+		delete transfer.second;
+	}
+	mTransfers.clear();
+
+	for (auto &session : mSessions)
+	{
+		session.second->watch(nullptr);
+		delete session.second;
+	}
+	mSessions.clear();
 }
 
 void Bluez5ProfileFtp::getProperties(const std::string &address, BluetoothPropertiesResultCallback callback)

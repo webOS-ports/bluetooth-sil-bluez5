@@ -22,6 +22,7 @@
 
 #include "bluez5obexsession.h"
 #include "dbusutils.h"
+#include "asyncutils.h"
 
 extern "C" {
 #include "freedesktop-interface.h"
@@ -49,6 +50,7 @@ private:
 	BluezObexClient1 *mClientProxy;
 	DBusUtils::NameWatch mNameWatch;
 	Bluez5Adapter *mAdapter;
+	LifetimeGuard mLifetime;
 	void connectWithObex();
 
 	void createProxy();

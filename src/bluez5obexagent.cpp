@@ -35,7 +35,9 @@ Bluez5ObexAgent::Bluez5ObexAgent(Bluez5SIL *sil) :
 	mNameWatch(BLUEZ5_OBEX_DBUS_BUS_TYPE, "org.bluez.obex"),
 	mSIL(sil)
 {
-	DBusUtils::waitForBus(BLUEZ5_OBEX_DBUS_BUS_TYPE, [this](bool available) {
+	DBusUtils::waitForBus(BLUEZ5_OBEX_DBUS_BUS_TYPE, [this, alive = mLifetime.token()](bool available) {
+		if (alive.expired())
+			return;
 		if (!available) {
 			// register an empty name watch handler
 			mNameWatch.watch([](bool available) { });
@@ -48,8 +50,28 @@ Bluez5ObexAgent::Bluez5ObexAgent(Bluez5SIL *sil) :
 	});
 }
 
+// The agent stayed exported at its path, its handlers pointing at the freed agent: after a bluetoothd restart
+// (obexd still running) the next incoming push called into freed memory, and the new agent could neither register
+// nor export.
 Bluez5ObexAgent::~Bluez5ObexAgent()
 {
+	mNameWatch.watch(nullptr);
+
+	if (mAgentManagerProxy && mAgentInterface)
+		bluez_obex_agent_manager1_call_unregister_agent(mAgentManagerProxy, OBEX_AGENT_PATH.c_str(), NULL, NULL, NULL);
+
+	deleteObexAgentManagerProxy();
+}
+
+void Bluez5ObexAgent::releaseAgentInterface()
+{
+	if (!mAgentInterface)
+		return;
+
+	g_signal_handlers_disconnect_by_data(mAgentInterface, this);
+	g_dbus_interface_skeleton_unexport(G_DBUS_INTERFACE_SKELETON(mAgentInterface));
+	g_object_unref(mAgentInterface);
+	mAgentInterface = nullptr;
 }
 
 void Bluez5ObexAgent::connectWithObex()
@@ -76,10 +98,18 @@ void Bluez5ObexAgent::createObexAgentManagerProxy()
 		deleteObexAgentManagerProxy();
 	}
 
-	auto createProxyCallback = [this](GAsyncResult *result) {
+	auto createProxyCallback = [this, alive = mLifetime.token()](GAsyncResult *result) {
 		GError *error = 0;
 
-		mAgentManagerProxy = bluez_obex_agent_manager1_proxy_new_for_bus_finish(result, &error);
+		BluezObexAgentManager1 *proxy = bluez_obex_agent_manager1_proxy_new_for_bus_finish(result, &error);
+		if (alive.expired())
+		{
+			g_clear_error(&error);
+			if (proxy)
+				g_object_unref(proxy);
+			return;
+		}
+		mAgentManagerProxy = proxy;
 		if (error)
 		{
 			ERROR(MSGID_FAILED_TO_CREATE_OBEX_AGENT_MGR_PROXY, 0,
@@ -108,11 +138,7 @@ void Bluez5ObexAgent::deleteObexAgentManagerProxy()
 		mAgentManagerProxy = nullptr;
 	}
 
-	if (mAgentInterface)
-	{
-		g_object_unref(mAgentInterface);
-		mAgentInterface = nullptr;
-	}
+	releaseAgentInterface();	// was unreffed while still exported
 }
 
 void Bluez5ObexAgent::registerAgent()
@@ -121,16 +147,21 @@ void Bluez5ObexAgent::registerAgent()
 
 	std::string objectPath(OBEX_AGENT_PATH);
 
-	auto registerCallback = [this, objectPath](GAsyncResult *result) {
+	auto registerCallback = [this, alive = mLifetime.token(), objectPath](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_obex_agent_manager1_call_register_agent_finish(mAgentManagerProxy, result, &error);
-		if (error)
+		ret = bluez_obex_agent_manager1_call_register_agent_finish(BLUEZ_OBEX_AGENT_MANAGER1(source), result, &error);
+		if (alive.expired())
+		{
+			g_clear_error(&error);
+			return;
+		}
+		if (!ret || error)
 		{
 			ERROR(MSGID_FAILED_TO_CREATE_OBEX_AGENT_MGR_PROXY, 0, "Failed to register obex agent on path %s",
 				  objectPath.c_str());
-			g_error_free(error);
+			g_clear_error(&error);
 			return;
 		}
 
@@ -156,11 +187,7 @@ void Bluez5ObexAgent::createAgentInterface(const std::string &objectPath)
 		return;
 	}
 
-	if (mAgentInterface)
-	{
-		g_object_unref(mAgentInterface);
-		mAgentInterface = nullptr;
-	}
+	releaseAgentInterface();
 
 	mAgentInterface = bluez_obex_agent1_skeleton_new();
 
@@ -183,6 +210,7 @@ void Bluez5ObexAgent::createAgentInterface(const std::string &objectPath)
 									  mConn,
 									  objectPath.c_str(),
 									  &error);
+	g_object_unref(mConn);	// a new reference from g_bus_get_sync, leaked on every registration
 	if (error)
 	{
 		ERROR(MSGID_FAILED_TO_CREATE_OBEX_AGENT_MGR_PROXY, 0, "Failed to export obex interface skeleton on path %s error:%s",objectPath.c_str(), error->message);

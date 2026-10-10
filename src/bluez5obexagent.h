@@ -19,6 +19,7 @@
 
 #include <string>
 #include "dbusutils.h"
+#include "asyncutils.h"
 
 extern "C" {
 #include "freedesktop-interface.h"
@@ -61,7 +62,9 @@ private:
 	BluezObexAgent1* mAgentInterface;
 	DBusUtils::NameWatch mNameWatch;
 	Bluez5SIL *mSIL;
+	LifetimeGuard mLifetime;
 
+	void releaseAgentInterface();
 	void connectWithObex();
 	void createObexAgentManagerProxy();
 	void deleteObexAgentManagerProxy();

@@ -127,6 +127,10 @@ ObjectWatch::ObjectWatch(GBusType busType, const std::string &busName, const std
 
 ObjectWatch::~ObjectWatch()
 {
+	if (!mObjectManager)	// construction failed
+		return;
+	// Its handlers point at this watch, and the manager can outlive it.
+	g_signal_handlers_disconnect_by_data(mObjectManager, this);
 	g_object_unref(mObjectManager);
 }
 

@@ -55,8 +55,17 @@ Bluez5ProfileMap::Bluez5ProfileMap(Bluez5Adapter *adapter) :
 
 }
 
+// Its transfers were never freed, their watches bound to this profile. The base class frees the sessions.
 Bluez5ProfileMap::~Bluez5ProfileMap()
 {
+	for (auto &transfer : mTransfersMap)
+	{
+		if (!transfer.second)
+			continue;
+		transfer.second->watch(nullptr);
+		delete transfer.second;
+	}
+	mTransfersMap.clear();
 }
 
 void Bluez5ProfileMap::connect(const std::string &address, const std::string &instanceName, BluetoothMapCallback callback)
@@ -106,7 +115,8 @@ void Bluez5ProfileMap::createSession(const std::string &address, const std::stri
 
 		session->watch(std::bind(&Bluez5ObexProfileBase::handleObexSessionStatus, this, sessionkey, _1));
 		DEBUG("createSession g_signal_connect");
-		g_signal_connect(G_OBJECT(session->getObjectPropertiesProxy()), "properties-changed", G_CALLBACK(handlePropertiesChanged), this);
+		// As the base class pointer, which is what the handler reads it as, and what detachSession() disconnects.
+		g_signal_connect(G_OBJECT(session->getObjectPropertiesProxy()), "properties-changed", G_CALLBACK(handlePropertiesChanged), static_cast<Bluez5ObexProfileBase*>(this));
 		std::string sessionId = getSessionIdFromSessionPath(session->getObjectPath());
 		storeSession(sessionkey, session);
 		callback(BLUETOOTH_ERROR_NONE,sessionId);

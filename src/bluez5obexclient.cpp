@@ -135,20 +135,31 @@ void Bluez5ObexClient::createSession(Bluez5ObexSession::Type type, const std::st
 		return;
 	}
 
-	auto createSessionCallback = [this, callback, type, deviceAddress](GAsyncResult *result) {
+	// Finished on the proxy the call was made on: when obexd went away meanwhile, mClientProxy was NULL or
+	// another proxy, the finish failed without setting an error, and the NULL path became a std::string, which
+	// throws through GLib and ends the service.
+	auto createSessionCallback = [this, alive = mLifetime.token(), callback, type, deviceAddress](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 		gchar *objectPath = 0;
 
-		ret = bluez_obex_client1_call_create_session_finish(mClientProxy, &objectPath, result, &error);
-		if (error)
+		ret = bluez_obex_client1_call_create_session_finish(BLUEZ_OBEX_CLIENT1(source), &objectPath, result, &error);
+		if (alive.expired())	// the client, and the profiles it was created for, are gone
 		{
-			g_error_free(error);
+			g_clear_error(&error);
+			g_free(objectPath);
+			return;
+		}
+		if (!ret || error || !objectPath)
+		{
+			g_clear_error(&error);
+			g_free(objectPath);
 			callback(0);
 			return;
 		}
 
 		Bluez5ObexSession *session = new Bluez5ObexSession(this, type, std::string(objectPath), deviceAddress);
+		g_free(objectPath);	// allocated by the finish; it leaked
 
 		// The caller has to take care to release the memory for the session when it isn't used anymore
 		callback(session);
@@ -177,11 +188,11 @@ void Bluez5ObexClient::destroySession(const std::string &objectPath)
 	if (!mClientProxy)
 		return;
 
-	auto removeSessionCallback = [this, objectPath](GAsyncResult *result) {
+	auto removeSessionCallback = [objectPath](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_obex_client1_call_remove_session_finish(mClientProxy, result, &error);
+		ret = bluez_obex_client1_call_remove_session_finish(BLUEZ_OBEX_CLIENT1(source), result, &error);
 		if (error)
 		{
 			ERROR(MSGID_FAILED_TO_REMOVE_OBEX_SESSION_PROXY, 0, "Failed to remove obex session on path %s",

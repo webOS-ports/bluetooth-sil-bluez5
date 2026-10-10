@@ -19,6 +19,8 @@
 
 #include <bluetooth-sil-api.h>
 
+#include "asyncutils.h"
+
 class Bluez5Adapter;
 class Bluez5Device;
 
@@ -35,6 +37,9 @@ public:
 protected:
 	Bluez5Adapter *mAdapter;
 	std::string mUuid;
+	// For callbacks of asynchronous calls that can be answered after the profile was deleted (adapter removed,
+	// bluetoothd restarted): they capture mLifetime.token() and do nothing once it has expired.
+	LifetimeGuard mLifetime;
 };
 
 #endif // BLUEZ5PROFILEBASE_H

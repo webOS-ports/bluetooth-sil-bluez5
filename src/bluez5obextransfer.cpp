@@ -57,15 +57,19 @@ Bluez5ObexTransfer::Bluez5ObexTransfer(const std::string &objectPath, TransferTy
 
 	g_signal_connect(G_OBJECT(mPropertiesProxy), "properties-changed", G_CALLBACK(handlePropertiesChanged), this);
 
-	auto fetchPropertiesCallback = [this](GAsyncResult *result) {
+	// A transfer that ends quickly is deleted before this answer (its final state arrives first): the callback
+	// read the freed transfer and reported its completion a second time.
+	auto fetchPropertiesCallback = [this, alive = mLifetime.token()](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 		GVariant *properties = 0;
 
-		ret = free_desktop_dbus_properties_call_get_all_finish(mPropertiesProxy, &properties, result, &error);
-		if (error)
+		ret = free_desktop_dbus_properties_call_get_all_finish(FREE_DESKTOP_DBUS_PROPERTIES(source), &properties, result, &error);
+		if (!ret || error || alive.expired())
 		{
-			g_error_free(error);
+			g_clear_error(&error);
+			if (properties)
+				g_variant_unref(properties);
 			return;
 		}
 
@@ -90,8 +94,14 @@ Bluez5ObexTransfer::~Bluez5ObexTransfer()
 			mWatchCallback();
 	}
 
-	g_object_unref(mTransferProxy);
-	g_object_unref(mPropertiesProxy);
+	// A pending call keeps the proxy, and with it this handler, alive after the transfer.
+	if (mPropertiesProxy)
+	{
+		g_signal_handlers_disconnect_by_data(mPropertiesProxy, this);
+		g_object_unref(mPropertiesProxy);
+	}
+	if (mTransferProxy)	// NULL when construction failed
+		g_object_unref(mTransferProxy);
 }
 
 void Bluez5ObexTransfer::watch(Bluez5ObexTransferWatchCallback callback)
@@ -200,14 +210,22 @@ void Bluez5ObexTransfer::handlePropertiesChanged(BluezObexTransfer1 *, gchar *in
 
 void Bluez5ObexTransfer::cancel(BluetoothResultCallback callback)
 {
-	auto cancelCallback = [this, callback](GAsyncResult *result) {
+	if (!mTransferProxy)
+	{
+		callback(BLUETOOTH_ERROR_FAIL);
+		return;
+	}
+
+	// Answered when the remote acknowledges, or the session dies, by when the transfer may be deleted: nothing
+	// of it is used here.
+	auto cancelCallback = [callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_obex_transfer1_call_cancel_finish(mTransferProxy, result, &error);
-		if (error)
+		ret = bluez_obex_transfer1_call_cancel_finish(BLUEZ_OBEX_TRANSFER1(source), result, &error);
+		if (!ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}
@@ -221,5 +239,8 @@ void Bluez5ObexTransfer::cancel(BluetoothResultCallback callback)
 
 bool Bluez5ObexTransfer::isPartOfSession(Bluez5ObexSession *session)
 {
-	return mObjectPath.find(session->getObjectPath()) == 0;
+	// Followed by a '/': as a plain prefix, session1 also claimed the transfers of session12.
+	const std::string &sessionPath = session->getObjectPath();
+	return mObjectPath.size() > sessionPath.size() && mObjectPath.compare(0, sessionPath.size(), sessionPath) == 0 &&
+	       mObjectPath[sessionPath.size()] == '/';
 }

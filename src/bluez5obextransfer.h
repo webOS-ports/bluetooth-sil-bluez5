@@ -22,6 +22,8 @@
 
 #include <bluetooth-sil-api.h>
 
+#include "asyncutils.h"
+
 extern "C" {
 #include "freedesktop-interface.h"
 #include "bluez-interface.h"
@@ -85,6 +87,7 @@ private:
 	std::string mFileName;
 	std::string mFilePath;
 	std::string mMessageHandle;
+	LifetimeGuard mLifetime;
 	void updateFromProperties(GVariant *properties);
 	bool parsePropertyFromVariant(const std::string &key, GVariant *valueVar);
 	void notifyWatcherAboutChangedProperties();

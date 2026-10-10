@@ -33,6 +33,34 @@ Bluez5ObexProfileBase::Bluez5ObexProfileBase(Bluez5ObexSession::Type type, Bluez
 {
 }
 
+// Sessions and transfers were never freed with the profile, and their watches and signal handlers, bound to it,
+// ran after it was gone (bluetoothd restarting, the adapter removed). They are detached first: a deleted transfer
+// reports itself aborted to its watch.
+Bluez5ObexProfileBase::~Bluez5ObexProfileBase()
+{
+	for (auto &transfer : mTransfers)
+	{
+		transfer.second->watch(nullptr);
+		delete transfer.second;
+	}
+	mTransfers.clear();
+
+	for (auto &session : mSessions)
+	{
+		detachSession(session.second);
+		delete session.second;
+	}
+	mSessions.clear();
+}
+
+// The session's status watch and its properties-changed handler point at this profile.
+void Bluez5ObexProfileBase::detachSession(Bluez5ObexSession *session)
+{
+	session->watch(nullptr);
+	if (session->getObjectPropertiesProxy())
+		g_signal_handlers_disconnect_by_data(session->getObjectPropertiesProxy(), this);
+}
+
 void Bluez5ObexProfileBase::notifySessionStatus(const std::string &address, bool createdOrRemoved)
 {
 	Bluez5Device *device = mAdapter->findDevice(address);
@@ -69,6 +97,7 @@ void Bluez5ObexProfileBase::removeFromSessionList(std::string address)
 		return;
 
 	mSessions.erase(sessionIter);
+	detachSession(session);
 	// This will unregister the session with the obex daemon
 	delete session;
 
@@ -104,6 +133,7 @@ void Bluez5ObexProfileBase::removeSession(const std::string &address)
 	mSessions.erase(sessionIter);
 
 	notifySessionStatus(address, false);
+	detachSession(session);
 	// This will unregister the session with the obex daemon
 	delete session;
 
@@ -117,13 +147,22 @@ void Bluez5ObexProfileBase::updateProperties(GVariant *changedProperties)
 	return;
 }
 
-void Bluez5ObexProfileBase::handlePropertiesChanged(BluezObexSession1 *, gchar *interface,  GVariant *changedProperties, GVariant *invalidatedProperties, gpointer userData)
+void Bluez5ObexProfileBase::handlePropertiesChanged(BluezObexSession1 *proxy, gchar *interface,  GVariant *changedProperties, GVariant *invalidatedProperties, gpointer userData)
 {
 	DEBUG("handlePropertiesChanged Bluez5ObexProfileBase");
 
 	Bluez5ObexProfileBase *profileBase = static_cast<Bluez5ObexProfileBase*>(userData);
 
-	profileBase->updateProperties(changedProperties);
+	// The emitter is the session's properties proxy (connected in createSession).
+	profileBase->updateSessionProperties(G_OBJECT(proxy), changedProperties);
+}
+
+const Bluez5ObexSession* Bluez5ObexProfileBase::findSessionByPropertiesProxy(GObject *propertiesProxy) const
+{
+	for (auto &session : mSessions)
+		if (G_OBJECT(session.second->getObjectPropertiesProxy()) == propertiesProxy)
+			return session.second;
+	return nullptr;
 }
 
 void Bluez5ObexProfileBase::createSession(const std::string &address, Bluez5ObexSession::Type type, BluetoothResultCallback callback)

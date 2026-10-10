@@ -19,7 +19,7 @@
 void glibAsyncMethodWrapper(GObject *sourceObject, GAsyncResult *result, gpointer user_data)
 {
 	GlibAsyncFunctionWrapper *wrapper = static_cast<GlibAsyncFunctionWrapper*>(user_data);
-	wrapper->call(result);
+	wrapper->call(sourceObject, result);
 	delete wrapper;
 }
 
