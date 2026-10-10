@@ -87,6 +87,9 @@ void Bluez5Advertise::handleBusAcquired(GDBusConnection *connection, const gchar
 
 std::string Bluez5Advertise::createInterface(uint8_t advId)
 {
+	if (!mConn)	// the bus is not acquired yet: export failed without setting the error read below
+		return std::string();
+
 	BluezLEAdvertisement1 *interface = bluez_leadvertisement1_skeleton_new();
 	GError *error = 0;
 
@@ -97,9 +100,11 @@ std::string Bluez5Advertise::createInterface(uint8_t advId)
 	if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(interface), mConn,
                                           path.c_str(), &error))
 	{
-		DEBUG("Failed to initialize agent on bus: %s",error->message);
-		g_error_free(error);
-		return nullptr;
+		DEBUG("Failed to initialize agent on bus: %s", error ? error->message : "");
+		g_clear_error(&error);
+		g_object_unref(interface);
+		// An empty path: nullptr made a std::string, which throws through GLib and ends the service.
+		return std::string();
 	}
 
 	AdvertiseObject *advObject = new (std::nothrow) AdvertiseObject(interface, path);
@@ -111,21 +116,39 @@ std::string Bluez5Advertise::createInterface(uint8_t advId)
 	return path;
 }
 
+// A free id, never 0, or 0 when all 255 are taken: the counter wrapped after 255 registrations to 0 and to ids
+// still exported.
 uint8_t Bluez5Advertise::nextAdvId()
 {
-	static uint8_t nextAdvId = 1;
-	return nextAdvId++;
+	static uint8_t nextAdvId = 0;
+	for (int tries = 0; tries < 255; tries++)
+	{
+		nextAdvId = (uint8_t)(nextAdvId % 255 + 1);
+		if (mAdvertiserMap.find(nextAdvId) == mAdvertiserMap.end())
+			return nextAdvId;
+	}
+	return 0;
 }
 
 void Bluez5Advertise::createAdvertisementId(AdvertiserIdStatusCallback callback)
 {
 	uint8_t advId = nextAdvId();
-	std::string path = createInterface(advId);
+	std::string path = advId ? createInterface(advId) : std::string();
+	if (path.empty())
+	{
+		callback(BLUETOOTH_ERROR_FAIL, 0);	// success was reported, and the empty path registered later
+		return;
+	}
 	callback(BLUETOOTH_ERROR_NONE, advId);
 }
 
 void Bluez5Advertise::registerAdvertisement(uint8_t advId, AdvertiserStatusCallback callback)
 {
+	if (!mAdvManager)
+	{
+		callback(BLUETOOTH_ERROR_FAIL);
+		return;
+	}
 	guchar supportedInstace = bluez_leadvertising_manager1_get_supported_instances(mAdvManager);
 	if (!supportedInstace)
 	{
@@ -140,16 +163,17 @@ void Bluez5Advertise::registerAdvertisement(uint8_t advId, AdvertiserStatusCallb
 	arguments = g_variant_builder_end (builder);
 	g_variant_builder_unref(builder);
 
-	auto registerCallback = [this, callback, advId](GAsyncResult *result)
+	// Finished on its own proxy: nothing of the advertiser, which may be gone by then, is used.
+	auto registerCallback = [callback](GObject *source, GAsyncResult *result)
 	{
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_leadvertising_manager1_call_register_advertisement_finish(mAdvManager, result, &error);
-		if (error)
+		ret = bluez_leadvertising_manager1_call_register_advertisement_finish(BLUEZ_LEADVERTISING_MANAGER1(source), result, &error);
+		if (!ret || error)
 		{
-			ERROR(MSGID_BLE_ADVERTIMENT_ERROR, 0, "adv registration failed due to %s", error->message);
-			g_error_free(error);
+			ERROR(MSGID_BLE_ADVERTIMENT_ERROR, 0, "adv registration failed due to %s", error ? error->message : "");
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}

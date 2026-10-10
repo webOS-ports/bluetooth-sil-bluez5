@@ -65,6 +65,7 @@ public:
 private:
 	void assignNewDefaultAdapter();
 	void createAdapter(const std::string &objectPath);
+	void releaseObjectManager();
 	void removeAdapter(const std::string &objectPath);
 	void createObexAgent();
 	void deleteObexAgent();

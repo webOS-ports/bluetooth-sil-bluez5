@@ -44,8 +44,16 @@ Bluez5SIL::Bluez5SIL(BluetoothPairingIOCapability capability) :
 
 Bluez5SIL::~Bluez5SIL()
 {
-	if (mAgent)
-		delete mAgent;
+	/* Stops watching a name: first, so that its callbacks do not run on what is being torn down */
+	if (nameWatch)
+	{
+		g_bus_unwatch_name(nameWatch);
+		nameWatch = 0;
+	}
+
+	releaseObjectManager();
+	removeAgentManager(std::string());	// deletes the agent
+	removeProfileManager(std::string());
 
 	if (mObexAgent)
 		delete mObexAgent;
@@ -56,10 +64,6 @@ Bluez5SIL::~Bluez5SIL()
 		    delete *iter;
 	}
 	mAdapters.clear();
-
-	/* Stops watching a name */
-	if (nameWatch)
-		g_bus_unwatch_name(nameWatch);
 }
 
 void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *name,
@@ -72,6 +76,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 		return;
 
 	GError *error = 0;
+	sil->releaseObjectManager();	// one manager at a time (see handleBluezServiceStopped)
 	sil->mObjectManager = g_dbus_object_manager_client_new_sync(conn, G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
 										  "org.bluez", "/", NULL, NULL, NULL, NULL, &error);
 	if (error)
@@ -99,6 +104,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 		if (adapterInterface)
 		{
 			sil->createAdapter(std::string(objectPath));
+			g_object_unref(adapterInterface);	// a new reference: leaked
 		}
 	}
 
@@ -142,6 +148,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 		if (mediaManager)
 		{
 			sil->createMediaManager(std::string(objectPath));
+			g_object_unref(mediaManager);
 		}
 	}
 
@@ -164,6 +171,14 @@ void Bluez5SIL::handleBluezServiceStopped(GDBusConnection *conn, const gchar *na
 		return;
 
 	sil->mDefaultAdapter = 0;
+
+	// The object manager follows the name: kept, it added every object again when bluetoothd came back, next to
+	// the new manager made then, which doubled every adapter and device (the extra ones leaked, their handlers
+	// pointing at adapters deleted on the next restart). Everything bluetoothd held goes now, and comes back with
+	// it: the agent before the adapters it is assigned to.
+	sil->releaseObjectManager();
+	sil->removeAgentManager(std::string());
+	sil->removeProfileManager(std::string());
 
 	// Drop all adapters as they are invalid now. We will recreate them once
 	// bluez comes back.
@@ -270,9 +285,25 @@ void Bluez5SIL::assignNewDefaultAdapter()
 	}
 }
 
+void Bluez5SIL::releaseObjectManager()
+{
+	if (!mObjectManager)
+		return;
+
+	g_signal_handlers_disconnect_by_data(mObjectManager, this);
+	g_object_unref(mObjectManager);
+	mObjectManager = nullptr;
+}
+
 void Bluez5SIL::createAdapter(const std::string &objectPath)
 {
 	DEBUG("New adapter on path %s", objectPath.c_str());
+
+	for (auto existing : mAdapters)
+	{
+		if (existing->getObjectPath() == objectPath)
+			return;	// known: a second one would power-cycle the controller and duplicate its devices
+	}
 
 	Bluez5Adapter *adapter = new Bluez5Adapter(std::string(objectPath));
 

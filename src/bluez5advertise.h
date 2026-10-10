@@ -74,7 +74,12 @@ public:
 		~AdvertiseObject()
 		{
 			if (mInterface)
+			{
+				// It stayed exported after the object was gone, its handler pointing at the advertiser. Unexported,
+				// this is the last reference, and the handler goes with it.
+				g_dbus_interface_skeleton_unexport(G_DBUS_INTERFACE_SKELETON(mInterface));
 				g_object_unref(mInterface);
+			}
 		}
 
 		AdvertiseObject(const AdvertiseObject&) = delete;
