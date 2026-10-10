@@ -20,6 +20,8 @@
 #include "asyncutils.h"
 #include <bluetooth-sil-api.h>
 #include <cstdint>
+#include <list>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -84,6 +86,8 @@ public:
 	void attach();
 	void updateNetworkId();
 	void stopReqTimer();
+	// Whether a received message is the ack of the pending acknowledged setOnOff; it then ends the wait.
+	bool takeOnOffAck(uint32_t opcode, uint16_t src);
 	BluezMeshNode1* getBluezNodeInterface() { return mNodeInterface; }
 	uint8_t getTransactionId() { return mTransacId++; }
 	void keyRefresh(BluetoothResultCallback callback, bool refreshAppKeys,
@@ -98,7 +102,24 @@ private:
 	GVariant* createEmptyStringArrayVariant();
 	GVariant* prepareSendDevKeyData(uint8_t *msg, uint16_t n);
 	void startTimer(const std::string config);
-	void setKeyRefreshPhase(uint16_t netKeyIndex, uint16_t phase, std::vector<BleMeshNode> nodes);
+	bool setKeyRefreshPhase(uint16_t netKeyIndex, uint16_t phase, std::vector<BleMeshNode> nodes);
+
+	// A key refresh after its first phase: phases 2 and 3, then completion, each after the client's wait, from the
+	// main loop. They ran on a detached thread that slept between them, calling the observer, the service's
+	// callbacks and the config client from off the main loop, and outliving this object.
+	struct KeyRefreshJob
+	{
+		Bluez5MeshAdv *adv = nullptr;
+		uint16_t netKeyIndex = 0;
+		int32_t waitTime = 0;
+		std::vector<BleMeshNode> nodes;
+		uint16_t nextPhase = 2;	// then 3, then 4: completed
+		guint timer = 0;
+	};
+	std::list<std::unique_ptr<KeyRefreshJob>> mKeyRefreshJobs;
+	static gboolean handleKeyRefreshStep(gpointer userData);
+	static gboolean handleReqTimerExpired(gpointer userData);
+	void endKeyRefreshJob(KeyRefreshJob *job);
 	void distributeKeys(bool refreshAppKeys, std::vector<uint16_t> appKeyIndexesToRefresh,
 					std::vector<BleMeshNode> &nodes, uint16_t netKeyIndex,
 					int32_t waitTime);
@@ -112,12 +133,15 @@ private:
 	Bluez5MeshAdvProvisioner *mMeshAdvProv;
 	GDBusObjectManagerServer *mObjectManagerServer = nullptr;
 	void releaseObjectManagerServer();
+	void releaseMeshProxies();
 	Bluez5MeshAdvProvAgent *mMeshAdvProvAgent;
 	Bluez5MeshApplication *mMeshApplication;
 	unsigned char mUuid[16]; //Local node uuid
 	std::vector<Bluez5MeshElement> mElements;
 	uint8_t mTransacId;
 	guint mReqExpTimerId;
+	bool mOnOffAckPending = false;
+	uint16_t mOnOffAckDest = 0;
 	guint mWatcherId;
 
 public:

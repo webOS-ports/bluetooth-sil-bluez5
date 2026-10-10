@@ -58,7 +58,7 @@ void Bluez5MeshAdvProvisioner::registerProvisionerInterface(GDBusObjectManagerSe
 	g_signal_connect(provInterface, "handle_request_prov_data", G_CALLBACK(handleRequestProvData), this);
 
 	g_dbus_object_skeleton_add_interface(provSkeleton, G_DBUS_INTERFACE_SKELETON(provInterface));
-
+	g_object_unref(provInterface);	// the object holds its own reference: this one leaked on every meshd start
 }
 
 // A device UUID from mesh as hex, or empty when the array is not 16 bytes.
@@ -130,7 +130,10 @@ gboolean Bluez5MeshAdvProvisioner::handleAddNodeFailed(BluezMeshProvisioner1 */*
 	std::string deviceUuidS = uuidToHex(uuid);
 
 	Bluez5MeshAdvProvisioner *meshAdvProvisioner = (Bluez5MeshAdvProvisioner *)userData;
-	meshAdvProvisioner->mMesh->getMeshObserver()->provisionResult(meshProvisionerError[reason],
+	// A lookup: operator[] added an unknown reason, mapped to BLUETOOTH_ERROR_NONE, a success.
+	auto known = meshProvisionerError.find(reason ? reason : "");
+	BluetoothError error = known != meshProvisionerError.end() ? known->second : BLUETOOTH_ERROR_MESH_UNEXPECTED_ERROR;
+	meshAdvProvisioner->mMesh->getMeshObserver()->provisionResult(error,
 																	convertAddressToLowerCase(
 																		meshAdvProvisioner->mAdapter->getAddress()),
 																	"endProvision", "", 0, "", "",
@@ -161,9 +164,15 @@ gboolean Bluez5MeshAdvProvisioner::handleRequestProvData(BluezMeshProvisioner1 *
 BluetoothError Bluez5MeshAdvProvisioner::updateNodeInfo(std::vector<uint16_t> &unicastAddresses)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
+	// The service's list can be empty (database entries without an address or count): its [-1] was read. The
+	// default next address is kept then, and the next one never wraps past the unicast range.
+	if (unicastAddresses.empty())
+		return BLUETOOTH_ERROR_NONE;
 	mUnicastAddresses = unicastAddresses;
 	sort(mUnicastAddresses.begin(), mUnicastAddresses.end());
-	int n = mUnicastAddresses.size();
-	mUnicastAddressAvailable = mUnicastAddresses[n-1] + 1;
+	uint16_t highest = mUnicastAddresses.back();
+	if (highest >= 0x7fff)
+		return BLUETOOTH_ERROR_MESH_CANNOT_ASSIGN_ADDRESS;
+	mUnicastAddressAvailable = highest + 1;
 	return BLUETOOTH_ERROR_NONE;
 }

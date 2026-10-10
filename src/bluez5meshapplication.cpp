@@ -50,6 +50,7 @@ void Bluez5MeshApplication::registerApplicationInterface(GDBusObjectManagerServe
 	g_signal_connect(appInterface, "handle_join_failed", G_CALLBACK(handleJoinFailed), meshAdv);
 
 	g_dbus_object_skeleton_add_interface(meshAppSkeleton, G_DBUS_INTERFACE_SKELETON(appInterface));
+	g_object_unref(appInterface);	// the object holds its own reference: this one leaked on every meshd start
 }
 
 gboolean Bluez5MeshApplication::handleJoinComplete(BluezMeshApplication1 *object,
@@ -65,10 +66,13 @@ gboolean Bluez5MeshApplication::handleJoinComplete(BluezMeshApplication1 *object
 	return true;
 }
 
-gboolean Bluez5MeshApplication::handleJoinFailed(BluezMeshApplication1 */*object*/,
-										GDBusMethodInvocation */*invocation*/,
+// Answered: returning TRUE leaves the invocation to the handler, and it leaked. The failure is only logged: the
+// SIL API has no event for it.
+gboolean Bluez5MeshApplication::handleJoinFailed(BluezMeshApplication1 *object,
+										GDBusMethodInvocation *invocation,
 										const gchar *argReason, gpointer /*userData*/)
 {
-	DEBUG("handleJoinFailed, reason: %s", argReason);
+	ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Mesh join failed: %s", argReason);
+	bluez_mesh_application1_complete_join_failed(object, invocation);
 	return true;
 }

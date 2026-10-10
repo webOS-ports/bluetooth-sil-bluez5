@@ -42,7 +42,7 @@ public:
 	static gboolean handleDisplayNumeric(BluezMeshProvisionAgent1 *object,
 										 GDBusMethodInvocation *invocation,
 										 const gchar *argType,
-										 gint argNumber,
+										 guint argNumber,
 										 gpointer userData);
 
 	static gboolean handleDisplayString(BluezMeshProvisionAgent1 *object,

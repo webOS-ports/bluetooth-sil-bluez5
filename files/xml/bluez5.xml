@@ -707,7 +707,8 @@
             </method>
             <method name="DisplayNumeric">
                 <arg name="type" type="s" direction="in"/>
-                <arg name="number" type="i" direction="in"/>
+                <!-- meshd sends a uint32 (mesh/agent.c): with "i", GDBus refused its call as InvalidArgs. -->
+                <arg name="number" type="u" direction="in"/>
             </method>
             <method name="PromptNumeric">
                 <arg name="type" type="s" direction="in"/>

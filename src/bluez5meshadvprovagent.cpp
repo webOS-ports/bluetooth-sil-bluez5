@@ -31,8 +31,15 @@ supplyStaticInvokation(nullptr)
 {
 }
 
+#define BLUEZ_MESH_ERROR_FAILED "org.bluez.mesh.Error.Failed"
+
+// meshd waits for the prompts it sent: refused, not left unanswered.
 Bluez5MeshAdvProvAgent::~Bluez5MeshAdvProvAgent()
 {
+	if (supplyNumericInvokation)
+		g_dbus_method_invocation_return_dbus_error(supplyNumericInvokation, BLUEZ_MESH_ERROR_FAILED, "Cancelled");
+	if (supplyStaticInvokation)
+		g_dbus_method_invocation_return_dbus_error(supplyStaticInvokation, BLUEZ_MESH_ERROR_FAILED, "Cancelled");
 }
 
 void Bluez5MeshAdvProvAgent::registerProvAgentInterface(GDBusObjectManagerServer *objectManagerServer)
@@ -60,6 +67,9 @@ void Bluez5MeshAdvProvAgent::registerProvAgentInterface(GDBusObjectManagerServer
 
 	g_dbus_object_skeleton_add_interface(agentSkeleton, G_DBUS_INTERFACE_SKELETON(agentInterface));
 	g_dbus_object_manager_server_export(objectManagerServer, agentSkeleton);
+	// Both hold their own references now: these leaked on every meshd start.
+	g_object_unref(agentInterface);
+	g_object_unref(agentSkeleton);
 }
 
 BluetoothError Bluez5MeshAdvProvAgent::supplyNumeric(uint32_t number)
@@ -96,13 +106,16 @@ BluetoothError Bluez5MeshAdvProvAgent::supplyStatic(const std::string &oobData)
 	return BLUETOOTH_ERROR_NONE;
 }
 
-gboolean Bluez5MeshAdvProvAgent::handleDisplayNumeric(BluezMeshProvisionAgent1 */*object*/,
-													  GDBusMethodInvocation */*invocation*/,
+// meshd sends (su): with "i" in the introspection GDBus refused the call as InvalidArgs, and this never ran.
+// Both display calls are answered: meshd waits for the reply, and got a NoReply error after the bus timeout.
+gboolean Bluez5MeshAdvProvAgent::handleDisplayNumeric(BluezMeshProvisionAgent1 *object,
+													  GDBusMethodInvocation *invocation,
 													  const gchar */*argType*/,
-													  gint argNumber,
+													  guint argNumber,
 													  gpointer userData)
 {
 	DEBUG("handleDisplayNumeric");
+	bluez_mesh_provision_agent1_complete_display_numeric(object, invocation);
 	Bluez5MeshAdvProvAgent *provAgent = (Bluez5MeshAdvProvAgent *)userData;
 	provAgent->mMesh->getMeshObserver()->provisionResult(BLUETOOTH_ERROR_NONE,
 													convertAddressToLowerCase(
@@ -111,12 +124,13 @@ gboolean Bluez5MeshAdvProvAgent::handleDisplayNumeric(BluezMeshProvisionAgent1 *
 	return true;
 }
 
-gboolean Bluez5MeshAdvProvAgent::handleDisplayString(BluezMeshProvisionAgent1 */*object*/,
-													 GDBusMethodInvocation */*invocation*/,
+gboolean Bluez5MeshAdvProvAgent::handleDisplayString(BluezMeshProvisionAgent1 *object,
+													 GDBusMethodInvocation *invocation,
 													 const gchar *argValue,
 													 gpointer userData)
 {
 	DEBUG("handleDisplayString");
+	bluez_mesh_provision_agent1_complete_display_string(object, invocation);
 	Bluez5MeshAdvProvAgent *provAgent = (Bluez5MeshAdvProvAgent *)userData;
 	provAgent->mMesh->getMeshObserver()->provisionResult(BLUETOOTH_ERROR_NONE,
 													convertAddressToLowerCase(
@@ -133,6 +147,10 @@ gboolean Bluez5MeshAdvProvAgent::handlePromptNumeric(BluezMeshProvisionAgent1 */
 	DEBUG("handlePromptNumeric");
 	Bluez5MeshAdvProvAgent *provAgent = (Bluez5MeshAdvProvAgent *)userData;
 	DEBUG("handlePromptNumeric: %s", argType);
+	// A prompt still waiting was never answered when the next one replaced it.
+	if (provAgent->supplyNumericInvokation)
+		g_dbus_method_invocation_return_dbus_error(provAgent->supplyNumericInvokation, BLUEZ_MESH_ERROR_FAILED,
+		                                           "Superseded");
 	provAgent->supplyNumericInvokation = invocation;
 	provAgent->mMesh->getMeshObserver()->provisionResult(BLUETOOTH_ERROR_NONE,
 													convertAddressToLowerCase(
@@ -148,6 +166,9 @@ gboolean Bluez5MeshAdvProvAgent::handlePromptStatic(BluezMeshProvisionAgent1 */*
 {
 	Bluez5MeshAdvProvAgent *provAgent = (Bluez5MeshAdvProvAgent *)userData;
 	DEBUG("handlePromptStatic: %s", argType);
+	if (provAgent->supplyStaticInvokation)	// as for PromptNumeric
+		g_dbus_method_invocation_return_dbus_error(provAgent->supplyStaticInvokation, BLUEZ_MESH_ERROR_FAILED,
+		                                           "Superseded");
 	provAgent->supplyStaticInvokation = invocation;
 	provAgent->mMesh->getMeshObserver()->provisionResult(BLUETOOTH_ERROR_NONE,
 													convertAddressToLowerCase(

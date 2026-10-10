@@ -75,10 +75,15 @@ void Bluez5MeshElement::registerElementInterface(GDBusObjectManagerServer *objec
 
 	g_dbus_object_skeleton_add_interface(elementSkeleton, G_DBUS_INTERFACE_SKELETON(elementInterface));
 	g_dbus_object_manager_server_export(objectManagerServer, elementSkeleton);
+	// Both hold their own references now: these leaked on every meshd start.
+	g_object_unref(elementInterface);
+	g_object_unref(elementSkeleton);
 }
 
-gboolean Bluez5MeshElement::handleDevKeyMessageReceived(BluezMeshElement1 */*object*/,
-														GDBusMethodInvocation */*invocation*/,
+// Both handlers answer meshd: returning TRUE leaves the invocation to the handler, and it was never completed,
+// leaking one invocation with its message on every mesh message received.
+gboolean Bluez5MeshElement::handleDevKeyMessageReceived(BluezMeshElement1 *object,
+														GDBusMethodInvocation *invocation,
 														guint16 argSource,
 														gboolean argRemote,
 														guint16 argNetIndex,
@@ -94,10 +99,11 @@ gboolean Bluez5MeshElement::handleDevKeyMessageReceived(BluezMeshElement1 */*obj
 	data = (uint8_t *)g_variant_get_fixed_array(argData, &dataLen, sizeof(guint8));
 
 	DEBUG("Received msg with length: %" G_GSIZE_FORMAT, dataLen);
+	bluez_mesh_element1_complete_dev_key_message_received(object, invocation);
 
 	for ( auto model : meshElement->mModels)
 	{
-		if (model.second.get()->recvData(argSource, 0, 0, data, dataLen))
+		if (model.second && model.second->recvData(argSource, 0, 0, data, dataLen))
 		{
 			break;
 		}
@@ -105,8 +111,8 @@ gboolean Bluez5MeshElement::handleDevKeyMessageReceived(BluezMeshElement1 */*obj
 	return true;
 }
 
-gboolean Bluez5MeshElement::handleMessageReceived(BluezMeshElement1 */*object*/,
-												  GDBusMethodInvocation */*invocation*/,
+gboolean Bluez5MeshElement::handleMessageReceived(BluezMeshElement1 *object,
+												  GDBusMethodInvocation *invocation,
 												  guint16 argSource,
 												  guint16 argKeyIndex,
 												  GVariant *argDestination,
@@ -120,17 +126,23 @@ gboolean Bluez5MeshElement::handleMessageReceived(BluezMeshElement1 */*object*/,
 	gsize dataLen = 0;
 	uint16_t destAddr = 0;
 
-	meshElement->mMeshAdv->stopReqTimer();
+	// The pending OnOff ack timer is no longer stopped here: any message, from any node, cancelled it. The OnOff
+	// client stops it for the status it waits for.
 
 	data = (uint8_t *)g_variant_get_fixed_array(argData, &dataLen, sizeof(guint8));
+	// A unicast or group destination is a uint16; a virtual one is a label UUID (ay), which g_variant_get_uint16
+	// refused with a critical. The unboxed value was also never released.
 	GVariant *destAddrVar = g_variant_get_variant(argDestination);
-	destAddr = g_variant_get_uint16(destAddrVar);
+	if (g_variant_is_of_type(destAddrVar, G_VARIANT_TYPE_UINT16))
+		destAddr = g_variant_get_uint16(destAddrVar);
+	g_variant_unref(destAddrVar);
 
 	DEBUG("Received msg with length: %" G_GSIZE_FORMAT, dataLen);
+	bluez_mesh_element1_complete_message_received(object, invocation);
 
 	for ( auto model : meshElement->mModels)
 	{
-		if (model.second.get()->recvData(argSource, destAddr, argKeyIndex, data, dataLen))
+		if (model.second && model.second->recvData(argSource, destAddr, argKeyIndex, data, dataLen))
 		{
 			break;
 		}
@@ -150,6 +162,8 @@ BluetoothError Bluez5MeshElement::addModel(uint32_t modelId)
 		model = new Bluez5MeshModelOnOffClient(modelId, mMeshProfile, mMeshAdv, mAdapter);
 	}
 
+	// An unknown model stays registered (meshd is told about it) with no implementation: the message loops skip
+	// it, they called into the null model.
 	std::shared_ptr <Bluez5MeshModel> p(model);
 	mModels.insert(std::pair<uint32_t, std::shared_ptr<Bluez5MeshModel>>(modelId, p));
 
