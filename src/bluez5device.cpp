@@ -68,6 +68,10 @@ Bluez5Device::Bluez5Device(Bluez5Adapter *adapter, const std::string &objectPath
 	GError *error = 0;
 	GVariant *propsVar = NULL;
 
+	// From the path ("dev_XX_XX_..."), in case GetAll below fails (a timeout, the object going away) or a proxy
+	// cannot be made: the device was kept, and reported, with an empty address.
+	objPathToDevAddress(objectPath, mAddress);
+
 	mDeviceProxy = bluez_device1_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
 														"org.bluez", objectPath.c_str(), NULL, &error);
 	if (error)
