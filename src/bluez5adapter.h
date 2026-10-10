@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <glib.h>
 #include <list>
+#include <vector>
 #include <unordered_map>
 #include <map>
 
@@ -216,7 +217,12 @@ private:
 	std::string mName;
 	std::string mAlias;
 	std::string mInterfaceName;
-	BluetoothResultCallback mCancelDiscCallback;
+	// cancelDiscovery() requests waiting for discovery to stop, answered once when it does (or after a timeout:
+	// another D-Bus client can keep BlueZ discovering).
+	std::vector<BluetoothResultCallback> mCancelDiscCallbacks;
+	guint mCancelDiscTimeoutSource;
+	void completeCancelDiscovery();
+	static gboolean handleCancelDiscoveryTimeout(gpointer user_data);
 	bool mAdvertising;
 	std::vector <std::string> mUuids;
 	Bluez5MprisPlayer *mPlayer;

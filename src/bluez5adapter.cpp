@@ -66,7 +66,7 @@ Bluez5Adapter::Bluez5Adapter(const std::string &objectPath) :
 	mCurrentPairingDevice(0),
 	mCurrentPairingCallback(0),
 	mObexClient(0),
-	mCancelDiscCallback(0),
+	mCancelDiscTimeoutSource(0),
 	mAdvertising(false),
 	mPlayer(nullptr),
 	mMediaManager(nullptr)
@@ -136,6 +136,11 @@ Bluez5Adapter::Bluez5Adapter(const std::string &objectPath) :
 
 Bluez5Adapter::~Bluez5Adapter()
 {
+	// Their callbacks run on this adapter.
+	resetDiscoveryTimeout();
+	if (mCancelDiscTimeoutSource)
+		g_source_remove(mCancelDiscTimeoutSource);
+
 	for(auto profile = mProfiles.begin(); profile != mProfiles.end(); profile++)
 	{
 		delete profile->second;
@@ -367,8 +372,13 @@ bool Bluez5Adapter::addPropertyFromVariant(BluetoothPropertiesList& properties, 
 		{
 			mDiscovering = discovering;
 			getObserver()->discoveryStateChanged(mDiscovering);
-			if (mCancelDiscCallback)
-				mCancelDiscCallback(BLUETOOTH_ERROR_NONE);
+			// Only when it stops, and once: the callback ran on every later change, for a request it had already
+			// answered (the service releases its message in it).
+			if (!mDiscovering)
+			{
+				resetDiscoveryTimeout();
+				completeCancelDiscovery();
+			}
 		}
 	}
 	else if (key == "UUIDs")
@@ -844,7 +854,8 @@ gboolean Bluez5Adapter::handleDiscoveryTimeout(gpointer user_data)
 
 	DEBUG("Discovery has timed out. Stopping it.");
 
-	self->cancelDiscovery([](BluetoothError error) { });
+	self->mDiscoveryTimeoutSource = 0;	// this source ends here; its id was kept and removed again later
+	self->cancelDiscovery([](BluetoothError) { });
 
 	return FALSE;
 }
@@ -929,10 +940,37 @@ void Bluez5Adapter::cancelDiscovery(BluetoothResultCallback callback)
 			}
 			mUseBluezFilter = false;
 		}
-		mCancelDiscCallback = callback;
+		mCancelDiscCallbacks.push_back(callback);
+		if (!mCancelDiscTimeoutSource)
+			mCancelDiscTimeoutSource = g_timeout_add_seconds(5, handleCancelDiscoveryTimeout, this);
 	}
 	else
 		callback(BLUETOOTH_ERROR_NONE);
+}
+
+void Bluez5Adapter::completeCancelDiscovery()
+{
+	if (mCancelDiscTimeoutSource)
+	{
+		g_source_remove(mCancelDiscTimeoutSource);
+		mCancelDiscTimeoutSource = 0;
+	}
+
+	// Taken first: a callback may start or cancel discovery again.
+	std::vector<BluetoothResultCallback> callbacks;
+	callbacks.swap(mCancelDiscCallbacks);
+	for (auto &callback : callbacks)
+		if (callback)
+			callback(BLUETOOTH_ERROR_NONE);
+}
+
+gboolean Bluez5Adapter::handleCancelDiscoveryTimeout(gpointer user_data)
+{
+	Bluez5Adapter *self = static_cast<Bluez5Adapter*>(user_data);
+	self->mCancelDiscTimeoutSource = 0;
+	DEBUG("Discovery still reported active after StopDiscovery; answering the pending requests");
+	self->completeCancelDiscovery();
+	return G_SOURCE_REMOVE;
 }
 
 bool Bluez5Adapter::isServiceUuidValid(const BluetoothLeDiscoveryFilter &filter)
