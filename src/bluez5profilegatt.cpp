@@ -1324,7 +1324,9 @@ void Bluez5ProfileGatt::changeCharacteristicWatchStatus(const std::string &addre
 
 	// Asynchronous: StartNotify is answered when the device has acknowledged its CCCD write, and a device that did
 	// not answer stopped the service for 25 s. One answer, after the last call, failing when any failed (the last
-	// call's result was taken before), or when the profile has gone meanwhile, as for reads and writes.
+	// call's result was taken before), or when the profile has gone meanwhile, as for reads and writes. Each
+	// characteristic makes one call at a time: a caller asking for the state of the call out joins it, one asking for
+	// the other state waits for it (BlueZ refused a second StartNotify of the SIL meanwhile with InProgress).
 	ResultJoin join(targets.size(), [alive = mLifetime.token(), callback](bool allSucceeded) {
 		callback(allSucceeded && !alive.expired() ? BLUETOOTH_ERROR_NONE : BLUETOOTH_ERROR_FAIL);
 	});

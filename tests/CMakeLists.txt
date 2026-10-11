@@ -30,6 +30,7 @@ set(PARSER_SOURCES
     ${PROJECT_SOURCE_DIR}/src/gattlocal.cpp
     ${PROJECT_SOURCE_DIR}/src/meshconfig.cpp
     ${PROJECT_SOURCE_DIR}/src/avrcpdevices.cpp
+    ${PROJECT_SOURCE_DIR}/src/gattnotify.cpp
 )
 
 file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/unit/*.cpp)
@@ -61,6 +62,20 @@ target_link_libraries(bluez5-sil-media-tests ${GTEST_MAIN_LIBRARY} ${GTEST_LIBRA
 # The profile is stubbed, so its type info is not there for UBSan's vptr check (GCC references it).
 target_compile_options(bluez5-sil-media-tests PRIVATE -fno-sanitize=vptr)
 add_test(NAME bluez5-sil-media COMMAND bluez5-sil-media-tests)
+
+# StartNotify and StopNotify of a remote characteristic against a fake bluetoothd on a private bus (needs
+# dbus-daemon at run time).
+add_executable(bluez5-sil-gatt-tests ${CMAKE_CURRENT_SOURCE_DIR}/gatt/test_gattremotenotify.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/glib/support.cpp
+    ${PROJECT_SOURCE_DIR}/src/bluez5gattremoteattribute.cpp ${PROJECT_SOURCE_DIR}/src/gattnotify.cpp
+    ${PROJECT_SOURCE_DIR}/src/asyncutils.cpp ${PROJECT_SOURCE_DIR}/src/utils.cpp
+    ${GDBUS_IF_DIR}/bluez-interface.c ${GDBUS_IF_DIR}/freedesktop-interface.c)
+target_include_directories(bluez5-sil-gatt-tests PRIVATE ${PROJECT_SOURCE_DIR}/src ${GDBUS_IF_DIR})
+target_link_libraries(bluez5-sil-gatt-tests ${GTEST_MAIN_LIBRARY} ${GTEST_LIBRARY}
+    ${GLIB2_LDFLAGS} ${GIO2_LDFLAGS} ${PMLOG_LDFLAGS} pthread)
+# The profile is stubbed, so its type info is not there for UBSan's vptr check (GCC references it).
+target_compile_options(bluez5-sil-gatt-tests PRIVATE -fno-sanitize=vptr)
+add_test(NAME bluez5-sil-gatt COMMAND bluez5-sil-gatt-tests)
 
 # libFuzzer targets (clang only, -DBUILD_FUZZING=ON).
 option(BUILD_FUZZING "Build the libFuzzer targets (clang)" OFF)

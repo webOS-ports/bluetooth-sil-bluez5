@@ -25,6 +25,8 @@
 
 #include <bluetooth-sil-api.h>
 
+#include "gattnotify.h"
+
 extern "C" {
 #include "freedesktop-interface.h"
 #include "bluez-interface.h"
@@ -67,16 +69,13 @@ class GattRemoteCharacteristic
 public:
 	static void onCharacteristicPropertiesChanged(GDBusProxy *proxy, GVariant *changed_properties,
                                                   GStrv invalidated_properties, gpointer userdata);
-	GattRemoteCharacteristic(BluezGattCharacteristic1 *interface, Bluez5ProfileGatt *gattProfile)
-		: mInterface(interface), mGattProfile(gattProfile) {
-		mPropertiesChangedHandler = g_signal_connect(G_DBUS_PROXY(interface), "g-properties-changed",
-						 G_CALLBACK(GattRemoteCharacteristic::onCharacteristicPropertiesChanged), this);
-	}
+	GattRemoteCharacteristic(BluezGattCharacteristic1 *interface, Bluez5ProfileGatt *gattProfile);
 	~GattRemoteCharacteristic();
 	GattRemoteCharacteristic(const GattRemoteCharacteristic &) = delete;
 	GattRemoteCharacteristic &operator=(const GattRemoteCharacteristic &) = delete;
 
-	// Asynchronous as well: StartNotify waits for the device to acknowledge its CCCD write.
+	// Asynchronous as well: StartNotify waits for the device to acknowledge its CCCD write. One call at a time: a
+	// caller asking for the state of the call out joins it, one asking for the other state waits for it.
 	void startNotify(GattRemoteResultCallback callback);
 	void stopNotify(GattRemoteResultCallback callback);
 	void readValue(GattRemoteReadCallback callback);
@@ -95,6 +94,10 @@ public:
 	Bluez5ProfileGatt *mGattProfile;
 	gulong mPropertiesChangedHandler = 0;
 	std::vector<GattRemoteDescriptor*> gattRemoteDescriptors;
+
+private:
+	void callNotify(bool enable, GattRemoteResultCallback done);
+	GattNotifyQueue mNotifyQueue;
 };
 
 class GattRemoteService

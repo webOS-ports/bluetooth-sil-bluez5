@@ -143,6 +143,7 @@ file(GLOB SOURCES
      src/obexpaths.cpp
      src/gattlocal.cpp
      src/avrcpdevices.cpp
+     src/gattnotify.cpp
      src/dbussignals.cpp
      src/obexpush.cpp
      )
