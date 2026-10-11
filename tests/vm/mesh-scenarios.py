@@ -23,9 +23,18 @@
 #   hci2  the node's meshd, on a D-Bus of its own (one bus takes one org.bluez.mesh), with mesh-node.py as its
 #         application: one element with a Generic OnOff Server
 #
-# The image's bluetooth-mesh.service runs meshd with --use_raw on hci0 next to bluetoothd. That is not used here:
-# meshd 5.86 refuses a controller bluetoothd already powered ("failed to start generic IO : already powered on"), and
-# when it starts first, btvirt's controller refused some of its LE scan commands (0x0c, 0x12; not pursued further).
+# The image's bluetooth-mesh.service runs meshd with --use_raw on hci0 next to bluetoothd. That is not the default
+# here: meshd 5.86 with the layer's patches refuses a controller bluetoothd already powered ("failed to start generic
+# IO : already powered on"). MESH_PROVISIONER_IO picks how the provisioner's meshd gets its controller:
+#
+#   user  (default) hci1 of its own, HCI user channel, as above
+#   raw   hci0, shared with bluetoothd: --use_raw --io generic:hci0, as the image's service runs it (needs a meshd
+#         that takes a powered controller for the raw channel); the node is then on hci1
+#   auto  hci0, shared with bluetoothd through the kernel's mesh MGMT interface (meshd's default --io auto; the
+#         kernel needs its experimental mesh feature, 6.0 or later); the node is then on hci1
+#
+# With a shared controller, scenarios that need hci1 back in bluetoothd's hands or a fourth controller are skipped,
+# and the provisioner meshd starts after bluetoothd and the service powered hci0.
 #
 # The provisioner sends with an AppKey only once the local node has it too (meshd: "Key not found"): createAppKey
 # only makes the key, so the scenarios also add it to the local node (config/set APPKEY_ADD to address 1).
@@ -71,6 +80,11 @@ ONOFF_SERVER = 0x1000
 ONOFF_CLIENT = 0x1001	# a model the node does not have
 LOCAL_NODE = 1
 UNITS = ('mesh-scn-node-app', 'mesh-scn-node', 'mesh-scn-prov', 'mesh-scn-bus')
+PROV_IO = os.environ.get('MESH_PROVISIONER_IO', 'user')
+SHARED = PROV_IO != 'user'	# the provisioner's meshd on bluetoothd's hci0
+NODE_HCI = 'hci1' if SHARED else 'hci2'
+CONTROLLERS_USED = 2 if SHARED else 3
+PROV_ARGS = {'user': ['--io', 'generic:hci1'], 'raw': ['--use_raw', '--io', 'generic:hci0'], 'auto': []}[PROV_IO]
 
 BUS_CONFIG = '''<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
@@ -127,12 +141,13 @@ def ended(r):
 
 
 def start_provisioner():
-    """The provisioner meshd on hci1. bluetoothd takes the controller whenever meshd lets go of it, and meshd only
-    binds to one that is not powered."""
+    """The provisioner meshd on hci1 (or hci0, shared: see MESH_PROVISIONER_IO). bluetoothd takes hci1 whenever
+    meshd lets go of it, and meshd's user channel only binds to one that is not powered."""
     run('systemctl', 'stop', 'mesh-scn-prov')
-    run('btmgmt', '--index', '1', 'power', 'off')
-    run('hciconfig', 'hci1', 'down')
-    start_unit('mesh-scn-prov', [MESHD, '--nodetach', '--debug', '--io', 'generic:hci1'])
+    if not SHARED:
+        run('btmgmt', '--index', '1', 'power', 'off')
+        run('hciconfig', 'hci1', 'down')
+    start_unit('mesh-scn-prov', [MESHD, '--nodetach', '--debug'] + PROV_ARGS)
     end = time.time() + 10
     while time.time() < end and not active('mesh-scn-prov'):
         settle(0.2)
@@ -144,14 +159,15 @@ NODE_ENV = {'DBUS_SYSTEM_BUS_ADDRESS': 'unix:path=' + BUS_SOCKET}
 
 
 def start_node_meshd():
-    """The node's meshd on hci2, with empty storage. Before bluetoothd: a controller bluetoothd had used, powered
-    down and given to meshd, sent nothing meshd queued (no beacon was ever seen)."""
+    """The node's meshd on hci2 (hci1 when the provisioner shares hci0), with empty storage. Before bluetoothd: a
+    controller bluetoothd had used, powered down and given to meshd, sent nothing meshd queued (no beacon was ever
+    seen)."""
     run('systemctl', 'stop', 'mesh-scn-node')
     shutil.rmtree(NODE_STORAGE, ignore_errors=True)
     os.makedirs(NODE_STORAGE)
-    run('hciconfig', 'hci2', 'down')
-    start_unit('mesh-scn-node', [MESHD, '--nodetach', '--debug', '--io', 'generic:hci2', '--storage', NODE_STORAGE],
-               NODE_ENV)
+    run('hciconfig', NODE_HCI, 'down')
+    start_unit('mesh-scn-node', [MESHD, '--nodetach', '--debug', '--io', 'generic:' + NODE_HCI,
+                                 '--storage', NODE_STORAGE], NODE_ENV)
 
 
 def start_node():
@@ -220,6 +236,12 @@ def start_btvirt(count):
     run('rfkill', 'unblock', 'bluetooth')
 
 
+def without_meshd():
+    """The adapters bluetoothd has while the provisioner meshd is stopped: hci1 comes back to it, a shared hci0 is
+    its all along."""
+    return 1 if SHARED else 2
+
+
 def restart_mesh_stack(count=3):
     """Fresh controllers (three, or a fourth for bluetoothd as hci3), the node's bus, the provisioner meshd before
     bluetoothd (so it gets hci1), no network, and the service."""
@@ -237,12 +259,17 @@ def restart_mesh_stack(count=3):
         settle(1.0)
     forget_network()
     start_node_meshd()
-    start_provisioner()
+    if not SHARED:
+        start_provisioner()
     run('systemctl', 'unmask', '--runtime', 'bluetooth')
     run('systemctl', 'start', 'bluetooth')
     settle(2.0)
     run('systemctl', 'start', SERVICE)
-    sil.wait_adapters(count - 2)
+    found = sil.wait_adapters(count - 2 if not SHARED else 1)
+    if SHARED:	# as on the image: bluetoothd has powered hci0 before meshd comes
+        sil.set_state(found['hci0']['adapterAddress'], powered=True)
+        settle(1.0)
+        start_provisioner()
     settle(2.0)
 
 
@@ -342,11 +369,13 @@ def create_network_refused_reaches_the_client():
     check(reply and reply.get('networkId'), 'createNetwork after the refused one: %r' % reply)
 
 
-def attach_to_a_lost_network_fails():
-    """The service's database names a network the provisioner meshd no longer has: the attach fails, and the
-    service no longer takes the network for usable (it did, and passed every call on to fail in the SIL)."""
+def lost_network_is_made_again():
+    """The service's database names a network the provisioner meshd no longer has: meshd answers the attach with
+    NotFound, the service drops the stored network, and the next createNetwork makes a new one that works. Before,
+    the token stayed: every createNetwork answered NETWORK_EXISTS and tried the same attach, with no way out."""
     reply = create_network()
     check(reply and reply.get('networkId'), 'createNetwork: %r' % reply)
+    lost = reply['networkId']
     run('systemctl', 'stop', SERVICE)
     run('systemctl', 'stop', 'mesh-scn-prov')
     shutil.rmtree(PROV_STORAGE, ignore_errors=True)
@@ -359,6 +388,57 @@ def attach_to_a_lost_network_fails():
     settle(2.0)
     reply = mesh('createAppKey', {'netKeyIndex': 0, 'appKeyIndex': 0})
     check(reply and reply.get('errorCode') == 327, 'createAppKey on the lost network: %r' % reply)
+    reply = create_network()
+    check(reply and reply.get('networkId') and reply['networkId'] != lost,
+          'createNetwork after the lost one (was %s): %r' % (lost, reply))
+    reply = mesh('createAppKey', {'netKeyIndex': 0, 'appKeyIndex': 0})
+    check(reply and reply.get('returnValue'), 'createAppKey on the new network: %r' % reply)
+    info = (mesh('getMeshInfo', {}) or {}).get('meshInfo', {})
+    check([k.get('index') for k in info.get('appKeys', [])] == [0], 'appKeys of the new network: %r' % info)
+
+
+def unanswered_attach_keeps_the_network():
+    """An attach that fails without meshd saying the node is unknown keeps the stored network: meshd not running
+    when createNetwork attaches (the SIL attaches by itself once meshd is back), then meshd stopped (SIGSTOP) so the
+    attach times out: the network is kept, and a restarted service attaches to it again."""
+    reply = create_network()
+    check(reply and reply.get('networkId'), 'createNetwork: %r' % reply)
+    run('systemctl', 'stop', SERVICE)
+    run('systemctl', 'stop', 'mesh-scn-prov')
+    run('systemctl', 'start', SERVICE)
+    sil.wait_adapters(without_meshd())	# hci1, given back to bluetoothd
+    settle(2.0)
+    reply = mesh('createNetwork', {})
+    check(reply and reply.get('errorCode') == 39, 'createNetwork with meshd not running: %r' % reply)
+    start_provisioner()
+    settle(2.0)
+    reply = mesh('createAppKey', {'netKeyIndex': 0, 'appKeyIndex': 0})
+    check(reply and reply.get('returnValue'), 'createAppKey once meshd is back: %r' % reply)
+
+    run('systemctl', 'restart', SERVICE)
+    sil.wait_adapters(1)
+    settle(2.0)
+    os.kill(unit_pid('mesh-scn-prov'), 19)	# SIGSTOP: the attach gets no answer
+    reply = mesh('createNetwork', {})
+    check(reply and reply.get('errorCode') == 39, 'createNetwork with meshd stopped: %r' % reply)
+    settle(28.0)	# GDBus' default 25 s call timeout
+    reply = mesh('createAppKey', {'netKeyIndex': 0, 'appKeyIndex': 1})
+    check(reply and reply.get('errorCode') == 327, 'createAppKey after the attach timed out: %r' % reply)
+    # The record must still be there: a service that starts afresh (the SIL no longer has the token) attaches to it.
+    run('systemctl', 'stop', SERVICE)
+    run('systemctl', 'kill', '-s', 'KILL', 'mesh-scn-prov')
+    settle(1.0)
+    start_provisioner()
+    settle(1.0)
+    run('systemctl', 'reset-failed', SERVICE)
+    run('systemctl', 'start', SERVICE)
+    sil.wait_adapters(1)
+    settle(2.0)
+    reply = mesh('createNetwork', {})
+    check(reply and reply.get('errorCode') == 39, 'createNetwork after the timed-out attach: %r' % reply)
+    settle(2.0)
+    reply = mesh('createAppKey', {'netKeyIndex': 0, 'appKeyIndex': 1})
+    check(reply and reply.get('returnValue'), 'createAppKey on the kept network: %r' % reply)
 
 
 def meshd_restart_is_survived():
@@ -369,7 +449,7 @@ def meshd_restart_is_survived():
     check(reply and reply.get('networkId'), 'createNetwork: %r' % reply)
     for index in range(2):
         run('systemctl', 'stop', 'mesh-scn-prov')
-        sil.wait_adapters(2)	# hci1, given back to bluetoothd
+        sil.wait_adapters(without_meshd())	# hci1, given back to bluetoothd
         settle(1.0)
         start_provisioner()
         settle(2.0)
@@ -496,7 +576,8 @@ def service_restarts_keep_the_network():
 SCENARIOS = [
     network_created_and_described,
     create_network_refused_reaches_the_client,
-    attach_to_a_lost_network_fails,
+    lost_network_is_made_again,
+    unanswered_attach_keeps_the_network,
     meshd_restart_is_survived,
     network_on_either_of_two_adapters,
     provision_and_configure,
@@ -507,9 +588,10 @@ SCENARIOS = [
 ]
 
 
-RESTART_THE_SERVICE = (attach_to_a_lost_network_fails, network_on_either_of_two_adapters,
-                       service_restarts_keep_the_network)
+RESTART_THE_SERVICE = (lost_network_is_made_again, unanswered_attach_keeps_the_network,
+                       network_on_either_of_two_adapters, service_restarts_keep_the_network)
 CONTROLLERS = {'network_on_either_of_two_adapters': 4}
+NOT_SHARED = (network_on_either_of_two_adapters,)	# needs a fourth controller for bluetoothd
 
 
 def restore():
@@ -536,9 +618,12 @@ def main(argv):
         for scenario in SCENARIOS:
             if wanted and scenario.__name__ not in wanted:
                 continue
+            if SHARED and scenario in NOT_SHARED:
+                print('SKIP  %s (MESH_PROVISIONER_IO=%s)' % (scenario.__name__, PROV_IO))
+                continue
             ran += 1
             try:
-                restart_mesh_stack(CONTROLLERS.get(scenario.__name__, 3))
+                restart_mesh_stack(CONTROLLERS.get(scenario.__name__, CONTROLLERS_USED))
                 pid = sil.main_pid()
                 scenario()
                 if scenario not in RESTART_THE_SERVICE:
