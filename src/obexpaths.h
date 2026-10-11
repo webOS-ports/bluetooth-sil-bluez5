@@ -20,6 +20,7 @@
 #ifndef OBEXPATHS_H
 #define OBEXPATHS_H
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -43,5 +44,9 @@ bool isAcceptableReceivedName(const std::string &name);
 // The name to store a pushed file under, in a folder where exists(name) tells what is taken: the name itself, or
 // "stem (n).ext" for the first n from 1 to 999 that is free. "" when the name is not acceptable or all are taken.
 std::string uniqueReceivedName(const std::string &name, const std::function<bool(const std::string &)> &exists);
+
+// Whether path is what is left of a push that failed: a regular file (not a link) shorter than announcedSize, the
+// size the sender gave. A push without a size (0) is never taken as partial, nor a file that is complete.
+bool isPartOfFailedPush(const std::string &path, uint64_t announcedSize);
 
 #endif

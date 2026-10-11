@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <cctype>
 
+#include <sys/stat.h>
+
 namespace {
 
 // The element of path that starts with prefix followed by at least one digit, up to the next '/'.
@@ -93,4 +95,13 @@ std::string uniqueReceivedName(const std::string &name, const std::function<bool
 			return candidate;
 	}
 	return "";
+}
+
+bool isPartOfFailedPush(const std::string &path, uint64_t announcedSize)
+{
+	struct stat st;
+	// With no size given (0) no file is shorter.
+	if (lstat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+		return false;
+	return (uint64_t) st.st_size < announcedSize;
 }

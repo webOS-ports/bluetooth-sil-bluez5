@@ -55,6 +55,7 @@ private:
 	std::string mTransferObjPath;
 	std::string mFileName;
 	std::string mStoredName;	// a free name in obexd's folder, which the file is stored under
+	uint64_t mStoredSize = 0;	// the size the sender gave, 0 when none
 	std::map <BluetoothOppTransferId, uint64_t> mTransfersMap;
 };
 

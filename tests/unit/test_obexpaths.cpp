@@ -18,10 +18,14 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <set>
 #include <string>
 
 #include "obexpaths.h"
+
+#include <unistd.h>
 
 TEST(ObexPaths, SessionId)
 {
@@ -91,4 +95,28 @@ TEST(ObexPaths, UniqueReceivedName)
 
 	EXPECT_EQ(uniqueReceivedName(".hidden", exists), "");
 	EXPECT_EQ(uniqueReceivedName("x", [](const std::string &) { return true; }), "");
+}
+
+TEST(ObexPaths, PartOfFailedPush)
+{
+	char dir[] = "/tmp/obexpaths-XXXXXX";
+	ASSERT_NE(mkdtemp(dir), nullptr);
+	std::string file = std::string(dir) + "/part.bin", link = std::string(dir) + "/link.bin";
+	FILE *f = fopen(file.c_str(), "w");
+	ASSERT_NE(f, nullptr);
+	fputs("12345", f);
+	fclose(f);
+
+	EXPECT_TRUE(isPartOfFailedPush(file, 6));		// shorter than announced
+	EXPECT_FALSE(isPartOfFailedPush(file, 5));		// complete
+	EXPECT_FALSE(isPartOfFailedPush(file, 4));		// longer: not ours to judge
+	EXPECT_FALSE(isPartOfFailedPush(file, 0));		// no size given
+	EXPECT_FALSE(isPartOfFailedPush(std::string(dir) + "/none", 6));
+	EXPECT_FALSE(isPartOfFailedPush(dir, UINT64_MAX));	// a folder, whatever its size
+	ASSERT_EQ(symlink(file.c_str(), link.c_str()), 0);
+	EXPECT_FALSE(isPartOfFailedPush(link, UINT64_MAX));	// a link, even to a short file
+
+	unlink(link.c_str());
+	unlink(file.c_str());
+	rmdir(dir);
 }

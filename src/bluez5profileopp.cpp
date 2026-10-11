@@ -24,6 +24,7 @@
 #include "utils.h"
 #include "obexpaths.h"
 
+#include <glib/gstdio.h>
 #include <sys/stat.h>
 
 using namespace std::placeholders;
@@ -202,6 +203,7 @@ void Bluez5ProfileOpp::agentTransferConfirmationRequested(BluezObexAgent1 *inter
 	mTransferObjPath = request.transferPath;
 	mFileName = request.name;
 	mStoredName = storedName;
+	mStoredSize = request.size;
 
 	// Unanswered, obexd gives up after 60 s and then takes the push anyway, under the sender's name: refused here
 	// first. The observer's request stays; answering it later fails.
@@ -245,7 +247,15 @@ void Bluez5ProfileOpp::supplyTransferConfirmation(BluetoothOppTransferId transfe
 
 	if (accept)
 	{
-		auto resultCallBack = [this, alive = mLifetime.token(), transferId](BluetoothError /*error*/, uint64_t bytesTransferred,
+		// obexd removes a file whose push failed only while the PUT is still its current command. A sender that ends
+		// its session in the middle (DISCONNECT without ABORT, as obexd's own client does when its session is removed)
+		// makes the DISCONNECT the current command first (obexd/src/obex.c, cmd_disconnect, os_reset_session): the
+		// part received stayed, under the name of a received file. Removed here when the transfer reports failure and
+		// the file is shorter than the size the sender gave: a failure the SIL reports itself (its transfer object
+		// went first) can come after a complete file, which stays. Without a size nothing is removed.
+		const std::string storedPath = OPP_RECEIVE_FOLDER + "/" + mStoredName;
+		const uint64_t announcedSize = mStoredSize;
+		auto resultCallBack = [this, alive = mLifetime.token(), transferId, storedPath, announcedSize](BluetoothError error, uint64_t bytesTransferred,
 														   uint64_t /*totalSize*/, bool finished)
 		{
 			// Called back after the profile may have gone with its adapter.
@@ -253,6 +263,9 @@ void Bluez5ProfileOpp::supplyTransferConfirmation(BluetoothOppTransferId transfe
 			{
 				return;
 			}
+			if (error != BLUETOOTH_ERROR_NONE && isPartOfFailedPush(storedPath, announcedSize) &&
+			    g_unlink(storedPath.c_str()) == 0)
+				DEBUG("Removed %s, the part of a failed push", storedPath.c_str());
 			if (mTransfersMap[transferId])
 				getOppObserver()->transferStateChanged(transferId, bytesTransferred - mTransfersMap[transferId], finished);
 			else
