@@ -85,8 +85,11 @@ public:
 	void getNumberOfItems(BluetoothAvrcpBrowseTotalNumberOfItemsCallback callback) override;
 	void getFolderItems(uint32_t startIndex, uint32_t endIndex,
 						BluetoothAvrcpBrowseFolderItemsCallback callback) override;
+	// Return once the request went out; the variants with a callback report the remote device's answer.
 	BluetoothError changePath(const std::string &itemPath) override;
 	BluetoothError playItem(const std::string &itemPath) override;
+	void changePath(const std::string &itemPath, BluetoothResultCallback callback) override;
+	void playItem(const std::string &itemPath, BluetoothResultCallback callback) override;
 	BluetoothError addToNowPlaying(const std::string &itemPath) override;
 	void search(const std::string &searchString,
 				BluetoothAvrcpBrowseSearchListCallback callback) override;

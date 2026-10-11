@@ -18,7 +18,7 @@
 // replies to ChangeFolder, MediaItem1.Play, ListItems and the Set of a player setting until a test lets them go, as
 // BlueZ does until the remote device has answered: the SIL must not wait for them, the folder must refuse a second
 // request while one is out (BlueZ would fail it with EBUSY), and a reply that comes after the folder or player was
-// deleted must not touch it.
+// deleted must not touch it. ChangeFolder and Play report the device's answer to a callback when given one.
 
 #include <gtest/gtest.h>
 
@@ -427,6 +427,84 @@ TEST_F(MediaFolder, ListingHoldsTheFolderToo)
 	ASSERT_TRUE(runUntil([]() { return fakeBluez->held() == 1; }));
 }
 
+// The service answers its caller with what the device answered: success or failure, once, and only then.
+TEST_F(MediaFolder, ChangeFolderAndPlayReportTheDevicesAnswer)
+{
+	Bluez5MediaFolder folder(nullptr, PLAYER_PATH);
+	for (bool ok : { true, false })
+	{
+		int calls = 0;
+		BluetoothError result = BLUETOOTH_ERROR_PARAM_INVALID;
+		auto done = [&](BluetoothError error) {
+			++calls;
+			result = error;
+		};
+		EXPECT_EQ(folder.changePath(FOLDER_ITEM, done), BLUETOOTH_ERROR_NONE);
+		ASSERT_TRUE(runUntil([]() { return fakeBluez->held() == 1; }));
+		EXPECT_EQ(fakeBluez->lastMethod(), "ChangeFolder");
+		settle();
+		EXPECT_EQ(calls, 0);	// not before the device has answered
+		fakeBluez->answer(ok);
+		ASSERT_TRUE(runUntil([&calls]() { return calls > 0; }));
+		settle();
+		EXPECT_EQ(calls, 1);
+		EXPECT_EQ(result, ok ? BLUETOOTH_ERROR_NONE : BLUETOOTH_ERROR_FAIL);
+
+		calls = 0;
+		result = BLUETOOTH_ERROR_PARAM_INVALID;
+		EXPECT_EQ(folder.playItem(AUDIO_ITEM, done), BLUETOOTH_ERROR_NONE);
+		ASSERT_TRUE(runUntil([]() { return fakeBluez->held() == 1; }));
+		EXPECT_EQ(fakeBluez->lastMethod(), "Play");
+		settle();
+		EXPECT_EQ(calls, 0);
+		fakeBluez->answer(ok);
+		ASSERT_TRUE(runUntil([&calls]() { return calls > 0; }));
+		settle();
+		EXPECT_EQ(calls, 1);
+		EXPECT_EQ(result, ok ? BLUETOOTH_ERROR_NONE : BLUETOOTH_ERROR_FAIL);
+	}
+}
+
+// A request that was not sent is answered by the return value alone: the callback is not called as well.
+TEST_F(MediaFolder, RequestNotSentDoesNotCallBack)
+{
+	Bluez5MediaFolder folder(nullptr, PLAYER_PATH);
+	int calls = 0;
+	auto done = [&calls](BluetoothError) { ++calls; };
+	EXPECT_EQ(folder.changePath(AUDIO_ITEM, done), BLUETOOTH_ERROR_AVRCP_NOT_A_FOLDER);
+	EXPECT_EQ(folder.playItem(FOLDER_ITEM, done), BLUETOOTH_ERROR_AVRCP_ITEM_NOT_PLAYABLE);
+	EXPECT_EQ(folder.changePath(FOLDER_ITEM, done), BLUETOOTH_ERROR_NONE);
+	ASSERT_TRUE(runUntil([]() { return fakeBluez->held() == 1; }));
+	EXPECT_EQ(folder.changePath(FOLDER_ITEM, done), BLUETOOTH_ERROR_BUSY);
+	EXPECT_EQ(folder.playItem(AUDIO_ITEM, done), BLUETOOTH_ERROR_BUSY);
+	settle();
+	EXPECT_EQ(calls, 0);
+	fakeBluez->answer(true);
+	ASSERT_TRUE(runUntil([&calls]() { return calls > 0; }));
+	settle();
+	EXPECT_EQ(calls, 1);	// the one that went out
+}
+
+// The phone switched player before it answered: the caller still gets the answer, once, and the deleted folder is
+// not touched (AddressSanitizer reports it if it is).
+TEST_F(MediaFolder, AnswerReachesTheCallerAfterTheFolderWent)
+{
+	auto folder = new Bluez5MediaFolder(nullptr, PLAYER_PATH);
+	int calls = 0;
+	BluetoothError result = BLUETOOTH_ERROR_NONE;
+	EXPECT_EQ(folder->playItem(AUDIO_ITEM, [&](BluetoothError error) {
+		++calls;
+		result = error;
+	}), BLUETOOTH_ERROR_NONE);
+	ASSERT_TRUE(runUntil([]() { return fakeBluez->held() == 1; }));
+	delete folder;
+	fakeBluez->answer(false);
+	ASSERT_TRUE(runUntil([&calls]() { return calls > 0; }));
+	settle();
+	EXPECT_EQ(calls, 1);
+	EXPECT_EQ(result, BLUETOOTH_ERROR_FAIL);
+}
+
 TEST_F(MediaFolder, ItemChecksStayImmediate)
 {
 	Bluez5MediaFolder folder(nullptr, PLAYER_PATH);
@@ -581,4 +659,41 @@ TEST_F(MediaPlayer, PlayerGoneBeforeTheReply)
 	EXPECT_EQ(result, BLUETOOTH_ERROR_FAIL);
 	EXPECT_EQ(fakeBluez->sets().size(), 1u);
 	EXPECT_EQ(fakeBluez->held(), 0u);
+}
+
+// Through the player, as the profile calls it: the item path is relative to the device, and the callback reaches
+// the folder's request.
+TEST_F(MediaPlayer, BrowsingThroughThePlayerReportsTheAnswer)
+{
+	GDBusObjectSkeleton *object = g_dbus_object_skeleton_new(PLAYER_PATH);
+	BluezMediaFolder1 *folderInterface = bluez_media_folder1_skeleton_new();
+	g_dbus_object_skeleton_add_interface(object, G_DBUS_INTERFACE_SKELETON(folderInterface));
+	{
+		Bluez5MediaPlayer player(nullptr, G_DBUS_OBJECT(object));
+		const std::string folderItem = std::string(FOLDER_ITEM).substr(std::string(PLAYER_PATH).rfind('/') + 1);
+		const std::string audioItem = std::string(AUDIO_ITEM).substr(std::string(PLAYER_PATH).rfind('/') + 1);
+		int calls = 0;
+		BluetoothError result = BLUETOOTH_ERROR_NONE;
+		auto done = [&](BluetoothError error) {
+			++calls;
+			result = error;
+		};
+		EXPECT_EQ(player.changePath(folderItem, done), BLUETOOTH_ERROR_NONE);
+		ASSERT_TRUE(runUntil([]() { return fakeBluez->held() == 1; }));
+		EXPECT_EQ(fakeBluez->lastMethod(), "ChangeFolder");
+		fakeBluez->answer(false);
+		ASSERT_TRUE(runUntil([&calls]() { return calls > 0; }));
+		EXPECT_EQ(result, BLUETOOTH_ERROR_FAIL);
+
+		EXPECT_EQ(player.playItem(audioItem, done), BLUETOOTH_ERROR_NONE);
+		ASSERT_TRUE(runUntil([]() { return fakeBluez->held() == 1; }));
+		EXPECT_EQ(fakeBluez->lastMethod(), "Play");
+		fakeBluez->answer(true);
+		ASSERT_TRUE(runUntil([&calls]() { return calls > 1; }));
+		settle();
+		EXPECT_EQ(calls, 2);
+		EXPECT_EQ(result, BLUETOOTH_ERROR_NONE);
+	}
+	g_object_unref(folderInterface);
+	g_object_unref(object);
 }

@@ -740,7 +740,7 @@ void Bluez5MediaPlayer::getFolderItems(uint32_t startIndex, uint32_t endIndex,
 	mMediaFolder->getFolderItems(startIndex, endIndex, callback);
 }
 
-BluetoothError Bluez5MediaPlayer::changePath(const std::string &itemPath)
+BluetoothError Bluez5MediaPlayer::changePath(const std::string &itemPath, BluetoothResultCallback done)
 {
 	if (!mMediaFolder)
 	{
@@ -758,10 +758,10 @@ BluetoothError Bluez5MediaPlayer::changePath(const std::string &itemPath)
 	}
 	std::string finalItemPath = playerPath + itemPath;
 	DEBUG("ItemPath : %s", finalItemPath.c_str());
-	return mMediaFolder->changePath(finalItemPath);
+	return mMediaFolder->changePath(finalItemPath, done);
 }
 
-BluetoothError Bluez5MediaPlayer::playItem(const std::string &itemPath)
+BluetoothError Bluez5MediaPlayer::playItem(const std::string &itemPath, BluetoothResultCallback done)
 {
 	if (!mMediaFolder)
 	{
@@ -779,7 +779,7 @@ BluetoothError Bluez5MediaPlayer::playItem(const std::string &itemPath)
 	}
 	std::string finalItemPath = playerPath + itemPath;
 	DEBUG("ItemPath : %s", finalItemPath.c_str());
-	return mMediaFolder->playItem(finalItemPath);
+	return mMediaFolder->playItem(finalItemPath, done);
 }
 
 BluetoothError Bluez5MediaPlayer::addToNowPlaying(const std::string &itemPath)

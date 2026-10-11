@@ -39,11 +39,13 @@ public:
 	void getNumberOfItems(BluetoothAvrcpBrowseTotalNumberOfItemsCallback callback);
 	void getFolderItems(uint32_t startIndex, uint32_t endIndex,
 						BluetoothAvrcpBrowseFolderItemsCallback callback);
-	// Sent without waiting for the remote device: NONE means the request went out, and its outcome shows in the
-	// folder's Name (currentFolderReceived) and the player's status and track. BUSY while another browsing request
-	// of this folder is waiting for the remote device.
-	BluetoothError changePath(const std::string &itemPath);
-	BluetoothError playItem(const std::string &itemPath);
+	// Sent without waiting for the remote device. An error is returned, and done not called, when the request
+	// was not sent: BUSY while another browsing request of this folder is waiting for the remote device. On
+	// NONE the request went out, and done (if set) is called once with the device's answer, also when the folder
+	// is deleted before it. The outcome also shows in the folder's Name (currentFolderReceived) and the player's
+	// status and track.
+	BluetoothError changePath(const std::string &itemPath, BluetoothResultCallback done = BluetoothResultCallback());
+	BluetoothError playItem(const std::string &itemPath, BluetoothResultCallback done = BluetoothResultCallback());
 	BluetoothError addToNowPlaying(const std::string &itemPath);
 	void search(const std::string &searchString,
                 BluetoothAvrcpBrowseSearchListCallback callback);

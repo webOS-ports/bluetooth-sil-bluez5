@@ -340,7 +340,7 @@ BluetoothAvrcpItemType Bluez5MediaFolder::itemTypeStringToEnum(const std::string
 	return BluetoothAvrcpItemType::ITEM_TYPE_AUDIO;
 }
 
-BluetoothError Bluez5MediaFolder::changePath(const std::string &itemPath)
+BluetoothError Bluez5MediaFolder::changePath(const std::string &itemPath, BluetoothResultCallback done)
 {
 	GError *error = 0;
 	MediaItemRef mediaItemRef(bluez_media_item1_proxy_new_for_bus_sync(
@@ -381,19 +381,28 @@ BluetoothError Bluez5MediaFolder::changePath(const std::string &itemPath)
 	}
 
 	// BlueZ answers once the device has: waited for, a phone that did not answer held the whole service.
-	auto changeFolderCallback = [this, alive = mLifetime.token(), itemPath](GObject *source, GAsyncResult *result) {
+	// done gets the answer also when the folder went meanwhile: it needs nothing of the folder.
+	auto changeFolderCallback = [this, alive = mLifetime.token(), itemPath, done](GObject *source,
+																				   GAsyncResult *result) {
 		if (!alive.expired())
 			mBrowseRequestPending = false;
 		GError *error = 0;
 		gboolean ret = bluez_media_folder1_call_change_folder_finish(BLUEZ_MEDIA_FOLDER1(source), result, &error);
+		BluetoothError answer = BLUETOOTH_ERROR_NONE;
 		if (error)
 		{
 			ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Not able to change folder to %s: %s", itemPath.c_str(),
 				  error->message);
 			g_error_free(error);
+			answer = BLUETOOTH_ERROR_FAIL;
 		}
 		else if (!ret)
+		{
 			ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Not able to change folder to %s", itemPath.c_str());
+			answer = BLUETOOTH_ERROR_FAIL;
+		}
+		if (done)
+			done(answer);
 	};
 	mBrowseRequestPending = true;
 	bluez_media_folder1_call_change_folder(mFolderInterface, itemPath.c_str(), NULL, glibAsyncMethodWrapper,
@@ -401,7 +410,7 @@ BluetoothError Bluez5MediaFolder::changePath(const std::string &itemPath)
 	return BLUETOOTH_ERROR_NONE;
 }
 
-BluetoothError Bluez5MediaFolder::playItem(const std::string &itemPath)
+BluetoothError Bluez5MediaFolder::playItem(const std::string &itemPath, BluetoothResultCallback done)
 {
 	GError *error = 0;
 	MediaItemRef mediaItemRef(bluez_media_item1_proxy_new_for_bus_sync(
@@ -434,19 +443,26 @@ BluetoothError Bluez5MediaFolder::playItem(const std::string &itemPath)
 	}
 
 	// Answered once the device has, like ChangeFolder. The call holds its own reference to the item proxy.
-	auto playCallback = [this, alive = mLifetime.token(), itemPath](GObject *source, GAsyncResult *result) {
+	auto playCallback = [this, alive = mLifetime.token(), itemPath, done](GObject *source, GAsyncResult *result) {
 		if (!alive.expired())
 			mBrowseRequestPending = false;
 		GError *error = 0;
 		gboolean ret = bluez_media_item1_call_play_finish(BLUEZ_MEDIA_ITEM1(source), result, &error);
+		BluetoothError answer = BLUETOOTH_ERROR_NONE;
 		if (error)
 		{
 			ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Not able to play media item %s: %s", itemPath.c_str(),
 				  error->message);
 			g_error_free(error);
+			answer = BLUETOOTH_ERROR_FAIL;
 		}
 		else if (!ret)
+		{
 			ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Not able to play media item %s", itemPath.c_str());
+			answer = BLUETOOTH_ERROR_FAIL;
+		}
+		if (done)
+			done(answer);
 	};
 	mBrowseRequestPending = true;
 	bluez_media_item1_call_play(mediaItem, NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(playCallback));

@@ -709,6 +709,31 @@ BluetoothError Bluez5ProfileAvcrp::playItem(const std::string &itemPath)
 	return player->playItem(itemPath);
 }
 
+void Bluez5ProfileAvcrp::changePath(const std::string &itemPath, BluetoothResultCallback callback)
+{
+	Bluez5MediaPlayer *player = controllerPlayer(mDevices.currentDevice());
+	BluetoothError error = BLUETOOTH_ERROR_NOT_ALLOWED;
+	if (player)
+		error = player->changePath(itemPath, callback);
+	else
+		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Not connected as controller/addressed player not there");
+	// Not sent: the callback is not called by the folder.
+	if (error != BLUETOOTH_ERROR_NONE && callback)
+		callback(error);
+}
+
+void Bluez5ProfileAvcrp::playItem(const std::string &itemPath, BluetoothResultCallback callback)
+{
+	Bluez5MediaPlayer *player = controllerPlayer(mDevices.currentDevice());
+	BluetoothError error = BLUETOOTH_ERROR_NOT_ALLOWED;
+	if (player)
+		error = player->playItem(itemPath, callback);
+	else
+		ERROR(MSGID_AVRCP_PROFILE_ERROR, 0, "Not connected as controller/addressed player not there");
+	if (error != BLUETOOTH_ERROR_NONE && callback)
+		callback(error);
+}
+
 BluetoothError Bluez5ProfileAvcrp::addToNowPlaying(const std::string &itemPath)
 {
 	Bluez5MediaPlayer *player = controllerPlayer(mDevices.currentDevice());

@@ -61,8 +61,9 @@ public:
 	void getNumberOfItems(BluetoothAvrcpBrowseTotalNumberOfItemsCallback callback);
 	void getFolderItems(uint32_t startIndex, uint32_t endIndex,
 						BluetoothAvrcpBrowseFolderItemsCallback callback);
-	BluetoothError changePath(const std::string &itemPath);
-	BluetoothError playItem(const std::string &itemPath);
+	// As Bluez5MediaFolder's: an error without calling done when not sent, else done gets the device's answer.
+	BluetoothError changePath(const std::string &itemPath, BluetoothResultCallback done = BluetoothResultCallback());
+	BluetoothError playItem(const std::string &itemPath, BluetoothResultCallback done = BluetoothResultCallback());
 	BluetoothError addToNowPlaying(const std::string &itemPath);
 	void search(const std::string &searchString,
                 BluetoothAvrcpBrowseSearchListCallback callback);
