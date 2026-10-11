@@ -144,6 +144,7 @@ file(GLOB SOURCES
      src/gattlocal.cpp
      src/avrcpdevices.cpp
      src/gattnotify.cpp
+     src/gattdiscovery.cpp
      src/mediarole.cpp
      src/dbussignals.cpp
      src/obexpush.cpp

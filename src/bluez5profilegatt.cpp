@@ -26,6 +26,7 @@
 #include "bluez5profilegatt.h"
 #include "bluez5gattremoteattribute.h"
 #include "gattlocal.h"
+#include "gattdiscovery.h"
 
 const std::string BLUETOOTH_PROFILE_GATT_UUID = "00001801-0000-1000-8000-00805f9b34fb";
 
@@ -1127,13 +1128,29 @@ void Bluez5ProfileGatt::discoverServices(BluetoothResultCallback callback)
 		callback(BLUETOOTH_ERROR_FAIL);
 }
 
+// BlueZ discovers the services itself after a connect; this waits, up to 15 s, until it has (gattDiscoveryStep).
 void Bluez5ProfileGatt::discoverServices(const std::string &address, BluetoothResultCallback callback)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
-	if (deviceServices(address).size())
-		callback(BLUETOOTH_ERROR_NONE);
-	else
-		callback(BLUETOOTH_ERROR_FAIL);
+	const gint64 start = g_get_monotonic_time();
+	auto step = [this, alive = mLifetime.token(), address, callback, start]() {
+		if (alive.expired())	// the profile went with its adapter
+		{
+			callback(BLUETOOTH_ERROR_FAIL);
+			return false;
+		}
+		const Bluez5Device *device = mAdapter->findDevice(address);
+		const GattDiscoveryStep next = gattDiscoveryStep(device != nullptr, device && device->getConnected(),
+		                                                 device && device->getServicesResolved(),
+		                                                 !deviceServices(address).empty(),
+		                                                 (g_get_monotonic_time() - start) / 1000, 15000);
+		if (next == GattDiscoveryStep::Wait)
+			return true;
+		callback(next == GattDiscoveryStep::Done ? BLUETOOTH_ERROR_NONE : BLUETOOTH_ERROR_FAIL);
+		return false;
+	};
+	if (step())
+		glibTimeoutAdd(200, step);
 }
 
 void Bluez5ProfileGatt::writeDescriptor(const std::string &address, const BluetoothUuid &service, const BluetoothUuid &characteristic,

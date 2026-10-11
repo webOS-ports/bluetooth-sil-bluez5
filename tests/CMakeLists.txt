@@ -31,6 +31,7 @@ set(PARSER_SOURCES
     ${PROJECT_SOURCE_DIR}/src/meshconfig.cpp
     ${PROJECT_SOURCE_DIR}/src/avrcpdevices.cpp
     ${PROJECT_SOURCE_DIR}/src/gattnotify.cpp
+    ${PROJECT_SOURCE_DIR}/src/gattdiscovery.cpp
 )
 
 file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/unit/*.cpp)

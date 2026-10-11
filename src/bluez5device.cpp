@@ -252,6 +252,10 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 		mConnected = g_variant_get_boolean(valueVar);
 		changed = true;
 	}
+	else if (key == "ServicesResolved")
+	{
+		mServicesResolved = g_variant_get_boolean(valueVar);
+	}
 	else if (key == "ConnectedUUIDS")
 	{
 		auto prevConnectedUuis = mConnectedUuids;
