@@ -197,3 +197,19 @@ TEST(MeshConfig, NetworkToken)
 	EXPECT_FALSE(parseMeshToken("000000000000000000001", token));	// 21 digits
 	EXPECT_EQ(token, 7u);	// left alone on failure
 }
+
+TEST(MeshConfig, AttachErrors)
+{
+	// Only meshd's "no node for this token" lets the service drop the network it stored.
+	EXPECT_EQ(meshAttachErrorToError("org.bluez.mesh.Error.NotFound"), BLUETOOTH_ERROR_MESH_NODE_NOT_AVAILABLE);
+	EXPECT_EQ(meshAttachErrorToError("org.bluez.mesh.Error.Busy"), BLUETOOTH_ERROR_BUSY);
+	// meshd's other Attach errors, and the bus's when meshd is not there or did not answer.
+	for (const char *name : {"org.bluez.mesh.Error.Failed", "org.bluez.mesh.Error.AlreadyExists",
+							 "org.bluez.mesh.Error.InvalidArgs", "org.bluez.mesh.Error.DoesNotExist",
+							 "org.bluez.mesh.Error.NotAuthorized", "org.bluez.Error.NotFound",
+							 "org.bluez.mesh.Error.NotFoundX", "org.bluez.mesh.Error.Not",
+							 "org.freedesktop.DBus.Error.ServiceUnknown", "org.freedesktop.DBus.Error.NoReply",
+							 "org.freedesktop.DBus.Error.Timeout", "org.freedesktop.DBus.Error.UnknownObject", ""})
+		EXPECT_EQ(meshAttachErrorToError(name), BLUETOOTH_ERROR_FAIL) << name;
+	EXPECT_EQ(meshAttachErrorToError(nullptr), BLUETOOTH_ERROR_FAIL);	// no D-Bus error: local, or a timeout
+}

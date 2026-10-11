@@ -222,8 +222,12 @@ BluetoothError Bluez5MeshAdv::attach()
 		if (error)
 		{
 			ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Attach failed: %s", error->message);
+			// Which error it was: NotFound (meshd lost the node) lets the service drop the network it stored;
+			// anything else does not.
+			gchar *name = g_dbus_error_get_remote_error(error);
+			status = meshAttachErrorToError(name);
+			g_free(name);
 			g_error_free(error);
-			status = BLUETOOTH_ERROR_FAIL;
 		}
 		else
 		{

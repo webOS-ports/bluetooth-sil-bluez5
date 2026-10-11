@@ -88,6 +88,13 @@ bool isOnOffStatusFor(uint32_t opcode, uint16_t src, uint16_t dest);
 // about 136 years, large ones overflowed when made milliseconds.
 int32_t clampWaitSeconds(int32_t seconds);
 
+// An Attach meshd answered with an error, by the D-Bus error name (NULL when the call failed without a reply from
+// meshd), as the SIL's error. Only org.bluez.mesh.Error.NotFound says that meshd knows no node for the token (meshd
+// 5.86 mesh/mesh.c attach_call, mesh/node.c node_attach): that is BLUETOOTH_ERROR_MESH_NODE_NOT_AVAILABLE, on which
+// the service gives the stored network up. Everything else (meshd not there, no reply, busy, the node in use, a
+// failed application) leaves the network as it is: BLUETOOTH_ERROR_BUSY for Busy, else BLUETOOTH_ERROR_FAIL.
+BluetoothError meshAttachErrorToError(const char *dbusErrorName);
+
 // A mesh network token as the service stores it (std::to_string of the 64-bit token meshd gave): decimal digits
 // only, within 64 bits. std::stoull threw on anything else, which took the service down, and took "-1" and " 1".
 bool parseMeshToken(const std::string &token, uint64_t &out);

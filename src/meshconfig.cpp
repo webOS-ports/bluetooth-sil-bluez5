@@ -66,6 +66,18 @@ BluetoothError meshStatusToError(uint8_t status)
 	}
 }
 
+BluetoothError meshAttachErrorToError(const char *dbusErrorName)
+{
+	if (!dbusErrorName)
+		return BLUETOOTH_ERROR_FAIL;
+	const std::string name(dbusErrorName);
+	if (name == "org.bluez.mesh.Error.NotFound")
+		return BLUETOOTH_ERROR_MESH_NODE_NOT_AVAILABLE;
+	if (name == "org.bluez.mesh.Error.Busy")
+		return BLUETOOTH_ERROR_BUSY;
+	return BLUETOOTH_ERROR_FAIL;
+}
+
 bool parseAppKeyStatus(const uint8_t *data, size_t len, MeshAppKeyStatus &out)
 {
 	if (!data || len != 4)
