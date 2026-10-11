@@ -147,11 +147,18 @@ def start_provisioner():
     if not SHARED:
         run('btmgmt', '--index', '1', 'power', 'off')
         run('hciconfig', 'hci1', 'down')
-    start_unit('mesh-scn-prov', [MESHD, '--nodetach', '--debug'] + PROV_ARGS)
-    end = time.time() + 10
-    while time.time() < end and not active('mesh-scn-prov'):
-        settle(0.2)
-    settle(2.0)
+    # Up to three starts: right after a meshd let go of hci1, the next one now and then found no such controller
+    # ("Failed to read info for hci index 1: Invalid Index") and exited; a moment later it starts.
+    for attempt in range(3):
+        if attempt:
+            settle(2.0)
+        start_unit('mesh-scn-prov', [MESHD, '--nodetach', '--debug'] + PROV_ARGS)
+        end = time.time() + 10
+        while time.time() < end and not active('mesh-scn-prov'):
+            settle(0.2)
+        settle(2.0)
+        if active('mesh-scn-prov'):
+            break
     check(active('mesh-scn-prov'), 'the provisioner meshd did not start')
 
 
