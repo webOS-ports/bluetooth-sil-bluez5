@@ -52,6 +52,8 @@ private:
 	Bluez5Adapter *mAdapter;
 	LifetimeGuard mLifetime;
 	void connectWithObex();
+	void createSessionAttempt(Bluez5ObexSession::Type type, const std::string &deviceAddress,
+	                          const Bluez5ObexSessionCreateCallback &callback, const std::string &instanceName, bool mayRetry);
 
 	void createProxy();
 	void destroyProxy();

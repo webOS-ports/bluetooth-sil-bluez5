@@ -120,3 +120,13 @@ TEST(ObexPaths, PartOfFailedPush)
 	unlink(file.c_str());
 	rmdir(dir);
 }
+
+TEST(ObexPaths, TransientObexConnectError)
+{
+	EXPECT_TRUE(isTransientObexConnectError("GDBus.Error:org.bluez.obex.Error.Failed: Unable to find service record"));
+	EXPECT_TRUE(isTransientObexConnectError("GDBus.Error:org.bluez.obex.Error.Failed: Connection timed out (110)"));
+	EXPECT_TRUE(isTransientObexConnectError("GDBus.Error:org.bluez.obex.Error.Failed: Host is down (112)"));
+	EXPECT_FALSE(isTransientObexConnectError("GDBus.Error:org.bluez.obex.Error.Failed: Connection refused (111)"));
+	EXPECT_FALSE(isTransientObexConnectError("GDBus.Error:org.bluez.obex.Error.InvalidArguments: Invalid target"));
+	EXPECT_FALSE(isTransientObexConnectError(""));
+}

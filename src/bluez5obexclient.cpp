@@ -21,6 +21,7 @@
 #include "logging.h"
 #include "bluez5busconfig.h"
 #include "bluez5adapter.h"
+#include "obexpaths.h"
 
 
 Bluez5ObexClient::Bluez5ObexClient(Bluez5Adapter *adapter) :
@@ -140,6 +141,15 @@ std::string sessionTypeToString(Bluez5ObexSession::Type type)
 
 void Bluez5ObexClient::createSession(Bluez5ObexSession::Type type, const std::string &deviceAddress, Bluez5ObexSessionCreateCallback callback, const std::string &instanceName)
 {
+	createSessionAttempt(type, deviceAddress, callback, instanceName, true);
+}
+
+// A transient failure (isTransientObexConnectError) is tried once more after 2 s: right after a previous session's
+// link closed, obexd's SDP lookup or connect to the same device failed now and then, and a moment later worked.
+void Bluez5ObexClient::createSessionAttempt(Bluez5ObexSession::Type type, const std::string &deviceAddress,
+                                            const Bluez5ObexSessionCreateCallback &callback, const std::string &instanceName,
+                                            bool mayRetry)
+{
 	if (!mClientProxy)
 	{
 		callback(0);
@@ -149,7 +159,7 @@ void Bluez5ObexClient::createSession(Bluez5ObexSession::Type type, const std::st
 	// Finished on the proxy the call was made on: when obexd went away meanwhile, mClientProxy was NULL or
 	// another proxy, the finish failed without setting an error, and the NULL path became a std::string, which
 	// throws through GLib and ends the service.
-	auto createSessionCallback = [this, alive = mLifetime.token(), callback, type, deviceAddress](GObject *source, GAsyncResult *result) {
+	auto createSessionCallback = [this, alive = mLifetime.token(), callback, type, deviceAddress, instanceName, mayRetry](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 		gchar *objectPath = 0;
@@ -163,8 +173,20 @@ void Bluez5ObexClient::createSession(Bluez5ObexSession::Type type, const std::st
 		}
 		if (!ret || error || !objectPath)
 		{
-			ERROR(MSGID_FAILED_TO_CREATE_OBEX_SESSION_PROXY, 0, "Failed to create OBEX session with %s: %s",
-			      deviceAddress.c_str(), error ? error->message : "no session path");
+			const bool retry = mayRetry && error && isTransientObexConnectError(error->message);
+			ERROR(MSGID_FAILED_TO_CREATE_OBEX_SESSION_PROXY, 0, "Failed to create OBEX session with %s: %s%s",
+			      deviceAddress.c_str(), error ? error->message : "no session path", retry ? " (trying again)" : "");
+			if (retry)
+			{
+				g_clear_error(&error);
+				g_free(objectPath);
+				glibTimeoutAdd(2000, [this, alive, type, deviceAddress, callback, instanceName]() {
+					if (!alive.expired())
+						createSessionAttempt(type, deviceAddress, callback, instanceName, false);
+					return false;
+				});
+				return;
+			}
 			g_clear_error(&error);
 			g_free(objectPath);
 			callback(0);

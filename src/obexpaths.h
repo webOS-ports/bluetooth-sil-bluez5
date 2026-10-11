@@ -49,4 +49,9 @@ std::string uniqueReceivedName(const std::string &name, const std::function<bool
 // size the sender gave. A push without a size (0) is never taken as partial, nor a file that is complete.
 bool isPartOfFailedPush(const std::string &path, uint64_t announcedSize);
 
+// Whether obexd's answer to CreateSession (its message) is a failure that a second try a moment later may not have:
+// the SDP lookup of the remote found no record, or connecting timed out or found the host down. Seen right after a
+// previous session's link closed. Any other failure is final.
+bool isTransientObexConnectError(const std::string &message);
+
 #endif

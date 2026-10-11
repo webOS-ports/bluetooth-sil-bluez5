@@ -105,3 +105,14 @@ bool isPartOfFailedPush(const std::string &path, uint64_t announcedSize)
 		return false;
 	return (uint64_t) st.st_size < announcedSize;
 }
+
+bool isTransientObexConnectError(const std::string &message)
+{
+	// obexd/client/bluetooth.c (SDP) and btio's connect errors, "<strerror> (<errno>)".
+	for (const char *transient : {"Unable to find service record", "Connection timed out", "Host is down"})
+	{
+		if (message.find(transient) != std::string::npos)
+			return true;
+	}
+	return false;
+}
