@@ -29,7 +29,9 @@
 static const gint LOCAL_CALL_TIMEOUT_MS = 3000;
 
 // A MediaItem1 proxy, owned for the scope: one leaked per changePath/playItem/addToNowPlaying, each with its own
-// match rule on the bus.
+// match rule on the bus. Made synchronously: its properties (from bluetoothd's cache, not the device) decide whether
+// the request can be sent at all (not a folder, not playable), which changePath(itemPath) and playItem(itemPath)
+// must return.
 typedef GObjectRef<BluezMediaItem1> MediaItemRef;
 
 Bluez5MediaFolder::Bluez5MediaFolder(Bluez5ProfileAvcrp *avrcp,

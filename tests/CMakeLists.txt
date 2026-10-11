@@ -50,10 +50,12 @@ target_link_libraries(bluez5-sil-glib-tests ${GTEST_MAIN_LIBRARY} ${GTEST_LIBRAR
     ${GLIB2_LDFLAGS} ${GIO2_LDFLAGS} ${PMLOG_LDFLAGS} pthread)
 add_test(NAME bluez5-sil-glib COMMAND bluez5-sil-glib-tests)
 
-# The AVRCP browsing folder and player against a fake bluetoothd on a private bus (needs dbus-daemon at run time).
+# The AVRCP browsing folder and player, the MPRIS player's registration and SelectRole against a fake bluetoothd on a
+# private bus (needs dbus-daemon at run time).
 add_executable(bluez5-sil-media-tests ${CMAKE_CURRENT_SOURCE_DIR}/media/test_avrcpmedia.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/glib/support.cpp
     ${PROJECT_SOURCE_DIR}/src/bluez5mediafolder.cpp ${PROJECT_SOURCE_DIR}/src/bluez5mediaplayer.cpp
+    ${PROJECT_SOURCE_DIR}/src/bluez5mprisplayer.cpp ${PROJECT_SOURCE_DIR}/src/mediarole.cpp
     ${PROJECT_SOURCE_DIR}/src/asyncutils.cpp ${PROJECT_SOURCE_DIR}/src/utils.cpp
     ${GDBUS_IF_DIR}/bluez-interface.c ${GDBUS_IF_DIR}/freedesktop-interface.c)
 target_include_directories(bluez5-sil-media-tests PRIVATE ${PROJECT_SOURCE_DIR}/src ${GDBUS_IF_DIR})

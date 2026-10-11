@@ -17,9 +17,8 @@
 #include "mpristime.h"
 #include "glib.h"
 #include "bluez5mprisplayer.h"
-#include "bluez5adapter.h"
 #include "logging.h"
-#include "bluez5sil.h"
+#include "asyncutils.h"
 #include <bluetooth-sil-api.h>
 #include <string>
 #include <map>
@@ -37,14 +36,15 @@ std::map <BluetoothMediaPlayStatus::MediaPlayStatus, std::string> mediaPlayStatu
 	{ BluetoothMediaPlayStatus::MEDIA_PLAYSTATUS_REV_SEEK, "reverse-seek"}
 };
 
-Bluez5MprisPlayer::Bluez5MprisPlayer(BluezMedia1 *media, Bluez5Adapter *adapter):
+Bluez5MprisPlayer::Bluez5MprisPlayer(BluezMedia1 *media, const std::string &adapterPath):
 mBusId(0),
 mConn(nullptr),
-mAdapter(adapter),
+mPlayerPath(adapterPath + BLUEZ5_MEDIA_PLAYER_PATH),
 mMediaProxy(media),
 mPlayerInterface(0),
 mTrackNumber(0),
-mLength(0)
+mLength(0),
+mRegistered(false)
 {
 		mBusId = g_bus_own_name(G_BUS_TYPE_SYSTEM, BLUEZ5_MEDIA_PLAYER_BUS_NAME,
 				G_BUS_NAME_OWNER_FLAGS_NONE,
@@ -80,9 +80,8 @@ void Bluez5MprisPlayer::createInterface()
 	mPlayerInterface = bluez_org_mpris_media_player2_player_skeleton_new();
 	GError *error = 0;
 
-	std::string path = mAdapter->getObjectPath() + BLUEZ5_MEDIA_PLAYER_PATH;
 	if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(mPlayerInterface), mConn,
-                                          path.c_str(), &error))
+                                          mPlayerPath.c_str(), &error))
 	{
 		DEBUG("Failed to initialize agent on bus: %s",error->message);
 		g_error_free(error);
@@ -93,24 +92,52 @@ void Bluez5MprisPlayer::createInterface()
 
 void Bluez5MprisPlayer::registerPlayer()
 {
+	if (!mMediaProxy)
+		return;
+
 	GVariantBuilder *builder = 0;
 	GVariant *arguments = 0;
 	builder = g_variant_builder_new (G_VARIANT_TYPE ("a{sv}"));
 	arguments = g_variant_builder_end (builder);
 	g_variant_builder_unref(builder);
 
-	std::string path = mAdapter->getObjectPath() + BLUEZ5_MEDIA_PLAYER_PATH;
-	bool ret = bluez_media1_call_register_player_sync(mMediaProxy, path.c_str(), arguments, NULL, NULL);
-	if (!ret)
-	{
-		ERROR(MSGID_MEDIA_PLAYER_ERROR, 0, "Registration of player failed");
-	}
+	// Not waited for: the service's only main loop stood still while bluetoothd (or a hung one, for the default
+	// 25 s) answered. Nothing waits for the result; it is logged, and kept for unRegisterPlayer().
+	auto registerCallback = [this, alive = mLifetime.token(), path = mPlayerPath](GObject *source,
+																					GAsyncResult *result) {
+		GError *error = 0;
+		gboolean ret = bluez_media1_call_register_player_finish(BLUEZ_MEDIA1(source), result, &error);
+		if (!ret || error)
+		{
+			ERROR(MSGID_MEDIA_PLAYER_ERROR, 0, "Registration of player %s failed: %s", path.c_str(),
+				  error ? error->message : "no reply");
+			g_clear_error(&error);
+			return;
+		}
+		if (!alive.expired())
+			mRegistered = true;
+	};
+	bluez_media1_call_register_player(mMediaProxy, mPlayerPath.c_str(), arguments, NULL, glibAsyncMethodWrapper,
+									  new GlibAsyncFunctionWrapper(registerCallback));
 }
 
-gboolean Bluez5MprisPlayer::unRegisterPlayer()
+void Bluez5MprisPlayer::unRegisterPlayer()
 {
-	std::string path = mAdapter->getObjectPath() + BLUEZ5_MEDIA_PLAYER_PATH;
-	return bluez_media1_call_unregister_player_sync(mMediaProxy,  path.c_str(), NULL, NULL);
+	if (!mMediaProxy || !mRegistered)
+		return;
+	mRegistered = false;
+	// Not waited for, like RegisterPlayer.
+	auto unregisterCallback = [path = mPlayerPath](GObject *source, GAsyncResult *result) {
+		GError *error = 0;
+		if (!bluez_media1_call_unregister_player_finish(BLUEZ_MEDIA1(source), result, &error) || error)
+		{
+			ERROR(MSGID_MEDIA_PLAYER_ERROR, 0, "Unregistration of player %s failed: %s", path.c_str(),
+				  error ? error->message : "no reply");
+			g_clear_error(&error);
+		}
+	};
+	bluez_media1_call_unregister_player(mMediaProxy, mPlayerPath.c_str(), NULL, glibAsyncMethodWrapper,
+										new GlibAsyncFunctionWrapper(unregisterCallback));
 }
 
 bool Bluez5MprisPlayer::setMediaPlayStatus(const BluetoothMediaPlayStatus &status)

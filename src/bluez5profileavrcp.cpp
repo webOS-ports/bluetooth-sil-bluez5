@@ -104,6 +104,9 @@ void Bluez5ProfileAvcrp::handleBluezServiceStarted(GDBusConnection* conn, const 
 	Bluez5ProfileAvcrp* avrcp = static_cast<Bluez5ProfileAvcrp*>(user_data);
 
 	GError* error = 0;
+	// Synchronous on purpose: GetManagedObjects, once per start of bluetoothd, answered by bluetoothd from its own
+	// object tree without asking a remote device, and nothing of this profile works before it. Asynchronous, a
+	// reply could come after bluetoothd went or came back again, for a manager that is no longer the current one.
 	avrcp->mObjectManager = g_dbus_object_manager_client_new_sync(conn, G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
 		"org.bluez", "/", NULL, NULL, NULL, NULL, &error);
 	if (error)

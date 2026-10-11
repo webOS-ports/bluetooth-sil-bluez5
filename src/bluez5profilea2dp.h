@@ -77,7 +77,11 @@ private:
 	void clearTransports();
 	void releaseObjectManager();
 	Bluez5Device *findTransportDevice(BluezMediaTransport1 *transport);
-	void updateTransportProperties(FreeDesktopDBusProperties *properties);
+	void updateTransportProperties(BluezMediaTransport1 *transport);
+#ifdef WEBOS_AUTO
+	void selectRole(BluezMedia1 *mediaProxy, const std::string &role, const std::string &uuid,
+					BluetoothResultCallback callback);
+#endif
 
 	bool mConnected;
 	GDBusObjectManager *mObjectManager;

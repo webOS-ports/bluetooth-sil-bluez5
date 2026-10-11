@@ -31,7 +31,10 @@
 
 #include "bluez5mediafolder.h"
 #include "bluez5mediaplayer.h"
+#include "bluez5mprisplayer.h"
 #include "bluez5profileavrcp.h"
+#include "mediarole.h"
+#include "utils.h"
 
 // The folder and player report through the profile only on property changes, which the fake never sends: the
 // profile is never used.
@@ -56,6 +59,8 @@ const char *FOLDER_ITEM = "/org/bluez/hci0/dev_00_11_22_33_44_55/player0/Filesys
 const char *AUDIO_ITEM = "/org/bluez/hci0/dev_00_11_22_33_44_55/player0/Filesystem/item2";
 // A player whose org.freedesktop.DBus.Properties the fake handles itself, to hold a Set.
 const char *SETTINGS_PLAYER_PATH = "/org/bluez/hci0/dev_00_11_22_33_44_55/player1";
+// The adapter's org.bluez.Media1 (RegisterPlayer, SelectRole).
+const char *ADAPTER_PATH = "/org/bluez/hci0";
 
 const char *INTROSPECTION =
 	"<node>"
@@ -79,6 +84,18 @@ const char *INTROSPECTION =
 	"    <method name='AddtoNowPlaying'/>"
 	"    <property name='Type' type='s' access='read'/>"
 	"    <property name='Playable' type='b' access='read'/>"
+	"  </interface>"
+	"  <interface name='org.bluez.Media1'>"
+	"    <method name='RegisterPlayer'>"
+	"      <arg name='player' type='o' direction='in'/>"
+	"      <arg name='properties' type='a{sv}' direction='in'/>"
+	"    </method>"
+	"    <method name='UnregisterPlayer'>"
+	"      <arg name='player' type='o' direction='in'/>"
+	"    </method>"
+	"    <method name='SelectRole'>"
+	"      <arg name='role' type='s' direction='in'/>"
+	"    </method>"
 	"  </interface>"
 	"  <interface name='org.freedesktop.DBus.Properties'>"
 	"    <method name='Get'>"
@@ -133,6 +150,13 @@ public:
 		return mLastMethod;
 	}
 
+	// The arguments of the last held call, as g_variant_print shows them.
+	std::string lastArguments()
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+		return mLastArguments;
+	}
+
 	// The settings asked for, "Name=value", in order.
 	std::vector<std::string> sets()
 	{
@@ -166,6 +190,20 @@ public:
 			g_dbus_method_invocation_return_value(invocation, nullptr);
 	}
 
+	// Answers the oldest held call with this D-Bus error.
+	void answerError(const char *name)
+	{
+		GDBusMethodInvocation *invocation = nullptr;
+		{
+			std::lock_guard<std::mutex> lock(mMutex);
+			if (mHeld.empty())
+				return;
+			invocation = mHeld.front();
+			mHeld.erase(mHeld.begin());
+		}
+		g_dbus_method_invocation_return_dbus_error(invocation, name, "refused");
+	}
+
 private:
 	static gpointer run(gpointer data)
 	{
@@ -194,6 +232,9 @@ private:
 				g_dbus_node_info_lookup_interface(node, "org.bluez.MediaItem1"), &vtable, self, nullptr, &error));
 			g_assert_no_error(error);
 		}
+		ids.push_back(g_dbus_connection_register_object(conn, ADAPTER_PATH,
+			g_dbus_node_info_lookup_interface(node, "org.bluez.Media1"), &vtable, self, nullptr, &error));
+		g_assert_no_error(error);
 		ids.push_back(g_dbus_connection_register_object(conn, SETTINGS_PLAYER_PATH,
 			g_dbus_node_info_lookup_interface(node, "org.freedesktop.DBus.Properties"), &vtable, self, nullptr,
 			&error));
@@ -246,6 +287,9 @@ private:
 		}
 		std::lock_guard<std::mutex> lock(self->mMutex);
 		self->mLastMethod = name;
+		gchar *arguments = g_variant_print(parameters, FALSE);
+		self->mLastArguments = arguments;
+		g_free(arguments);
 		if (name == "Set")
 		{
 			const gchar *property = nullptr;
@@ -278,6 +322,7 @@ private:
 	std::mutex mMutex;
 	std::vector<GDBusMethodInvocation *> mHeld;
 	std::string mLastMethod;
+	std::string mLastArguments;
 	std::vector<std::string> mSets;
 };
 
@@ -696,4 +741,132 @@ TEST_F(MediaPlayer, BrowsingThroughThePlayerReportsTheAnswer)
 	}
 	g_object_unref(folderInterface);
 	g_object_unref(object);
+}
+
+namespace {
+
+class Media : public ::testing::Test
+{
+protected:
+	void SetUp() override
+	{
+		GError *error = nullptr;
+		mMedia = bluez_media1_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, "org.bluez",
+			ADAPTER_PATH, nullptr, &error);
+		ASSERT_EQ(error, nullptr);
+	}
+
+	void TearDown() override
+	{
+		while (fakeBluez->held())
+			fakeBluez->answer(true);
+		settle();
+		g_object_unref(mMedia);
+	}
+
+	BluezMedia1 *mMedia = nullptr;
+};
+
+} // namespace
+
+// The MPRIS player is registered with bluetoothd once it owns its bus name, without the main loop waiting for the
+// answer (it held the whole service until bluetoothd replied, 25 s when it hung).
+TEST_F(Media, PlayerRegistrationDoesNotWait)
+{
+	Bluez5MprisPlayer player(mMedia, ADAPTER_PATH);
+	gint64 start = g_get_monotonic_time();
+	ASSERT_TRUE(runUntil([]() { return fakeBluez->held() == 1; }));
+	EXPECT_LT(g_get_monotonic_time() - start, 2 * G_USEC_PER_SEC);
+	EXPECT_EQ(fakeBluez->lastMethod(), "RegisterPlayer");
+	EXPECT_EQ(fakeBluez->lastArguments(), "('/org/bluez/hci0/mpris/MediaPlayer2', {})");
+	settle();
+	EXPECT_FALSE(player.isRegistered());
+
+	fakeBluez->answer(true);
+	ASSERT_TRUE(runUntil([&player]() { return player.isRegistered(); }));
+
+	// Unregistered the same way.
+	start = g_get_monotonic_time();
+	player.unRegisterPlayer();
+	EXPECT_LT(g_get_monotonic_time() - start, G_USEC_PER_SEC);
+	EXPECT_FALSE(player.isRegistered());
+	ASSERT_TRUE(runUntil([]() { return fakeBluez->held() == 1; }));
+	EXPECT_EQ(fakeBluez->lastMethod(), "UnregisterPlayer");
+	fakeBluez->answer(true);
+	settle();
+}
+
+TEST_F(Media, RefusedRegistrationIsNotTakenForDone)
+{
+	Bluez5MprisPlayer player(mMedia, ADAPTER_PATH);
+	ASSERT_TRUE(runUntil([]() { return fakeBluez->held() == 1; }));
+	fakeBluez->answerError("org.bluez.Error.InvalidArguments");
+	settle();
+	EXPECT_FALSE(player.isRegistered());
+	player.unRegisterPlayer();	// nothing to unregister
+	settle();
+	EXPECT_EQ(fakeBluez->held(), 0u);
+}
+
+// The adapter went (and its player with it) before bluetoothd answered: the reply does not touch the deleted
+// player (AddressSanitizer reports it if it does).
+TEST_F(Media, RegistrationAnsweredAfterThePlayerWent)
+{
+	auto player = new Bluez5MprisPlayer(mMedia, ADAPTER_PATH);
+	ASSERT_TRUE(runUntil([]() { return fakeBluez->held() == 1; }));
+	delete player;
+	fakeBluez->answer(true);
+	settle();
+	EXPECT_EQ(fakeBluez->held(), 0u);
+}
+
+// SelectRole (WEBOS_AUTO builds) without waiting: the caller learns the answer from the callback, once; the role
+// the adapter already has counts as success.
+TEST_F(Media, SelectRoleReportsTheAnswer)
+{
+	struct Case
+	{
+		const char *error;	// nullptr: success
+		BluetoothError expected;
+	};
+	for (const Case &c : { Case { nullptr, BLUETOOTH_ERROR_NONE },
+						   Case { "org.bluez.Error.AlreadyExists", BLUETOOTH_ERROR_NONE },
+						   Case { "org.bluez.Error.Failed", BLUETOOTH_ERROR_FAIL },
+						   Case { "org.bluez.Error.NotSupported", BLUETOOTH_ERROR_FAIL } })
+	{
+		int calls = 0;
+		BluetoothError result = BLUETOOTH_ERROR_PARAM_INVALID;
+		gint64 start = g_get_monotonic_time();
+		selectMediaRole(mMedia, "sink", [&](BluetoothError error) {
+			++calls;
+			result = error;
+		});
+		EXPECT_LT(g_get_monotonic_time() - start, G_USEC_PER_SEC);
+		ASSERT_TRUE(runUntil([]() { return fakeBluez->held() == 1; }));
+		EXPECT_EQ(fakeBluez->lastMethod(), "SelectRole");
+		EXPECT_EQ(fakeBluez->lastArguments(), "('sink',)");
+		EXPECT_EQ(calls, 0);
+		if (c.error)
+			fakeBluez->answerError(c.error);
+		else
+			fakeBluez->answer(true);
+		ASSERT_TRUE(runUntil([&calls]() { return calls > 0; }));
+		settle();
+		EXPECT_EQ(calls, 1);
+		EXPECT_EQ(result, c.expected) << (c.error ? c.error : "success");
+	}
+}
+
+// What the A2DP profile reads a transport's UUID with, instead of a second, synchronous GetAll.
+TEST(CachedStringProperty, ReadsOnlyCachedStrings)
+{
+	GError *error = nullptr;
+	GDBusProxy *item = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr,
+		"org.bluez", AUDIO_ITEM, "org.bluez.MediaItem1", nullptr, &error);
+	ASSERT_EQ(error, nullptr);
+	EXPECT_EQ(cachedStringProperty(item, "Type"), "audio");
+	EXPECT_EQ(cachedStringProperty(item, "Playable"), "");	// a boolean
+	EXPECT_EQ(cachedStringProperty(item, "UUID"), "");	// not there
+	EXPECT_EQ(cachedStringProperty(nullptr, "Type"), "");
+	g_object_unref(item);
 }

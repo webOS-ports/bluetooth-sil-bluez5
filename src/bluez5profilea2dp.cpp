@@ -18,6 +18,7 @@
 #include "logging.h"
 #include "bluez5profilea2dp.h"
 #include "utils.h"
+#include "mediarole.h"
 
 const std::string BLUETOOTH_PROFILE_A2DP_SOURCE_UUID = "0000110a-0000-1000-8000-00805f9b34fb";
 const std::string BLUETOOTH_PROFILE_A2DP_SINK_UUID = "0000110b-0000-1000-8000-00805f9b34fb";
@@ -63,6 +64,8 @@ void Bluez5ProfileA2dp::addTransport(const std::string &objectPath)
 		return;
 
 	GError *error = 0;
+	// The proxies are made synchronously (each fetches the object's properties with a GetAll that bluetoothd answers
+	// itself): the transport is used as soon as it is in mTransports, by calls that cannot wait for it.
 	BluezMediaTransport1 *transport = bluez_media_transport1_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM,
 	                                  G_DBUS_PROXY_FLAGS_NONE, "org.bluez", objectPath.c_str(), NULL, &error);
 	if (!transport)
@@ -84,7 +87,7 @@ void Bluez5ProfileA2dp::addTransport(const std::string &objectPath)
 
 	g_signal_connect(G_OBJECT(properties), "properties-changed", G_CALLBACK(handlePropertiesChanged), this);
 	mTransports[objectPath] = {transport, properties};
-	updateTransportProperties(properties);
+	updateTransportProperties(transport);
 }
 
 // Only the transport that went: removing any one dropped the newest, even when that was another device's.
@@ -256,7 +259,6 @@ void Bluez5ProfileA2dp::setA2dpUuid(const std::string &uuid)
 void Bluez5ProfileA2dp::enable(const std::string &uuid, BluetoothResultCallback callback)
 {
 #ifdef WEBOS_AUTO
-	GError *error = 0;
 	std::string role;
 
 	if (uuid == BLUETOOTH_PROFILE_A2DP_SOURCE_UUID)
@@ -270,24 +272,11 @@ void Bluez5ProfileA2dp::enable(const std::string &uuid, BluetoothResultCallback 
 		mUuid = BLUETOOTH_PROFILE_A2DP_SOURCE_UUID;
 	}
 
-	BluezMedia1 *mMediaProxy = mAdapter->getMediaManager();
-	if (mMediaProxy)
+	BluezMedia1 *mediaProxy = mAdapter->getMediaManager();
+	if (mediaProxy)
 	{
-		bool ret = bluez_media1_call_select_role_sync(mMediaProxy, role.c_str(), NULL, &error);
-		if (!ret)
-		{
-			if (strstr(error->message, "org.bluez.Error.AlreadyExists") == NULL)
-			{
-				ERROR("A2DP_ENABLE_ROLE", 0, "Role enable %s failed error %s", role.c_str(), error->message);
-				g_error_free(error);
-				if(callback != NULL)
-				{
-					callback(BLUETOOTH_ERROR_FAIL);
-				}
-				return;	// it was answered NONE as well
-			}
-			g_error_free(error);
-		}
+		selectRole(mediaProxy, role, uuid, callback);
+		return;
 	}
 #endif
 	mAdapter->notifyA2dpRoleChnange(uuid);
@@ -298,10 +287,9 @@ void Bluez5ProfileA2dp::enable(const std::string &uuid, BluetoothResultCallback 
 
 }
 
-void Bluez5ProfileA2dp::disable(const std::string &/*uuid*/, BluetoothResultCallback callback)
+void Bluez5ProfileA2dp::disable(const std::string &uuid, BluetoothResultCallback callback)
 {
 #ifdef WEBOS_AUTO
-	GError *error = 0;
 	std::string enableRole;
 
 	if (uuid == BLUETOOTH_PROFILE_A2DP_SOURCE_UUID)
@@ -313,29 +301,42 @@ void Bluez5ProfileA2dp::disable(const std::string &/*uuid*/, BluetoothResultCall
 		enableRole = "source";
 	}
 
-	BluezMedia1 *mMediaProxy = mAdapter->getMediaManager();
-	if (mMediaProxy)
+	BluezMedia1 *mediaProxy = mAdapter->getMediaManager();
+	if (mediaProxy)
 	{
-		bool ret = bluez_media1_call_select_role_sync(mMediaProxy, enableRole.c_str(), NULL, &error);
-		if (!ret)
-		{
-			if (strstr(error->message, "org.bluez.Error.AlreadyExists") == NULL)
-			{
-				ERROR("A2DP_ENABLE_ROLE", 0, "Role enable %s failed error %s", enableRole.c_str(), error->message);
-				g_error_free(error);
-				callback(BLUETOOTH_ERROR_FAIL);
-				return;	// it was answered NONE as well
-			}
-			g_error_free(error);
-		}
+		selectRole(mediaProxy, enableRole, uuid, callback);
+		return;
 	}
 
 	mAdapter->notifyA2dpRoleChnange(uuid);
-	callback(BLUETOOTH_ERROR_NONE);
+	if (callback)
+		callback(BLUETOOTH_ERROR_NONE);
 #else
-	callback(BLUETOOTH_ERROR_UNSUPPORTED);
+	(void)uuid;
+	if (callback)
+		callback(BLUETOOTH_ERROR_UNSUPPORTED);
 #endif
 }
+
+#ifdef WEBOS_AUTO
+// SelectRole without waiting for bluetoothd (selectMediaRole). The role change is reported, as before, only when it
+// succeeded, and only while the profile (and so its adapter) is still there; the caller is answered either way.
+void Bluez5ProfileA2dp::selectRole(BluezMedia1 *mediaProxy, const std::string &role, const std::string &uuid,
+								   BluetoothResultCallback callback)
+{
+	selectMediaRole(mediaProxy, role, [this, alive = mLifetime.token(), uuid, callback](BluetoothError error) {
+		if (error == BLUETOOTH_ERROR_NONE)
+		{
+			if (alive.expired())
+				error = BLUETOOTH_ERROR_FAIL;
+			else
+				mAdapter->notifyA2dpRoleChnange(uuid);
+		}
+		if (callback)
+			callback(error);
+	});
+}
+#endif
 
 BluetoothError Bluez5ProfileA2dp::setDelayReportingState(bool state)
 {
@@ -481,6 +482,9 @@ void Bluez5ProfileA2dp::handleBluezServiceStarted(GDBusConnection *conn, const g
 	a2dp->releaseObjectManager();
 
 	GError *error = 0;
+	// Synchronous on purpose: GetManagedObjects, once per start of bluetoothd, answered by bluetoothd from its own
+	// object tree without asking a remote device, and nothing of this profile works before it. Asynchronous, a
+	// reply could come after bluetoothd went or came back again, for a manager that is no longer the current one.
 	a2dp->mObjectManager = g_dbus_object_manager_client_new_sync(conn, G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
 										  "org.bluez", "/", NULL, NULL, NULL, NULL, &error);
 	if (error)
@@ -517,37 +521,16 @@ void Bluez5ProfileA2dp::handleBluezServiceStopped(GDBusConnection */*conn*/, con
 	a2dp->releaseObjectManager();
 }
 
-void Bluez5ProfileA2dp::updateTransportProperties(FreeDesktopDBusProperties *properties)
+// The transport proxy fetched its properties when it was made: a second, synchronous GetAll here held the main loop
+// once more for every transport (up to the default 25 s with a hung bluetoothd).
+void Bluez5ProfileA2dp::updateTransportProperties(BluezMediaTransport1 *transport)
 {
-	DEBUG("A2DP updateTransportProperties");
-	GVariant *propsVar = nullptr;
-	GError *error = 0;
-
-	free_desktop_dbus_properties_call_get_all_sync(properties, "org.bluez.MediaTransport1", &propsVar, NULL, &error);
-	if (error || !propsVar)
+	std::string uuid = cachedStringProperty(G_DBUS_PROXY(transport), "UUID");
+	if (uuid.empty())
 	{
 		DEBUG("Not able to read MediaTransport1 property interface");
-		g_clear_error(&error);	// g_error_free(NULL) when the call gave neither
 		return;
 	}
-
-	for (size_t n = 0; n < g_variant_n_children(propsVar); n++)
-	{
-		GVariant *propertyVar = g_variant_get_child_value(propsVar, n);
-		GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
-		GVariant *valueVar = g_variant_get_child_value(propertyVar, 1);
-
-		std::string key = g_variant_get_string(keyVar, NULL);
-		if (key == "UUID")
-		{
-			GVariant *tmpVar = g_variant_get_variant(valueVar);
-			mTransportUuid = g_variant_get_string(tmpVar, NULL);
-			DEBUG("A2DP transport Connected UUID %s", mTransportUuid.c_str());
-			g_variant_unref(tmpVar);
-		}
-		g_variant_unref(propertyVar);
-		g_variant_unref(keyVar);
-		g_variant_unref(valueVar);
-	}
-	g_variant_unref(propsVar);	// leaked on every transport
+	mTransportUuid = uuid;
+	DEBUG("A2DP transport Connected UUID %s", mTransportUuid.c_str());
 }

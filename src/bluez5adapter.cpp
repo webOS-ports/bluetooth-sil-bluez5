@@ -189,7 +189,7 @@ void Bluez5Adapter::addMediaManager(std::string objectPath)
 		return;
 	}
 
-	mPlayer = new Bluez5MprisPlayer(mMediaManager, this);
+	mPlayer = new Bluez5MprisPlayer(mMediaManager, getObjectPath());
 }
 
 void Bluez5Adapter::removeMediaManager(const std::string &/*objectPath*/)
