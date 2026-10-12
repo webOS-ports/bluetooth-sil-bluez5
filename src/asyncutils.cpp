@@ -19,7 +19,7 @@
 void glibAsyncMethodWrapper(GObject *sourceObject, GAsyncResult *result, gpointer user_data)
 {
 	GlibAsyncFunctionWrapper *wrapper = static_cast<GlibAsyncFunctionWrapper*>(user_data);
-	wrapper->call(result);
+	wrapper->call(sourceObject, result);
 	delete wrapper;
 }
 
@@ -27,6 +27,55 @@ gboolean glibSourceMethodWrapper(gpointer user_data)
 {
 	GlibSourceFunctionWrapper *wrapper = static_cast<GlibSourceFunctionWrapper*>(user_data);
 	gboolean result = wrapper->call();
-	delete wrapper;
+	// Kept while the callback asks to run again: it was freed after the first dispatch, so a repeating source ran
+	// on freed memory.
+	if (!result)
+		delete wrapper;
 	return result;
+}
+
+namespace {
+
+gboolean ownedSourceDispatch(gpointer user_data)
+{
+	return static_cast<GlibSourceFunctionWrapper*>(user_data)->call();
+}
+
+void ownedSourceDestroy(gpointer user_data)
+{
+	delete static_cast<GlibSourceFunctionWrapper*>(user_data);
+}
+
+} // namespace
+
+guint glibTimeoutAdd(guint interval, GlibSourceFunction func)
+{
+	return g_timeout_add_full(G_PRIORITY_DEFAULT, interval, ownedSourceDispatch,
+	                          new GlibSourceFunctionWrapper(func), ownedSourceDestroy);
+}
+
+ResultJoin::ResultJoin(size_t count, std::function<void(bool allSucceeded)> done)
+	: mState(std::make_shared<State>(State{count, true, std::move(done)}))
+{
+	if (count == 0)
+	{
+		auto finish = std::move(mState->done);
+		mState->done = nullptr;
+		finish(true);
+	}
+}
+
+std::function<void(bool success)> ResultJoin::part() const
+{
+	return [state = mState](bool success) {
+		if (state->pending == 0)
+			return;
+		state->allSucceeded = state->allSucceeded && success;
+		if (--state->pending > 0)
+			return;
+		// Moved out first: done may drop the last reference to the parts, and so to the state.
+		auto finish = std::move(state->done);
+		state->done = nullptr;
+		finish(state->allSucceeded);
+	};
 }

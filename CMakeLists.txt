@@ -24,8 +24,8 @@ webos_component(0 1 0)
 
 option (USE_SYSTEM_BUS_FOR_OBEX    "Enable using system bus for obexd"   ON)
 
-# Enable C++11 support (still gcc 4.6 so can't use -std=c++11)
-_webos_manipulate_flags(APPEND CXX ALL -std=c++0x)
+# C++23, as com.webos.service.bluetooth2 (it was C++11, from the gcc 4.6 days)
+_webos_manipulate_flags(APPEND CXX ALL -std=c++23 -Wall -Wextra)
 
 find_program(GDBUS_CODEGEN_EXECUTABLE NAMES gdbus-codegen DOC "gdbus-codegen executable")
 if(NOT GDBUS_CODEGEN_EXECUTABLE)
@@ -122,7 +122,6 @@ file(GLOB SOURCES
      src/bluez5obexagent.cpp
      src/bluez5profilea2dp.cpp
      src/bluez5profileavrcp.cpp
-     src/bluez5mediacontrol.cpp
      src/bluez5mprisplayer.cpp
      src/bluez5profilehfp.cpp
      src/bluez5profilemap.cpp
@@ -136,9 +135,29 @@ file(GLOB SOURCES
      src/bluez5meshelement.cpp
      src/bluez5meshmodelconfigclient.cpp
      src/bluez5meshmodelonoffclient.cpp
+     src/meshcomposition.cpp
+     src/meshconfig.cpp
+     src/leadvfilter.cpp
+     src/obextime.cpp
+     src/dbuspath.cpp
+     src/obexpaths.cpp
+     src/gattlocal.cpp
+     src/avrcpdevices.cpp
+     src/gattnotify.cpp
+     src/gattdiscovery.cpp
+     src/mediarole.cpp
+     src/dbussignals.cpp
+     src/obexpush.cpp
      )
 
 add_library(bluez5 MODULE ${SOURCES})
 target_link_libraries(bluez5 ${GLIB2_LDFLAGS} ${PMLOG_LDFLAGS}
                              ${GIO2_LDFLAGS} ${GIO-UNIX_LDFLAGS} ${UUID_LDFLAGS})
 install(TARGETS bluez5 DESTINATION ${WEBOS_INSTALL_LIBDIR}/bluetooth-sils)
+
+# Unit tests: off by default, so image builds are unaffected (cmake -DBUILD_TESTING=ON).
+option(BUILD_TESTING "Build the unit tests" OFF)
+if(BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

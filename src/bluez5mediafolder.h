@@ -20,6 +20,8 @@
 #include <bluetooth-sil-api.h>
 #include <string>
 
+#include "asyncutils.h"
+
 extern "C" {
 #include "freedesktop-interface.h"
 #include "bluez-interface.h"
@@ -37,8 +39,13 @@ public:
 	void getNumberOfItems(BluetoothAvrcpBrowseTotalNumberOfItemsCallback callback);
 	void getFolderItems(uint32_t startIndex, uint32_t endIndex,
 						BluetoothAvrcpBrowseFolderItemsCallback callback);
-	BluetoothError changePath(const std::string &itemPath);
-	BluetoothError playItem(const std::string &itemPath);
+	// Sent without waiting for the remote device. An error is returned, and done not called, when the request
+	// was not sent: BUSY while another browsing request of this folder is waiting for the remote device. On
+	// NONE the request went out, and done (if set) is called once with the device's answer, also when the folder
+	// is deleted before it. The outcome also shows in the folder's Name (currentFolderReceived) and the player's
+	// status and track.
+	BluetoothError changePath(const std::string &itemPath, BluetoothResultCallback done = BluetoothResultCallback());
+	BluetoothError playItem(const std::string &itemPath, BluetoothResultCallback done = BluetoothResultCallback());
 	BluetoothError addToNowPlaying(const std::string &itemPath);
 	void search(const std::string &searchString,
                 BluetoothAvrcpBrowseSearchListCallback callback);
@@ -54,8 +61,11 @@ private:
 			GVariant *changedProperties, GVariant *invalidatedProperties,
 			gpointer userData);
 	void mediaFolderPropertiesChanged(GVariant* changedProperties);
-	BluetoothAvrcpItemType itemTypeStringToEnum(const std::string type);
-
+	static BluetoothAvrcpItemType itemTypeStringToEnum(const std::string type);
+	// BlueZ keeps one browsing request per folder (ChangeFolder, MediaItem1.Play, ListItems, Search) and fails
+	// another with EBUSY: true while one of ours is waiting for its reply.
+	bool mBrowseRequestPending;
+	LifetimeGuard mLifetime;	// last: replies after the folder went see it expire first
 
 };
 #endif //BLUEZ5MEDIAFOLDER_H

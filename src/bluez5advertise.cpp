@@ -79,15 +79,17 @@ void Bluez5Advertise::assignAdvertiseManager(std::string objectPath)
 	return;
 }
 
-void Bluez5Advertise::handleBusAcquired(GDBusConnection *connection, const gchar *name, gpointer user_data)
+void Bluez5Advertise::handleBusAcquired(GDBusConnection *connection, const gchar */*name*/, gpointer user_data)
 {
 	Bluez5Advertise *adv = static_cast<Bluez5Advertise*>(user_data);
-	adv->setConnection(connection);
-	g_object_unref(connection);
+	adv->setConnection(connection);	// not owned: it was unreffed here, and once more in the destructor
 }
 
 std::string Bluez5Advertise::createInterface(uint8_t advId)
 {
+	if (!mConn)	// the bus is not acquired yet: export failed without setting the error read below
+		return std::string();
+
 	BluezLEAdvertisement1 *interface = bluez_leadvertisement1_skeleton_new();
 	GError *error = 0;
 
@@ -98,9 +100,11 @@ std::string Bluez5Advertise::createInterface(uint8_t advId)
 	if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(interface), mConn,
                                           path.c_str(), &error))
 	{
-		DEBUG("Failed to initialize agent on bus: %s",error->message);
-		g_error_free(error);
-		return nullptr;
+		DEBUG("Failed to initialize agent on bus: %s", error ? error->message : "");
+		g_clear_error(&error);
+		g_object_unref(interface);
+		// An empty path: nullptr made a std::string, which throws through GLib and ends the service.
+		return std::string();
 	}
 
 	AdvertiseObject *advObject = new (std::nothrow) AdvertiseObject(interface, path);
@@ -112,21 +116,39 @@ std::string Bluez5Advertise::createInterface(uint8_t advId)
 	return path;
 }
 
+// A free id, never 0, or 0 when all 255 are taken: the counter wrapped after 255 registrations to 0 and to ids
+// still exported.
 uint8_t Bluez5Advertise::nextAdvId()
 {
-	static uint8_t nextAdvId = 1;
-	return nextAdvId++;
+	static uint8_t nextAdvId = 0;
+	for (int tries = 0; tries < 255; tries++)
+	{
+		nextAdvId = (uint8_t)(nextAdvId % 255 + 1);
+		if (mAdvertiserMap.find(nextAdvId) == mAdvertiserMap.end())
+			return nextAdvId;
+	}
+	return 0;
 }
 
 void Bluez5Advertise::createAdvertisementId(AdvertiserIdStatusCallback callback)
 {
 	uint8_t advId = nextAdvId();
-	std::string path = createInterface(advId);
+	std::string path = advId ? createInterface(advId) : std::string();
+	if (path.empty())
+	{
+		callback(BLUETOOTH_ERROR_FAIL, 0);	// success was reported, and the empty path registered later
+		return;
+	}
 	callback(BLUETOOTH_ERROR_NONE, advId);
 }
 
 void Bluez5Advertise::registerAdvertisement(uint8_t advId, AdvertiserStatusCallback callback)
 {
+	if (!mAdvManager)
+	{
+		callback(BLUETOOTH_ERROR_FAIL);
+		return;
+	}
 	guchar supportedInstace = bluez_leadvertising_manager1_get_supported_instances(mAdvManager);
 	if (!supportedInstace)
 	{
@@ -141,16 +163,17 @@ void Bluez5Advertise::registerAdvertisement(uint8_t advId, AdvertiserStatusCallb
 	arguments = g_variant_builder_end (builder);
 	g_variant_builder_unref(builder);
 
-	auto registerCallback = [this, callback, advId](GAsyncResult *result)
+	// Finished on its own proxy: nothing of the advertiser, which may be gone by then, is used.
+	auto registerCallback = [callback](GObject *source, GAsyncResult *result)
 	{
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_leadvertising_manager1_call_register_advertisement_finish(mAdvManager, result, &error);
-		if (error)
+		ret = bluez_leadvertising_manager1_call_register_advertisement_finish(BLUEZ_LEADVERTISING_MANAGER1(source), result, &error);
+		if (!ret || error)
 		{
-			ERROR(MSGID_BLE_ADVERTIMENT_ERROR, 0, "adv registration failed due to %s", error->message);
-			g_error_free(error);
+			ERROR(MSGID_BLE_ADVERTIMENT_ERROR, 0, "adv registration failed due to %s", error ? error->message : "");
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}
@@ -181,16 +204,12 @@ void Bluez5Advertise::advertiseServiceUuids(uint8_t advId, std::unordered_map<st
 	if (!interface)
 		return;
 
-	const char *uuids[serviceList.size()+1];
-
-	int i = 0;
+	// A vector, not an array on the stack sized by the app's list.
+	std::vector<const char *> uuids;
 	for (auto it = serviceList.begin(); it != serviceList.end(); it++)
-	{
-		uuids[i++] = it->first.c_str();
-	}
-
-	if (i < serviceList.size()+1) uuids[i] = NULL;
-	bluez_leadvertisement1_set_service_uuids (interface, uuids);
+		uuids.push_back(it->first.c_str());
+	uuids.push_back(nullptr);
+	bluez_leadvertisement1_set_service_uuids (interface, uuids.data());
 }
 
 void Bluez5Advertise::advertiseServiceData(uint8_t advId, const char* uuids, std::vector<uint8_t> serviceData)
@@ -260,7 +279,7 @@ void Bluez5Advertise::advertiseManufacturerData(uint8_t advId, std::vector<uint8
 	}
 
 	dataBuilder = g_variant_builder_new (G_VARIANT_TYPE ("ay"));
-	for (int i = 2; i < data.size(); i++)
+	for (size_t i = 2; i < data.size(); i++)
 	{
 		g_variant_builder_add(dataBuilder, "y", data[i]);
 	}
@@ -315,7 +334,8 @@ void Bluez5Advertise::advertiseIncludes(uint8_t advId, bool isTxPowerInclude, bo
 	BluezLEAdvertisement1 *interface = getInteface(advId);
 	if (!interface)
 		return;
-	const char* includes[3] = {0,0,0};
+	// Room for the NULL that ends the list: with all three set it had none.
+	const char* includes[4] = {0,0,0,0};
 	int includeIndex = 0;
 
 	if (isTxPowerInclude)
@@ -327,7 +347,8 @@ void Bluez5Advertise::advertiseIncludes(uint8_t advId, bool isTxPowerInclude, bo
 
 	bluez_leadvertisement1_set_includes(interface, includes);
 	const gchar *const *include = bluez_leadvertisement1_get_includes(interface);
-	DEBUG("ad include property changed to %s", include[includeIndex-1]);
+	if (include && includeIndex > 0)	// [-1] with none set
+		DEBUG("ad include property changed to %s", include[includeIndex-1]);
 }
 
 void Bluez5Advertise::advertiseDuration(uint8_t advId, uint16_t value)
@@ -367,10 +388,9 @@ void Bluez5Advertise::setAdRole(uint8_t advId, std::string role)
 	DEBUG("role %s", role.c_str());
 }
 
-gboolean Bluez5Advertise::handleRelease(BluezLEAdvertisement1 *proxy, GDBusMethodInvocation *invocation, gpointer user_data)
+gboolean Bluez5Advertise::handleRelease(BluezLEAdvertisement1 *proxy, GDBusMethodInvocation *invocation, gpointer /*user_data*/)
 {
 	DEBUG("Advertising released");
-	Bluez5Advertise *pThis = static_cast<Bluez5Advertise*> (user_data);
 	//pThis->unRegisterAdvertisement();
 	bluez_leadvertisement1_complete_release(proxy, invocation);
 	return TRUE;

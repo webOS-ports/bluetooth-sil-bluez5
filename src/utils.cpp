@@ -50,11 +50,30 @@ std::string convertToUpperCase(const std::string &input)
 	return output;
 }
 
+std::string cachedStringProperty(GDBusProxy *proxy, const char *name)
+{
+	if (!proxy)
+		return "";
+	GVariant *value = g_dbus_proxy_get_cached_property(proxy, name);
+	if (!value)
+		return "";
+	std::string result;
+	if (g_variant_is_of_type(value, G_VARIANT_TYPE_STRING) || g_variant_is_of_type(value, G_VARIANT_TYPE_OBJECT_PATH))
+		result = g_variant_get_string(value, NULL);
+	g_variant_unref(value);
+	return result;
+}
+
+// Both take what a remote device sent, through BlueZ: anything but the expected type (or NULL) is an empty
+// vector. g_variant_get refused the mismatch with a critical and left the iterator uninitialised, which was read.
 std::vector<unsigned char>convertArrayByteGVariantToVector(GVariant *iter)
 {
-	GVariantIter *valueIter;
+	GVariantIter *valueIter = nullptr;
 	guchar valueByte;
 	std::vector<unsigned char> value;
+
+	if (!iter || !g_variant_is_of_type(iter, G_VARIANT_TYPE_BYTESTRING))
+		return value;
 
 	g_variant_get (iter,
                    "ay",
@@ -76,9 +95,12 @@ std::vector<unsigned char>convertArrayByteGVariantToVector(GVariant *iter)
 
 std::vector<std::string>convertArrayStringGVariantToVector(GVariant *iter)
 {
-	GVariantIter *valueIter;
+	GVariantIter *valueIter = nullptr;
 	char *valueByte;
 	std::vector<std::string> value;
+
+	if (!iter || !g_variant_is_of_type(iter, G_VARIANT_TYPE_STRING_ARRAY))
+		return value;
 
 	g_variant_get (iter,
                    "as",

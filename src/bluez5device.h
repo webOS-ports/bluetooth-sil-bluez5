@@ -20,6 +20,8 @@
 #include <string>
 #include <bluetooth-sil-api.h>
 
+#include "asyncutils.h"
+
 extern "C" {
 #include "freedesktop-interface.h"
 #include "bluez-interface.h"
@@ -66,6 +68,8 @@ public:
 									GVariant *invalidatedProperties, gpointer userData);
 
 	void setPaired (bool paired) { mPaired = paired; }
+	bool getPaired() const { return mPaired; }
+	bool getServicesResolved() const { return mServicesResolved; }
 	bool setDevicePropertySync(const BluetoothProperty& property);
 	void setDevicePropertyAsync(const BluetoothProperty& property, BluetoothResultCallback callback);
 
@@ -104,6 +108,7 @@ private:
 
 	ServiceData mServiceData;
 	bool mPaired;
+	LifetimeGuard mLifetime;
 	BluezDevice1 *mDeviceProxy;
 	FreeDesktopDBusProperties *mPropertiesProxy;
 	bool mConnected;
@@ -112,6 +117,7 @@ private:
 	int mTxPower;
 	int mRSSI;
 	uint32_t mConnectedRole;
+	bool mServicesResolved = false;	// BlueZ has exported all its GATT services
 };
 
 #endif // BLUEZ5DEVICE_H

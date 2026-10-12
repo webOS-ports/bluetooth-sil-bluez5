@@ -18,8 +18,14 @@
 #define BLUEZ5GATTREMOTEATTRIBUTE_H
 
 #include <gio/gio.h>
+#include <functional>
+#include <map>
 #include <string>
 #include <vector>
+
+#include <bluetooth-sil-api.h>
+
+#include "gattnotify.h"
 
 extern "C" {
 #include "freedesktop-interface.h"
@@ -28,14 +34,28 @@ extern "C" {
 
 class Bluez5ProfileGatt;
 
+// Remote GATT attributes, as BlueZ exports them. Each owns its proxy and its children: they were never freed on
+// several paths, and the characteristics' signal handler then pointed at a deleted profile.
+//
+// Reads, writes and StartNotify/StopNotify are asynchronous: they were synchronous calls on the only main loop, so a
+// peripheral that did not answer stopped the service for the 25 s D-Bus timeout per attribute. Their callbacks capture nothing of the
+// attribute, which may be gone by the answer: the caller looks it up again.
+typedef std::function<void(bool success, const std::vector<unsigned char> &value)> GattRemoteReadCallback;
+typedef std::function<void(bool success)> GattRemoteResultCallback;
+typedef GattRemoteResultCallback GattRemoteWriteCallback;
+
 class GattRemoteDescriptor
 {
 public:
 	GattRemoteDescriptor(BluezGattDescriptor1 *interface)
 		: mInterface(interface) {
 	}
-	std::vector<unsigned char> readValue(uint16_t offset = 0);
-	bool writeValue(const std::vector<unsigned char> &descriptorValue, uint16_t offset = 0);
+	~GattRemoteDescriptor();
+	GattRemoteDescriptor(const GattRemoteDescriptor &) = delete;
+	GattRemoteDescriptor &operator=(const GattRemoteDescriptor &) = delete;
+
+	void readValue(GattRemoteReadCallback callback);
+	void writeValue(const std::vector<unsigned char> &descriptorValue, GattRemoteWriteCallback callback);
 
 	static const std::map <BluetoothGattPermission, std::string> descriptorPermissionMap;
 	std::string parentObjectPath;
@@ -49,16 +69,22 @@ class GattRemoteCharacteristic
 public:
 	static void onCharacteristicPropertiesChanged(GDBusProxy *proxy, GVariant *changed_properties,
                                                   GStrv invalidated_properties, gpointer userdata);
-	GattRemoteCharacteristic(BluezGattCharacteristic1 *interface, Bluez5ProfileGatt *gattProfile)
-		: mInterface(interface), mGattProfile(gattProfile) {
-		g_signal_connect(G_DBUS_PROXY(interface), "g-properties-changed",
-						 G_CALLBACK(GattRemoteCharacteristic::onCharacteristicPropertiesChanged), this);
-	}
-	bool startNotify();
-	bool stopNotify();
-	std::vector<unsigned char> readValue(uint16_t offset = 0);
-	bool writeValue(const std::vector<unsigned char> &characteristicValue, uint16_t offset = 0);
+	GattRemoteCharacteristic(BluezGattCharacteristic1 *interface, Bluez5ProfileGatt *gattProfile);
+	~GattRemoteCharacteristic();
+	GattRemoteCharacteristic(const GattRemoteCharacteristic &) = delete;
+	GattRemoteCharacteristic &operator=(const GattRemoteCharacteristic &) = delete;
+
+	// Asynchronous as well: StartNotify waits for the device to acknowledge its CCCD write. One call at a time: a
+	// caller asking for the state of the call out joins it, one asking for the other state waits for it.
+	void startNotify(GattRemoteResultCallback callback);
+	void stopNotify(GattRemoteResultCallback callback);
+	void readValue(GattRemoteReadCallback callback);
+	// withoutResponse: a Write Command, for characteristics that only allow those.
+	void writeValue(const std::vector<unsigned char> &characteristicValue, bool withoutResponse,
+	                GattRemoteWriteCallback callback);
 	BluetoothGattCharacteristicProperties readProperties();
+	// BlueZ's cached value: reading the remote during discovery stalled it the same way.
+	std::vector<unsigned char> cachedValue();
 
 	static const std::map <std::string, BluetoothGattCharacteristic::Property> characteristicPropertyMap;
 	std::string parentObjectPath;
@@ -66,7 +92,12 @@ public:
 	BluetoothGattCharacteristic characteristic;
 	BluezGattCharacteristic1 *mInterface;
 	Bluez5ProfileGatt *mGattProfile;
+	gulong mPropertiesChangedHandler = 0;
 	std::vector<GattRemoteDescriptor*> gattRemoteDescriptors;
+
+private:
+	void callNotify(bool enable, GattRemoteResultCallback done);
+	GattNotifyQueue mNotifyQueue;
 };
 
 class GattRemoteService
@@ -75,6 +106,10 @@ public:
 	GattRemoteService(BluezGattService1 *interface)
 		: mInterface(interface) {
 	}
+	~GattRemoteService();
+	GattRemoteService(const GattRemoteService &) = delete;
+	GattRemoteService &operator=(const GattRemoteService &) = delete;
+
 	std::string parentObjectPath;
 	std::string objectPath;
 	BluetoothGattService service;

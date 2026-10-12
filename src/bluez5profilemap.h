@@ -32,6 +32,9 @@ class Bluez5ProfileMap : public Bluez5ObexProfileBase,
 public:
     Bluez5ProfileMap(Bluez5Adapter *adapter);
     ~Bluez5ProfileMap();
+    // The profile base's connect/disconnect(address, callback) stay visible next to these.
+    using Bluez5ObexProfileBase::connect;
+    using Bluez5ObexProfileBase::disconnect;
     void connect(const std::string &address, const std::string &instanceName, BluetoothMapCallback callback) final;
     void disconnect(const std::string &address, const std::string &sessionId, BluetoothMapCallback callback) final;
     void notifySessionStatus(const std::string &address, bool createdOrRemoved) final;
@@ -50,20 +53,19 @@ private:
     std::string convertSessionKey(const std::string &address);
     std::string getSessionIdFromSessionPath(const std::string &sessionPath);
     void createSession(const std::string &address, const std::string &instanceName, BluetoothMapCallback callback);
-    void getFolderListCb(BluezObexMessageAccess1* tObjectMapProxy, BluetoothMapGetFoldersCallback callback, GAsyncResult *result);
     void parseGetFolderListResponse(GVariant *outFolderList,std::vector<std::string> &folders);
     GVariant * buildGetFolderListParam(const uint16_t &startOffset, const uint16_t &maxCount);
-    void getMessageListCb(BluezObexMessageAccess1* tObjectMapProxy, BluetoothMapGetMessageListCallback callback, GAsyncResult *result);
     GVariant * buildGetMessageListParam(const BluetoothMapPropertiesList &filters);
     void parseGetMessageListResponse(GVariant *outMessageList,BluetoothMessageList &messageList);
     void addMessageProperties(std::string& key , GVariant* value , BluetoothMapPropertiesList &messageProperties);
-    BluezObexMessage1* createMessageHandleProxyUsingPath(const std::string &objectPath);
+    BluezObexMessage1* createMessageHandleProxyUsingPath(const ObexPeer &peer, const std::string &objectPath);
     void removeTransfer(const std::string &objectPath);
-    void startTransfer(const std::string &objectPath, BluetoothResultCallback callback, Bluez5ObexTransfer::TransferType type);
-    void startPushTransfer(const std::string &objectPath, BluetoothMapCallback callback, Bluez5ObexTransfer::TransferType type);
+    void startTransfer(const std::string &objectPath, const ObexPeer &peer, BluetoothResultCallback callback, Bluez5ObexTransfer::TransferType type);
+    void startPushTransfer(const std::string &objectPath, const ObexPeer &peer, BluetoothMapCallback callback, Bluez5ObexTransfer::TransferType type);
     void updateActiveTransfer(const std::string &objectPath, Bluez5ObexTransfer *transfer, BluetoothResultCallback callback);
     GVariant* buildMessageArgs(const std::string &charset, bool transparent, bool retry);
     void updatePushTransfer(const std::string &objectPath, Bluez5ObexTransfer *transfer, BluetoothMapCallback callback);
+    void removeSessionTransfers(Bluez5ObexSession *session);
 };
 
 #endif

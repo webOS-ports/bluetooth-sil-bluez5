@@ -47,7 +47,7 @@ Bluez5MeshAdvProvisioner::~Bluez5MeshAdvProvisioner()
 {
 }
 
-void Bluez5MeshAdvProvisioner::registerProvisionerInterface(GDBusObjectManagerServer *objectManagerServer,
+void Bluez5MeshAdvProvisioner::registerProvisionerInterface(GDBusObjectManagerServer */*objectManagerServer*/,
 															GDBusObjectSkeleton *provSkeleton)
 {
 	BluezMeshProvisioner1 *provInterface = bluez_mesh_provisioner1_skeleton_new();
@@ -58,27 +58,37 @@ void Bluez5MeshAdvProvisioner::registerProvisionerInterface(GDBusObjectManagerSe
 	g_signal_connect(provInterface, "handle_request_prov_data", G_CALLBACK(handleRequestProvData), this);
 
 	g_dbus_object_skeleton_add_interface(provSkeleton, G_DBUS_INTERFACE_SKELETON(provInterface));
-
+	g_object_unref(provInterface);	// the object holds its own reference: this one leaked on every meshd start
 }
 
-gboolean Bluez5MeshAdvProvisioner::handleScanResult(BluezMeshProvisioner1 *interface,
+// A device UUID from mesh as hex, or empty when the array is not 16 bytes.
+static std::string uuidToHex(GVariant *bytes)
+{
+	std::vector<unsigned char> result = convertArrayByteGVariantToVector(bytes);
+	if (result.size() < 16)
+		return std::string();
+
+	char deviceUuid[16 * 2 + 1];
+	for (int i = 0; i < 16; ++i)
+		snprintf(deviceUuid + (i * 2), 3, "%2.2x", result[i]);
+	return std::string(deviceUuid);
+}
+
+gboolean Bluez5MeshAdvProvisioner::handleScanResult(BluezMeshProvisioner1 */*interface*/,
 													GDBusMethodInvocation *invocation,
 													gint16 argRssi,
 													GVariant *argData,
-													GVariant *argOptions,
+													GVariant */*argOptions*/,
 													gpointer userData)
 {
 	Bluez5MeshAdvProvisioner *meshAdvProvisioner = (Bluez5MeshAdvProvisioner *)userData;
-	std::vector<unsigned char> result;
-	char deviceUuid[16 * 2 + 1];
 
-	result = convertArrayByteGVariantToVector(argData);
-	for (int i = 0; i < 16; ++i)
-	{
-			sprintf(deviceUuid + (i * 2), "%2.2x", result[i]);
-	}
+	// Answered: it was not, and every scan result leaked its invocation.
+	g_dbus_method_invocation_return_value(invocation, NULL);
 
-	std::string deviceUuidS(deviceUuid);
+	std::string deviceUuidS = uuidToHex(argData);
+	if (deviceUuidS.empty())
+		return true;	// a report shorter than a UUID, forwarded from the air: it was read past its end
 	DEBUG("Device discovered : %s", deviceUuidS.c_str());
 	meshAdvProvisioner->mMesh->getMeshObserver()->scanResult(
 		convertAddressToLowerCase(meshAdvProvisioner->mAdapter->getAddress()),
@@ -86,7 +96,7 @@ gboolean Bluez5MeshAdvProvisioner::handleScanResult(BluezMeshProvisioner1 *inter
 
 	return true;
 }
-gboolean Bluez5MeshAdvProvisioner::handleAddNodeComplete(BluezMeshProvisioner1 *interface,
+gboolean Bluez5MeshAdvProvisioner::handleAddNodeComplete(BluezMeshProvisioner1 */*interface*/,
 														 GDBusMethodInvocation *invocation,
 														 GVariant *uuid,
 														 guint16 unicast,
@@ -94,16 +104,10 @@ gboolean Bluez5MeshAdvProvisioner::handleAddNodeComplete(BluezMeshProvisioner1 *
 														 gpointer userData)
 {
 	DEBUG("handleAddNodeComplete: count: %d", count);
-	std::vector<unsigned char> result;
-	char deviceUuid[16 * 2 + 1];
+	g_dbus_method_invocation_return_value(invocation, NULL);	// answered: it was not
 
-	result = convertArrayByteGVariantToVector(uuid);
-	for (int i = 0; i < 16; ++i)
-	{
-		sprintf(deviceUuid + (i * 2), "%2.2x", result[i]);
-	}
-
-	std::string deviceUuidS(deviceUuid);
+	// Empty when it is not 16 bytes: it was read as 16 whatever its size.
+	std::string deviceUuidS = uuidToHex(uuid);
 	Bluez5MeshAdvProvisioner *meshAdvProvisioner = (Bluez5MeshAdvProvisioner *)userData;
 	meshAdvProvisioner->mMesh->getMeshObserver()->provisionResult(BLUETOOTH_ERROR_NONE,
 																	convertAddressToLowerCase(
@@ -113,26 +117,23 @@ gboolean Bluez5MeshAdvProvisioner::handleAddNodeComplete(BluezMeshProvisioner1 *
 
 	return true;
 }
-gboolean Bluez5MeshAdvProvisioner::handleAddNodeFailed(BluezMeshProvisioner1 *interface,
+gboolean Bluez5MeshAdvProvisioner::handleAddNodeFailed(BluezMeshProvisioner1 */*interface*/,
 													   GDBusMethodInvocation *invocation,
 													   GVariant *uuid,
 													   const gchar *reason,
 													   gpointer userData)
 {
 	DEBUG("handleAddNodeFailed: %s", reason);
-	std::vector<unsigned char> result;
-	char deviceUuid[16 * 2 + 1];
+	g_dbus_method_invocation_return_value(invocation, NULL);	// answered: it was not
 
-	result = convertArrayByteGVariantToVector(uuid);
-	for (int i = 0; i < 16; ++i)
-	{
-			sprintf(deviceUuid + (i * 2), "%2.2x", result[i]);
-	}
-
-	std::string deviceUuidS(deviceUuid);
+	// Empty when it is not 16 bytes: it was read as 16 whatever its size.
+	std::string deviceUuidS = uuidToHex(uuid);
 
 	Bluez5MeshAdvProvisioner *meshAdvProvisioner = (Bluez5MeshAdvProvisioner *)userData;
-	meshAdvProvisioner->mMesh->getMeshObserver()->provisionResult(meshProvisionerError[reason],
+	// A lookup: operator[] added an unknown reason, mapped to BLUETOOTH_ERROR_NONE, a success.
+	auto known = meshProvisionerError.find(reason ? reason : "");
+	BluetoothError error = known != meshProvisionerError.end() ? known->second : BLUETOOTH_ERROR_MESH_UNEXPECTED_ERROR;
+	meshAdvProvisioner->mMesh->getMeshObserver()->provisionResult(error,
 																	convertAddressToLowerCase(
 																		meshAdvProvisioner->mAdapter->getAddress()),
 																	"endProvision", "", 0, "", "",
@@ -140,7 +141,7 @@ gboolean Bluez5MeshAdvProvisioner::handleAddNodeFailed(BluezMeshProvisioner1 *in
 
 	return true;
 }
-gboolean Bluez5MeshAdvProvisioner::handleRequestProvData(BluezMeshProvisioner1 *interface,
+gboolean Bluez5MeshAdvProvisioner::handleRequestProvData(BluezMeshProvisioner1 */*interface*/,
 														 GDBusMethodInvocation *invocation,
 														 guchar count,
 														 gpointer userData)
@@ -163,9 +164,15 @@ gboolean Bluez5MeshAdvProvisioner::handleRequestProvData(BluezMeshProvisioner1 *
 BluetoothError Bluez5MeshAdvProvisioner::updateNodeInfo(std::vector<uint16_t> &unicastAddresses)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
+	// The service's list can be empty (database entries without an address or count): its [-1] was read. The
+	// default next address is kept then, and the next one never wraps past the unicast range.
+	if (unicastAddresses.empty())
+		return BLUETOOTH_ERROR_NONE;
 	mUnicastAddresses = unicastAddresses;
 	sort(mUnicastAddresses.begin(), mUnicastAddresses.end());
-	int n = mUnicastAddresses.size();
-	mUnicastAddressAvailable = mUnicastAddresses[n-1] + 1;
+	uint16_t highest = mUnicastAddresses.back();
+	if (highest >= 0x7fff)
+		return BLUETOOTH_ERROR_MESH_CANNOT_ASSIGN_ADDRESS;
+	mUnicastAddressAvailable = highest + 1;
 	return BLUETOOTH_ERROR_NONE;
 }

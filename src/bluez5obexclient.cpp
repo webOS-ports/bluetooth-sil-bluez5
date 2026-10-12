@@ -21,6 +21,7 @@
 #include "logging.h"
 #include "bluez5busconfig.h"
 #include "bluez5adapter.h"
+#include "obexpaths.h"
 
 
 Bluez5ObexClient::Bluez5ObexClient(Bluez5Adapter *adapter) :
@@ -28,10 +29,13 @@ Bluez5ObexClient::Bluez5ObexClient(Bluez5Adapter *adapter) :
     mNameWatch(BLUEZ5_OBEX_DBUS_BUS_TYPE, "org.bluez.obex"),
     mAdapter(adapter)
 {
-	DBusUtils::waitForBus(BLUEZ5_OBEX_DBUS_BUS_TYPE, [this](bool available) {
+	// The adapter deletes its client when bluetoothd drops the adapter, which can be before the bus answers.
+	DBusUtils::waitForBus(BLUEZ5_OBEX_DBUS_BUS_TYPE, [this, alive = mLifetime.token()](bool available) {
+		if (alive.expired())
+			return;
 		if (!available) {
 			// register an empty name watch handler
-			mNameWatch.watch([](bool available) { });
+			mNameWatch.watch([](bool /*available*/) { });
 			return;
 		}
 
@@ -68,10 +72,18 @@ void Bluez5ObexClient::createProxy()
 
 	DEBUG("Creating proxy for OBEX client ..");
 
-	auto createProxyCallback = [this](GAsyncResult *result) {
+	auto createProxyCallback = [this, alive = mLifetime.token()](GAsyncResult *result) {
 		GError *error = 0;
 
-		mClientProxy = bluez_obex_client1_proxy_new_for_bus_finish(result, &error);
+		BluezObexClient1 *proxy = bluez_obex_client1_proxy_new_for_bus_finish(result, &error);
+		if (alive.expired())
+		{
+			g_clear_error(&error);
+			if (proxy)
+				g_object_unref(proxy);
+			return;
+		}
+		mClientProxy = proxy;
 		if (error)
 		{
 			ERROR(MSGID_FAILED_TO_CREATE_OBEX_CLIENT_PROXY, 0,
@@ -129,26 +141,73 @@ std::string sessionTypeToString(Bluez5ObexSession::Type type)
 
 void Bluez5ObexClient::createSession(Bluez5ObexSession::Type type, const std::string &deviceAddress, Bluez5ObexSessionCreateCallback callback, const std::string &instanceName)
 {
+	createSessionAttempt(type, deviceAddress, callback, instanceName, true);
+}
+
+// A transient failure (isTransientObexConnectError) is tried once more after 2 s: right after a previous session's
+// link closed, obexd's SDP lookup or connect to the same device failed now and then, and a moment later worked.
+void Bluez5ObexClient::createSessionAttempt(Bluez5ObexSession::Type type, const std::string &deviceAddress,
+                                            const Bluez5ObexSessionCreateCallback &callback, const std::string &instanceName,
+                                            bool mayRetry)
+{
 	if (!mClientProxy)
 	{
 		callback(0);
 		return;
 	}
 
-	auto createSessionCallback = [this, callback, type, deviceAddress](GAsyncResult *result) {
+	// Finished on the proxy the call was made on: when obexd went away meanwhile, mClientProxy was NULL or
+	// another proxy, the finish failed without setting an error, and the NULL path became a std::string, which
+	// throws through GLib and ends the service.
+	auto createSessionCallback = [this, alive = mLifetime.token(), callback, type, deviceAddress, instanceName, mayRetry](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 		gchar *objectPath = 0;
 
-		ret = bluez_obex_client1_call_create_session_finish(mClientProxy, &objectPath, result, &error);
-		if (error)
+		ret = bluez_obex_client1_call_create_session_finish(BLUEZ_OBEX_CLIENT1(source), &objectPath, result, &error);
+		if (alive.expired())	// the client, and the profiles it was created for, are gone
 		{
-			g_error_free(error);
+			g_clear_error(&error);
+			g_free(objectPath);
+			return;
+		}
+		if (!ret || error || !objectPath)
+		{
+			const bool retry = mayRetry && error && isTransientObexConnectError(error->message);
+			ERROR(MSGID_FAILED_TO_CREATE_OBEX_SESSION_PROXY, 0, "Failed to create OBEX session with %s: %s%s",
+			      deviceAddress.c_str(), error ? error->message : "no session path", retry ? " (trying again)" : "");
+			if (retry)
+			{
+				g_clear_error(&error);
+				g_free(objectPath);
+				glibTimeoutAdd(2000, [this, alive, type, deviceAddress, callback, instanceName]() {
+					if (!alive.expired())
+						createSessionAttempt(type, deviceAddress, callback, instanceName, false);
+					return false;
+				});
+				return;
+			}
+			g_clear_error(&error);
+			g_free(objectPath);
 			callback(0);
 			return;
 		}
 
-		Bluez5ObexSession *session = new Bluez5ObexSession(this, type, std::string(objectPath), deviceAddress);
+		// The obexd that answered: its objects are reached by its unique name, which needs no call to the bus.
+		Bluez5ObexSession *session = new Bluez5ObexSession(this, type, std::string(objectPath), deviceAddress,
+		                                                   obexPeerOfOwner(source));
+		g_free(objectPath);	// allocated by the finish; it leaked
+
+		// Partly made, its callers used NULL proxies, and its end went unnoticed: a failure, which also removes
+		// the session from obexd.
+		if (!session->isValid())
+		{
+			ERROR(MSGID_FAILED_TO_CREATE_OBEX_SESSION_PROXY, 0, "OBEX session %s with %s could not be set up",
+			      session->getObjectPath().c_str(), deviceAddress.c_str());
+			delete session;
+			callback(0);
+			return;
+		}
 
 		// The caller has to take care to release the memory for the session when it isn't used anymore
 		callback(session);
@@ -177,11 +236,11 @@ void Bluez5ObexClient::destroySession(const std::string &objectPath)
 	if (!mClientProxy)
 		return;
 
-	auto removeSessionCallback = [this, objectPath](GAsyncResult *result) {
+	auto removeSessionCallback = [objectPath](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
-		gboolean ret;
+		[[maybe_unused]] gboolean ret;
 
-		ret = bluez_obex_client1_call_remove_session_finish(mClientProxy, result, &error);
+		ret = bluez_obex_client1_call_remove_session_finish(BLUEZ_OBEX_CLIENT1(source), result, &error);
 		if (error)
 		{
 			ERROR(MSGID_FAILED_TO_REMOVE_OBEX_SESSION_PROXY, 0, "Failed to remove obex session on path %s",

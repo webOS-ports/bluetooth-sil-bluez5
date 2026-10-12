@@ -22,6 +22,8 @@
 #include <bluetooth-sil-api.h>
 
 #include "bluez5profilebase.h"
+#include <set>
+
 #include "bluez5obexsession.h"
 #include "bluez5obextransfer.h"
 
@@ -32,7 +34,7 @@ class Bluez5ObexProfileBase : public Bluez5ProfileBase
 {
 public:
 	Bluez5ObexProfileBase(Bluez5ObexSession::Type type,Bluez5Adapter *adapter, const std::string &uuid);
-	virtual ~Bluez5ObexProfileBase() = default;
+	virtual ~Bluez5ObexProfileBase();
 
 	void getProperties(const std::string &address, BluetoothPropertiesResultCallback callback);
 	void getProperty(const std::string &address, BluetoothProperty::Type type, BluetoothPropertyResultCallback callback);
@@ -41,6 +43,8 @@ public:
 	void disconnect(const std::string& address, BluetoothResultCallback callback);
 	void handleObexSessionStatus(const std::string &address, bool lost);
 	virtual void updateProperties(GVariant *changedProperties);
+	// With the session's properties proxy that emitted the change, to tell which session it is about.
+	virtual void updateSessionProperties(GObject */*propertiesProxy*/, GVariant *changedProperties) { updateProperties(changedProperties); }
 	static void handlePropertiesChanged(BluezObexSession1 *, gchar *interface,  GVariant *changedProperties, GVariant *invalidatedProperties, gpointer userData);
 	virtual void notifySessionStatus(const std::string &address, bool createdOrRemoved);
 
@@ -51,16 +55,22 @@ private:
 	Bluez5ObexSession::Type mType;
 
 protected:
+	std::set<std::string> mPendingSessions;	// keys of sessions being created
+
 	void createSession(const std::string &address, Bluez5ObexSession::Type type, BluetoothResultCallback callback);
 	void removeSession(const std::string &address);
-	void storeSession(const std::string &address, Bluez5ObexSession *session);
+	bool storeSession(const std::string &address, Bluez5ObexSession *session);
 	const Bluez5ObexSession* findSession(const std::string &address) const;
+	const Bluez5ObexSession* findSessionByPropertiesProxy(GObject *propertiesProxy) const;
 	void handleFailedToCreateSession(const std::string &address, BluetoothResultCallback callback);
-	void startTransfer(BluetoothFtpTransferId id, const std::string &objectPath, BluetoothOppTransferResultCallback callback, Bluez5ObexTransfer::TransferType type);
+	void startTransfer(BluetoothFtpTransferId id, const std::string &objectPath, const ObexPeer &peer, BluetoothOppTransferResultCallback callback, Bluez5ObexTransfer::TransferType type);
 	void updateActiveTransfer(BluetoothFtpTransferId id, Bluez5ObexTransfer *transfer, BluetoothOppTransferResultCallback callback);
 	void removeTransfer(BluetoothFtpTransferId id);
 	Bluez5ObexTransfer* findTransfer(BluetoothFtpTransferId id);
 	void removeFromSessionList(std::string address);
+	void detachSession(Bluez5ObexSession *session);
+	// Transfers a profile keeps itself (MAP, PBAP), ended with their session: they outlived it, and never completed.
+	virtual void removeSessionTransfers(Bluez5ObexSession */*session*/) { }
 };
 
 #endif

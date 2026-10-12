@@ -59,7 +59,7 @@ public:
 	gboolean handleNewConnection (GDBusMethodInvocation *invocation, const gchar *device, const GVariant *fd,
 								const GVariant *fd_props, SppDeviceInfo* deviceInfo);
 	gboolean handleRelease();
-	gboolean handleRxData(GIOChannel *io, GIOCondition condition, BluetoothSppChannelId id, const std::string &adapterAddress);
+	gboolean handleRxData(GIOChannel *io, GIOCondition condition, SppDeviceInfo *deviceInfo);
 	gboolean handleRequestDisconnection (BluezProfile1 *interface, GDBusMethodInvocation *invocation, const gchar *device, SppDeviceInfo* deviceInfo);
 
 	static gboolean onHandleNewConnection (BluezProfile1 *interface, GDBusMethodInvocation *invocation, const gchar *device, const GVariant *fd,
@@ -69,6 +69,7 @@ public:
 	static gboolean onHandleRelease (BluezProfile1 *interface, GDBusMethodInvocation *invocation, gpointer user_data);
 
 private:
+	std::string profileObjectPath(BluetoothSppChannelId channelId) const;
 	class SppDeviceInfo
 	{
 	public:
@@ -105,6 +106,8 @@ private:
 	void deallocateChannelId(BluetoothSppChannelId channelId);
 	void initialiseChannelIds();
 	bool removeConnectedDevice(BluetoothSppChannelId channelId);
+	void closeLink(SppDeviceInfo *deviceInfo, bool notify);
+	void releaseChannel(BluetoothSppChannelId channelId);
 
 	SppDeviceInfo* getSppDevice(const BluetoothSppChannelId channelId);
 	SppDeviceInfo* getSppDevice(const std::string &uuid);

@@ -45,8 +45,8 @@ public:
 										GDBusMethodInvocation *invocation,
 										const gchar *argReason, gpointer userData);
 private:
-	Bluez5Adapter *mAdapter;
-	Bluez5ProfileMesh *mMesh;
+	[[maybe_unused]] Bluez5Adapter *mAdapter;
+	[[maybe_unused]] Bluez5ProfileMesh *mMesh;
 };
 
 #endif //BLUEZ5MESHAPPLICATION_H

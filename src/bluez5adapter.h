@@ -20,12 +20,15 @@
 #include <unistd.h>
 #include <glib.h>
 #include <list>
+#include <vector>
 #include <unordered_map>
 #include <map>
 
 #include <bluetooth-sil-api.h>
 #include "bluez5device.h"
 #include "bluez5advertise.h"
+#include "utils.h"
+#include "asyncutils.h"
 
 extern "C" {
 #include "freedesktop-interface.h"
@@ -130,7 +133,7 @@ public:
 
 	BluetoothAdapterStatusObserver* getObserver() { return observer; }
 
-	void setPairing(bool pairing) { mPairing = pairing; }
+	void setPairing(bool pairing) { mPairing = pairing; if (!pairing) mCurrentPairingDevice = nullptr; }
 
 	Bluez5ObexClient* getObexClient() const { return mObexClient; }
 
@@ -161,7 +164,7 @@ public:
 	virtual void unregisterAdvertiser(uint8_t advertiserId, AdvertiserStatusCallback callback);
 	virtual void disableAdvertiser(uint8_t advertiserId, AdvertiserStatusCallback callback);
 	BluezAdapter1* getAdapterProxy() { return mAdapterProxy; }
-	std::string getAddress() { return bluez_adapter1_get_address(mAdapterProxy);}
+	std::string getAddress() { return mAdapterProxy ? stringOrEmpty(bluez_adapter1_get_address(mAdapterProxy)) : "";}
 	void updateProfileConnectionStatus(const std::string PROFILE_ID, std::string address, bool isConnected, const std::string &uuid);
 	void updateAvrcpVolume(std::string address, guint16 volume);
 	void recievePassThroughCommand(std::string address, std::string key, std::string state);
@@ -216,11 +219,21 @@ private:
 	std::string mName;
 	std::string mAlias;
 	std::string mInterfaceName;
-	BluetoothResultCallback mCancelDiscCallback;
-	bool mAdvertising;
+	// cancelDiscovery() requests waiting for discovery to stop, answered once when it does (or after a timeout:
+	// another D-Bus client can keep BlueZ discovering).
+	std::vector<BluetoothResultCallback> mCancelDiscCallbacks;
+	guint mCancelDiscTimeoutSource;
+	void completeCancelDiscovery();
+	static gboolean handleCancelDiscoveryTimeout(gpointer user_data);
+	bool mRepowerPending = false;
+	guint mRepowerTimeoutSource = 0;
+	static gboolean handleRepowerTimeout(gpointer user_data);
+	void setPoweredAsync(bool powered, std::function<void(bool ok)> done);
+	[[maybe_unused]] bool mAdvertising;
 	std::vector <std::string> mUuids;
 	Bluez5MprisPlayer *mPlayer;
 	BluezMedia1 *mMediaManager;
+	LifetimeGuard mLifetime;	// last: async replies see it expire before anything else goes
 };
 
 #endif // BLUEZ5ADAPTER_H

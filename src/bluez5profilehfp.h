@@ -33,11 +33,15 @@ class Bluez5ProfileHfp : public Bluez5ProfileBase,
 public:
 	Bluez5ProfileHfp(Bluez5Adapter* adapter);
 	~Bluez5ProfileHfp();
-	void openSCO(const std::string &address, BluetoothResultCallback callback) { return; }
-	void closeSCO(const std::string &address, BluetoothResultCallback callback) { return; }
-	BluetoothError sendResultCode(const std::string &address, const std::string &resultCode) { return BLUETOOTH_ERROR_UNSUPPORTED; }
-	BluetoothError sendAtCommand(const std::string &address, const BluetoothHfpAtCommand &atCommand) { return BLUETOOTH_ERROR_UNSUPPORTED; }
-	void getProperties(const std::string &address, BluetoothPropertiesResultCallback  callback) { return; }
+	// Answered, not dropped: the caller waited for these forever.
+	void openSCO(const std::string &/*address*/, BluetoothResultCallback callback) { callback(BLUETOOTH_ERROR_UNSUPPORTED); }
+	void closeSCO(const std::string &/*address*/, BluetoothResultCallback callback) { callback(BLUETOOTH_ERROR_UNSUPPORTED); }
+	BluetoothError sendResultCode(const std::string &/*address*/, const std::string &/*resultCode*/) { return BLUETOOTH_ERROR_UNSUPPORTED; }
+	BluetoothError sendAtCommand(const std::string &/*address*/, const BluetoothHfpAtCommand &/*atCommand*/) { return BLUETOOTH_ERROR_UNSUPPORTED; }
+	void getProperties(const std::string &/*address*/, BluetoothPropertiesResultCallback callback)
+	{
+		callback(BLUETOOTH_ERROR_UNSUPPORTED, BluetoothPropertiesList());
+	}
 	void getProperty(const std::string &address, BluetoothProperty::Type type, BluetoothPropertyResultCallback callback);
 	void connect(const std::string &address, BluetoothResultCallback callback);
 	void disconnect(const std::string &address, BluetoothResultCallback callback);

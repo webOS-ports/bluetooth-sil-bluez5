@@ -20,9 +20,11 @@
 #include "bluez5obexsession.h"
 #include "logging.h"
 #include "asyncutils.h"
-#include "bluez5busconfig.h"
 
-Bluez5ObexTransfer::Bluez5ObexTransfer(const std::string &objectPath, TransferType type) :
+// Neither proxy's cached properties are read (the state comes from the GetAll below and the signal), and both are
+// made on obexd's unique name: no call is made to make them. With G_DBUS_PROXY_FLAGS_NONE on the well-known name,
+// each waited for StartServiceByName and GetNameOwner from the bus and a GetAll from obexd.
+Bluez5ObexTransfer::Bluez5ObexTransfer(const std::string &objectPath, const ObexPeer &peer, TransferType type) :
 	mObjectPath(objectPath),
 	mTransferProxy(0),
 	mPropertiesProxy(0),
@@ -33,39 +35,62 @@ Bluez5ObexTransfer::Bluez5ObexTransfer(const std::string &objectPath, TransferTy
 	mTransferType(type)
 {
 	GError *error = 0;
+	const GDBusProxyFlags flags = G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES;
 
-	mTransferProxy = bluez_obex_transfer1_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
-														"org.bluez.obex", mObjectPath.c_str(), NULL, &error);
+	if (!peer.isValid())
+	{
+		ERROR(MSGID_FAILED_TO_CREATE_OBEX_TRANSFER_PROXY, 0, "No obexd for transfer %s", mObjectPath.c_str());
+		failSoon();
+		return;
+	}
+
+	mTransferProxy = bluez_obex_transfer1_proxy_new_sync(peer.connection, flags, peer.name.c_str(), mObjectPath.c_str(),
+	                                                     NULL, &error);
 	if (error)
 	{
 		ERROR(MSGID_FAILED_TO_CREATE_OBEX_TRANSFER_PROXY, 0,
 			  "Failed to create dbus proxy for obex transfer on path %s",
 			  mObjectPath.c_str());
 		g_error_free(error);
+		failSoon();
 		return;
 	}
 
-	mPropertiesProxy = free_desktop_dbus_properties_proxy_new_for_bus_sync(BLUEZ5_OBEX_DBUS_BUS_TYPE, G_DBUS_PROXY_FLAGS_NONE,
-																		   "org.bluez.obex", objectPath.c_str(), NULL, &error);
+	// Its signal subscription (AddMatch) goes out before the GetAll below, so a change after obexd's answer is
+	// not missed.
+	mPropertiesProxy = free_desktop_dbus_properties_proxy_new_sync(peer.connection, flags, peer.name.c_str(),
+	                                                               objectPath.c_str(), NULL, &error);
 	if (error)
 	{
 		ERROR(MSGID_FAILED_TO_CREATE_OBEX_TRANSFER_PROXY, 0, "Failed to create dbus proxy for obex transfer on path %s: %s",
 			  objectPath.c_str(), error->message);
 		g_error_free(error);
+		failSoon();
 		return;
 	}
 
 	g_signal_connect(G_OBJECT(mPropertiesProxy), "properties-changed", G_CALLBACK(handlePropertiesChanged), this);
 
-	auto fetchPropertiesCallback = [this](GAsyncResult *result) {
+	// A transfer that ends quickly is deleted before this answer (its final state arrives first): the callback
+	// read the freed transfer and reported its completion a second time.
+	auto fetchPropertiesCallback = [this, alive = mLifetime.token()](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 		GVariant *properties = 0;
 
-		ret = free_desktop_dbus_properties_call_get_all_finish(mPropertiesProxy, &properties, result, &error);
-		if (error)
+		ret = free_desktop_dbus_properties_call_get_all_finish(FREE_DESKTOP_DBUS_PROPERTIES(source), &properties, result, &error);
+		if (!ret || error || alive.expired())
 		{
-			g_error_free(error);
+			g_clear_error(&error);
+			if (properties)
+				g_variant_unref(properties);
+			// Gone before it could be read: it ended (or failed) before its signals were watched, and nothing
+			// would ever complete it. Reported as failed, unless its end was seen meanwhile.
+			if (!alive.expired() && mState != COMPLETE && mState != ERROR)
+			{
+				mState = ERROR;
+				notifyWatcherAboutChangedProperties();
+			}
 			return;
 		}
 
@@ -90,8 +115,29 @@ Bluez5ObexTransfer::~Bluez5ObexTransfer()
 			mWatchCallback();
 	}
 
-	g_object_unref(mTransferProxy);
-	g_object_unref(mPropertiesProxy);
+	// A pending call keeps the proxy, and with it this handler, alive after the transfer.
+	if (mPropertiesProxy)
+	{
+		g_signal_handlers_disconnect_by_data(mPropertiesProxy, this);
+		g_object_unref(mPropertiesProxy);
+	}
+	if (mTransferProxy)	// NULL when construction failed
+		g_object_unref(mTransferProxy);
+}
+
+// A transfer whose proxies could not be made is told as failed once its watch is set, which happens right after
+// it is created: it stayed INACTIVE, and its request never completed.
+void Bluez5ObexTransfer::failSoon()
+{
+	auto fail = [this, alive = mLifetime.token()]() {
+		if (!alive.expired() && mState != COMPLETE && mState != ERROR)
+		{
+			mState = ERROR;
+			notifyWatcherAboutChangedProperties();
+		}
+		return false;
+	};
+	g_idle_add(glibSourceMethodWrapper, new GlibSourceFunctionWrapper(fail));
 }
 
 void Bluez5ObexTransfer::watch(Bluez5ObexTransferWatchCallback callback)
@@ -105,20 +151,23 @@ void Bluez5ObexTransfer::notifyWatcherAboutChangedProperties()
 		mWatchCallback();
 }
 
+// Types are checked: a value of another type gave NULL from g_variant_get_string, and std::string(NULL) throws.
 bool Bluez5ObexTransfer::parsePropertyFromVariant(const std::string &key, GVariant *valueVar)
 {
 	bool changed = false;
+	bool isString = g_variant_is_of_type(valueVar, G_VARIANT_TYPE_STRING);
+	bool isUint64 = g_variant_is_of_type(valueVar, G_VARIANT_TYPE_UINT64);
 
-	if (key == "Transferred")
+	if (key == "Transferred" && isUint64)
 	{
 		mBytesTransferred = g_variant_get_uint64(valueVar);
 		changed = true;
 	}
-	else if (key == "Size")
+	else if (key == "Size" && isUint64)
 	{
 		mFileSize = g_variant_get_uint64(valueVar);
 	}
-	else if (key == "Status")
+	else if (key == "Status" && isString)
 	{
 		std::string state = g_variant_get_string(valueVar, NULL);
 
@@ -135,32 +184,23 @@ bool Bluez5ObexTransfer::parsePropertyFromVariant(const std::string &key, GVaria
 
 		changed = true;
 	}
-	else if (key == "Name")
+	else if (key == "Name" && isString)
 	{
 		mFileName = g_variant_get_string(valueVar, NULL);
 	}
-	else if(key == "Filename")
+	else if (key == "Filename" && isString)
 	{
 		mFilePath = g_variant_get_string(valueVar, NULL);
 	}
-	else if (key == "MessageHandle")
+	else if (key == "MessageHandle" && isString)
 	{
 		mMessageHandle = g_variant_get_string(valueVar, NULL);
 	}
 
-	if (mState == COMPLETE)
-	{
-		if (mTransferType == SENDING)
-		{
-		// When we're done with the transfer and the OBEX daemon has sent the
-		// complete state property change signal it might happen for small files
-		// that there is not increase for the number of bytes transferred. For
-		// that case we set the number of bytes transferred here to the size of
-		// transferred file to do the right on our abstraction level.
-			if (mBytesTransferred != mFileSize)
-				mBytesTransferred = mFileSize;
-		}
-	}
+	// Done: for small files obexd may send no Transferred update before the final state. Both directions, as an
+	// incoming file was reported complete with fewer bytes than it had.
+	if (mState == COMPLETE && mBytesTransferred < mFileSize)
+		mBytesTransferred = mFileSize;
 
 	return changed;
 }
@@ -169,7 +209,7 @@ void Bluez5ObexTransfer::updateFromProperties(GVariant *properties)
 {
 	bool changed = false;
 
-	for (int n = 0; n < g_variant_n_children(properties); n++)
+	for (size_t n = 0; n < g_variant_n_children(properties); n++)
 	{
 		GVariant *propertyVar = g_variant_get_child_value(properties, n);
 		GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -190,8 +230,8 @@ void Bluez5ObexTransfer::updateFromProperties(GVariant *properties)
 		notifyWatcherAboutChangedProperties();
 }
 
-void Bluez5ObexTransfer::handlePropertiesChanged(BluezObexTransfer1 *, gchar *interface,  GVariant *changedProperties,
-												   GVariant *invalidatedProperties, gpointer userData)
+void Bluez5ObexTransfer::handlePropertiesChanged(BluezObexTransfer1 *, gchar */*interface*/,  GVariant *changedProperties,
+												   GVariant */*invalidatedProperties*/, gpointer userData)
 {
 	auto transfer = static_cast<Bluez5ObexTransfer*>(userData);
 
@@ -200,14 +240,22 @@ void Bluez5ObexTransfer::handlePropertiesChanged(BluezObexTransfer1 *, gchar *in
 
 void Bluez5ObexTransfer::cancel(BluetoothResultCallback callback)
 {
-	auto cancelCallback = [this, callback](GAsyncResult *result) {
+	if (!mTransferProxy)
+	{
+		callback(BLUETOOTH_ERROR_FAIL);
+		return;
+	}
+
+	// Answered when the remote acknowledges, or the session dies, by when the transfer may be deleted: nothing
+	// of it is used here.
+	auto cancelCallback = [callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_obex_transfer1_call_cancel_finish(mTransferProxy, result, &error);
-		if (error)
+		ret = bluez_obex_transfer1_call_cancel_finish(BLUEZ_OBEX_TRANSFER1(source), result, &error);
+		if (!ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}
@@ -221,5 +269,8 @@ void Bluez5ObexTransfer::cancel(BluetoothResultCallback callback)
 
 bool Bluez5ObexTransfer::isPartOfSession(Bluez5ObexSession *session)
 {
-	return mObjectPath.find(session->getObjectPath()) == 0;
+	// Followed by a '/': as a plain prefix, session1 also claimed the transfers of session12.
+	const std::string &sessionPath = session->getObjectPath();
+	return mObjectPath.size() > sessionPath.size() && mObjectPath.compare(0, sessionPath.size(), sessionPath) == 0 &&
+	       mObjectPath[sessionPath.size()] == '/';
 }

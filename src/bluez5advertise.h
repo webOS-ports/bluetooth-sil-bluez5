@@ -74,7 +74,12 @@ public:
 		~AdvertiseObject()
 		{
 			if (mInterface)
+			{
+				// It stayed exported after the object was gone, its handler pointing at the advertiser. Unexported,
+				// this is the last reference, and the handler goes with it.
+				g_dbus_interface_skeleton_unexport(G_DBUS_INTERFACE_SKELETON(mInterface));
 				g_object_unref(mInterface);
+			}
 		}
 
 		AdvertiseObject(const AdvertiseObject&) = delete;
@@ -85,7 +90,15 @@ public:
 	};
 
 private:
-	void setConnection(GDBusConnection *connection) { mConn = connection; }
+	// Its own reference: the bus-acquired callback only lends the shared system bus connection.
+	void setConnection(GDBusConnection *connection)
+	{
+		if (connection)
+			g_object_ref(connection);
+		if (mConn)
+			g_object_unref(mConn);
+		mConn = connection;
+	}
 	std::string createInterface(uint8_t advId);
 	uint8_t nextAdvId();
 	guint mBusId;

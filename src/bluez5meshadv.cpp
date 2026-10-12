@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <cinttypes>
 //#include <dbus/dbus.h>
 #include "bluez5meshadv.h"
 #include "bluez5profilemesh.h"
@@ -29,7 +30,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-#include <thread>
+#include "meshconfig.h"
 
 #define BLUEZ_MESH_NAME "org.bluez.mesh"
 #define BLUEZ_MESH_APP_PATH "/" //"/silbluez/mesh"
@@ -65,69 +66,117 @@ mToken(0)
 {
 	GError *error = 0;
 
-	mDbusConn = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
-	if (error)
-	{
-		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Failed to setup dbus: %s", error->message);
-		g_error_free(error);
-		return;
-	}
-
+	// First: the agent and provisioner are used without a check, also when there is no connection.
 	mMeshAdvProv = new Bluez5MeshAdvProvisioner(mAdapter, mMesh);
 	mMeshAdvProvAgent = new Bluez5MeshAdvProvAgent(mAdapter, mMesh);
 	mMeshApplication = new Bluez5MeshApplication(mAdapter, mMesh);
 
-	mWatcherId = g_bus_watch_name(G_BUS_TYPE_SYSTEM, BLUEZ_MESH_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
+	// A system bus connection of its own for each adapter's profile. They all exported the application at "/" on
+	// the process's shared connection, where only the first could: with a second adapter (a second controller, or
+	// one bluetoothd had before meshd took it), meshd's JoinComplete for a network made through the other one went
+	// to the first one's handler, the network id was reported for the wrong adapter, and the caller never got it.
+	// Once, when such an adapter went again, nothing was left at "/" for meshd to read ("Failed to get app's dbus
+	// objects" on CreateNetwork).
+	// The application stays at "/": meshd 5.86 adds the remote provisioning client, without which no scan result
+	// arrives, only when it meets the Provisioner1 object before the element in GetManagedObjects. That holds for
+	// these paths, and did not for an application under /silbluez/mesh/hci0 (tried).
+	gchar *address = g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
+	if (address)
+	{
+		mDbusConn = g_dbus_connection_new_for_address_sync(address,
+			static_cast<GDBusConnectionFlags>(G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
+			                                  G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
+			NULL, NULL, &error);
+		g_free(address);
+	}
+	if (!mDbusConn)
+	{
+		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Failed to setup dbus: %s", error ? error->message : "no address");
+		if (error)
+			g_error_free(error);
+		return;
+	}
+
+	mWatcherId = g_bus_watch_name_on_connection(mDbusConn, BLUEZ_MESH_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
 					 handleBluezMeshServiceStarted, handleBluezMeshServiceStopped, this, NULL);
 }
 
 Bluez5MeshAdv::~Bluez5MeshAdv()
 {
-	if (mMeshAdvProv)
+	/* Stops watching a name: first, so that its callbacks do not run on what is torn down */
+	if (mWatcherId)
 	{
-		g_object_unref(mMeshAdvProv);
-		mMeshAdvProv = 0;
+		g_bus_unwatch_name(mWatcherId);
+		mWatcherId = 0;
 	}
 
-	if (mMeshAdvProvAgent)
+	if (mReqExpTimerId)
 	{
-		g_object_unref(mMeshAdvProvAgent);
-		mMeshAdvProvAgent = 0;
+		g_source_remove(mReqExpTimerId);	// it fires on this object
+		mReqExpTimerId = 0;
 	}
 
-	if (mMeshApplication)
-	{
-		g_object_unref(mMeshApplication);
-		mMeshApplication = 0;
-	}
+	for (auto &job : mKeyRefreshJobs)
+		if (job->timer)
+			g_source_remove(job->timer);
+	mKeyRefreshJobs.clear();
 
+	// The exported objects' handlers point at the helpers deleted below.
+	releaseObjectManagerServer();
+
+	// Plain C++ objects: they were given to g_object_unref, which failed G_IS_OBJECT on every adapter teardown
+	// (each service stop) and leaked them.
+	delete mMeshAdvProv;
+	mMeshAdvProv = 0;
+	delete mMeshAdvProvAgent;
+	mMeshAdvProvAgent = 0;
+	delete mMeshApplication;
+	mMeshApplication = 0;
+
+	releaseMeshProxies();
+
+	if (mDbusConn)
+	{
+		// Its own: closed, so that meshd sees the application go now, not when the last pending call lets go of it.
+		g_dbus_connection_close_sync(mDbusConn, NULL, NULL);
+		g_object_unref(mDbusConn);
+	}
+}
+
+void Bluez5MeshAdv::releaseObjectManagerServer()
+{
+	if (!mObjectManagerServer)
+		return;
+
+	g_dbus_object_manager_server_set_connection(mObjectManagerServer, NULL);	// unexports everything
+	g_object_unref(mObjectManagerServer);
+	mObjectManagerServer = nullptr;
+}
+
+// The proxies for meshd's objects, and the manager that reports them; the node proxy was never released.
+void Bluez5MeshAdv::releaseMeshProxies()
+{
+	if (mObjectManager)
+	{
+		g_signal_handlers_disconnect_by_data(mObjectManager, this);
+		g_object_unref(mObjectManager);
+		mObjectManager = 0;
+	}
 	if (mNetworkInterface)
 	{
 		g_object_unref(mNetworkInterface);
 		mNetworkInterface = 0;
 	}
-
 	if (mMgmtInterface)
 	{
 		g_object_unref(mMgmtInterface);
 		mMgmtInterface = 0;
 	}
-
-	if (mNetworkInterface)
+	if (mNodeInterface)
 	{
-		g_object_unref(mNetworkInterface);
-		mNetworkInterface = 0;
+		g_object_unref(mNodeInterface);
+		mNodeInterface = 0;
 	}
-
-	if (mObjectManager)
-	{
-		g_object_unref(mObjectManager);
-		mObjectManager = 0;
-	}
-
-	/* Stops watching a name */
-	if (mWatcherId)
-		g_bus_unwatch_name(mWatcherId);
 }
 
 void Bluez5MeshAdv::getRandomBytes(unsigned char *buf)
@@ -137,37 +186,66 @@ void Bluez5MeshAdv::getRandomBytes(unsigned char *buf)
 
 void Bluez5MeshAdv::updateNetworkId()
 {
-	DEBUG("updateNetworkId mToken: %llu", mToken);
+	DEBUG("updateNetworkId mToken: %" PRIu64, mToken);
 	mMesh->getMeshObserver()->updateNetworkId(convertAddressToLowerCase(mAdapter->getAddress()),
 		mToken);
 }
 
 BluetoothError Bluez5MeshAdv::attachToken(const std::string &token)
 {
-	std::string::size_type sz = 0;
-	mToken = std::stoull(token, &sz, 0);
-	DEBUG("attachToken mToken: %llu", mToken);
-	attach();
-	return BLUETOOTH_ERROR_NONE;
+	// From the service's database: std::stoull threw on a token that is not a number, and took the service down.
+	uint64_t parsed = 0;
+	if (!parseMeshToken(token, parsed))
+		return BLUETOOTH_ERROR_PARAM_INVALID;
+	mToken = parsed;
+	DEBUG("attachToken mToken: %" PRIu64, mToken);
+	return attach();
 }
 
-void Bluez5MeshAdv::attach()
+BluetoothError Bluez5MeshAdv::attach()
 {
-	auto attachCallback = [this](GAsyncResult *result) {
+	if (!mNetworkInterface)	// meshd not there: the call went to a NULL proxy and was lost
+	{
+		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Attach: no mesh network interface");
+		return BLUETOOTH_ERROR_NOT_ALLOWED;
+	}
+
+	// Its result goes to the observer (attachResult): it was only logged, and the service went on as if the node
+	// were attached.
+	auto attachCallback = [this, alive = mLifetime.token()](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gchar *node = 0;
 		GVariant *configuration = 0;
-		bluez_mesh_network1_call_attach_finish(mNetworkInterface, &node, &configuration, result, &error);
+		bluez_mesh_network1_call_attach_finish(BLUEZ_MESH_NETWORK1(source), &node, &configuration, result, &error);
+		BluetoothError status = BLUETOOTH_ERROR_NONE;
+		std::string nodePath;
 		if (error)
 		{
-			ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Atttach failed: %s", error->message);
+			ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Attach failed: %s", error->message);
+			// Which error it was: NotFound (meshd lost the node) lets the service drop the network it stored;
+			// anything else does not.
+			gchar *name = g_dbus_error_get_remote_error(error);
+			status = meshAttachErrorToError(name);
+			g_free(name);
 			g_error_free(error);
-			return;
 		}
-		DEBUG("attached node: %s", node);
+		else
+		{
+			DEBUG("attached node: %s", node);
+			nodePath = node ? node : "";
+			g_free(node);	// both leaked
+			if (configuration)
+				g_variant_unref(configuration);
+		}
+		if (alive.expired())	// the profile went with its adapter
+			return;
+		if (!nodePath.empty())
+			useNodeProxies(nodePath);
+		mMesh->getMeshObserver()->attachResult(status, convertAddressToLowerCase(mAdapter->getAddress()));
 	};
 	bluez_mesh_network1_call_attach(mNetworkInterface, BLUEZ_MESH_APP_PATH, mToken, NULL,
 									glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(attachCallback));
+	return BLUETOOTH_ERROR_NONE;
 }
 
 BluetoothError Bluez5MeshAdv::createNetwork()
@@ -175,25 +253,30 @@ BluetoothError Bluez5MeshAdv::createNetwork()
 	if(!mNetworkInterface)
 		return BLUETOOTH_ERROR_NOT_ALLOWED;
 
-	GError *error = 0;
 	getRandomBytes(mUuid);
 
 	GBytes *bytes = g_bytes_new(mUuid, 16);
 
 	GVariant *uuidVar = g_variant_new_from_bytes(G_VARIANT_TYPE_BYTESTRING, bytes, true);
+	g_bytes_unref(bytes);	// the variant holds its own reference: this one leaked
 
-	auto createNetworkCallback = [this](GAsyncResult *result) {
-
+	// Its result goes to the observer (createNetworkResult): a refusal was only logged, and the client waited for
+	// a network id that never came.
+	auto createNetworkCallback = [this, alive = mLifetime.token()](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
-		bluez_mesh_network1_call_create_network_finish(mNetworkInterface, result, &error);
+		bluez_mesh_network1_call_create_network_finish(BLUEZ_MESH_NETWORK1(source), result, &error);
+		BluetoothError status = BLUETOOTH_ERROR_NONE;
 		if (error)
 		{
 			ERROR(MSGID_MESH_PROFILE_ERROR, 0, "CreateNetwork failed: %s", error->message);
 			g_error_free(error);
-			return BLUETOOTH_ERROR_FAIL;
+			status = BLUETOOTH_ERROR_FAIL;
 		}
-		DEBUG("Mesh CreateNetwork success\n");
-		return BLUETOOTH_ERROR_NONE;
+		else
+			DEBUG("Mesh CreateNetwork success\n");
+		if (alive.expired())	// the profile went with its adapter
+			return;
+		mMesh->getMeshObserver()->createNetworkResult(status, convertAddressToLowerCase(mAdapter->getAddress()));
 	};
 
 	bluez_mesh_network1_call_create_network(mNetworkInterface, BLUEZ_MESH_APP_PATH, uuidVar, NULL, glibAsyncMethodWrapper,
@@ -203,15 +286,21 @@ BluetoothError Bluez5MeshAdv::createNetwork()
 
 void Bluez5MeshAdv::getMeshInfo(BleMeshInfoCallback callback)
 {
-
+	// Answered: it was an empty stub, and its caller waited forever.
+	BleMeshInfo meshInfo;
+	callback(BLUETOOTH_ERROR_UNSUPPORTED, meshInfo);
 }
 
-void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const gchar *name,
-												  const gchar *nameOwner, gpointer userData)
+void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const gchar */*name*/,
+												  const gchar */*nameOwner*/, gpointer userData)
 {
 	GError *error = 0;
 	Bluez5MeshAdv *meshAdv = static_cast<Bluez5MeshAdv *>(userData);
+	// Kept, to unexport its objects when meshd or this object goes: they stayed exported, their handlers
+	// pointing at freed objects, and a new one could not export at the same path.
+	meshAdv->releaseObjectManagerServer();
 	GDBusObjectManagerServer * objectManagerServer = g_dbus_object_manager_server_new(BLUEZ_MESH_APP_PATH);
+	meshAdv->mObjectManagerServer = objectManagerServer;
 	GDBusObjectSkeleton *meshAppSkeleton = g_dbus_object_skeleton_new(BLUEZ_MESH_APP_PATH);
 
 	meshAdv->mMeshApplication->registerApplicationInterface(objectManagerServer, meshAppSkeleton, meshAdv);
@@ -219,6 +308,7 @@ void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const g
 	meshAdv->mMeshAdvProvAgent->registerProvAgentInterface(objectManagerServer);
 
 	g_dbus_object_manager_server_export(objectManagerServer, meshAppSkeleton);
+	g_object_unref(meshAppSkeleton);	// the server holds its own reference: this one leaked
 
 	for (auto element = meshAdv->mElements.begin(); element != meshAdv->mElements.end(); element++)
 	{
@@ -227,6 +317,7 @@ void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const g
 
 	g_dbus_object_manager_server_set_connection(objectManagerServer, conn);
 
+	meshAdv->releaseMeshProxies();	// a restart of meshd overwrote (and leaked) them
 	meshAdv->mObjectManager = g_dbus_object_manager_client_new_sync(
 		conn, G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
 		BLUEZ_MESH_NAME, "/", NULL, NULL, NULL, NULL, &error);
@@ -242,90 +333,169 @@ void Bluez5MeshAdv::handleBluezMeshServiceStarted(GDBusConnection *conn, const g
 	g_signal_connect(meshAdv->mObjectManager, "object-added", G_CALLBACK(handleObjectAdded), meshAdv);
 	g_signal_connect(meshAdv->mObjectManager, "object-removed", G_CALLBACK(handleObjectRemoved), meshAdv);
 
+	// Each object and interface released on every path: an error returned from inside the loop leaked the list,
+	// the objects left in it and the interface.
 	GList* objects = g_dbus_object_manager_get_objects(meshAdv->mObjectManager);
 	DEBUG("Mesh object length: %d", g_list_length(objects));
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (GList *l = objects; l; l = l->next)
 	{
-		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
+		auto object = static_cast<GDBusObject*>(l->data);
 		std::string objectPath = g_dbus_object_get_object_path(object);
 		DEBUG("Object path: %s", objectPath.c_str());
 
 		auto networkInterface = g_dbus_object_get_interface(object, "org.bluez.mesh.Network1");
-		if (networkInterface)
+		if (networkInterface && !meshAdv->mNetworkInterface)
 		{
 			DEBUG("org.bluez.mesh.Network1 interface added");
-			meshAdv->mNetworkInterface = bluez_mesh_network1_proxy_new_for_bus_sync(
-				G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
-				BLUEZ_MESH_NAME, objectPath.c_str(), NULL, &error);
-			if (error)
+			GError *proxyError = 0;
+			meshAdv->mNetworkInterface = bluez_mesh_network1_proxy_new_sync(
+				conn, G_DBUS_PROXY_FLAGS_NONE,
+				BLUEZ_MESH_NAME, objectPath.c_str(), NULL, &proxyError);
+			if (proxyError)
 			{
-				ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Not able to get Mesh Network interface");
-				g_error_free(error);
-				return;
+				ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Not able to get Mesh Network interface: %s", proxyError->message);
+				g_error_free(proxyError);
 			}
+		}
+		if (networkInterface)
 			g_object_unref(networkInterface);
-		}
-		else
-		{
-			DEBUG("org.bluez.mesh.Network1 interface add failed!!");
-		}
-		g_object_unref(object);
 	}
-	g_list_free(objects);
+	g_list_free_full(objects, g_object_unref);
+
+	// meshd came back (restarted, or after a crash) while this adapter had a node: attached again. The node's
+	// proxies went with the old meshd and come only with an Attach, so every call after a meshd restart failed as
+	// NOT_ALLOWED until the service was restarted. The result goes to attachResult.
+	if (meshAdv->mToken && meshAdv->mNetworkInterface)
+	{
+		DEBUG("mesh daemon is back: attaching again");
+		meshAdv->attach();
+	}
 }
 
-void Bluez5MeshAdv::handleBluezMeshServiceStopped(GDBusConnection *conn, const gchar *name,
+// It did nothing: the next start made a second object manager and exported a second time next to the first.
+void Bluez5MeshAdv::handleBluezMeshServiceStopped(GDBusConnection */*conn*/, const gchar */*name*/,
 												  gpointer userData)
 {
+	Bluez5MeshAdv *meshAdv = static_cast<Bluez5MeshAdv *>(userData);
+
+	meshAdv->releaseObjectManagerServer();
+	meshAdv->releaseMeshProxies();
 }
 
-void Bluez5MeshAdv::handleObjectAdded(GDBusObjectManager *objectManager,
+namespace {
+
+// A proxy for an interface meshd added, or NULL (logged) when it could not be made.
+template <typename T, typename F>
+T *meshProxy(F create, GDBusConnection *conn, const std::string &objectPath, const char *name)
+{
+	GError *error = 0;
+	T *proxy = create(conn, G_DBUS_PROXY_FLAGS_NONE, BLUEZ_MESH_NAME, objectPath.c_str(), NULL, &error);
+	if (error)
+	{
+		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Not able to get %s: %s", name, error->message);
+		g_error_free(error);
+	}
+	return proxy;
+}
+
+bool proxyIsFor(gpointer proxy, const std::string &objectPath)
+{
+	return proxy && objectPath == g_dbus_proxy_get_object_path(G_DBUS_PROXY(proxy));
+}
+
+} // namespace
+
+// The proxies for the node an Attach returned. They came only from an object-added signal: after a service restart
+// meshd still listed the node's object (it removes the interfaces when the application goes, and adds them back
+// with the next Attach), no object-added came, and every call needing the node failed as NOT_ALLOWED although the
+// attach succeeded.
+void Bluez5MeshAdv::useNodeProxies(const std::string &nodePath)
+{
+	if (!proxyIsFor(mNodeInterface, nodePath))
+	{
+		if (mNodeInterface)
+			g_object_unref(mNodeInterface);
+		mNodeInterface = meshProxy<BluezMeshNode1>(bluez_mesh_node1_proxy_new_sync, mDbusConn, nodePath, "Node1");
+	}
+	if (!proxyIsFor(mMgmtInterface, nodePath))
+	{
+		if (mMgmtInterface)
+			g_object_unref(mMgmtInterface);
+		mMgmtInterface = meshProxy<BluezMeshManagement1>(bluez_mesh_management1_proxy_new_sync, mDbusConn, nodePath,
+		                                                 "Management1");
+	}
+}
+
+// The interfaces looked up are new references, released here (all three leaked), and a proxy replaced is
+// released first (overwritten before). One GError was reused for three calls and never checked.
+void Bluez5MeshAdv::handleObjectAdded(GDBusObjectManager */*objectManager*/,
 										  GDBusObject *object, void *userData)
 {
 	DEBUG("Bluez5MeshAdv::handleObjectAdded");
-	GError *error = 0;
 	Bluez5MeshAdv *meshAdv = static_cast<Bluez5MeshAdv *>(userData);
 	std::string objectPath = g_dbus_object_get_object_path(object);
 
 	//TODO: Compare the application paths
-	if (!meshAdv->mNetworkInterface)
+	auto networkInterface = g_dbus_object_get_interface(object, "org.bluez.mesh.Network1");
+	if (networkInterface)
 	{
-		auto networkInterface = g_dbus_object_get_interface(object, "org.bluez.mesh.Network1");
-		if (networkInterface)
-		{
-			DEBUG("org.bluez.mesh.Network1 interface added");
-			meshAdv->mNetworkInterface = bluez_mesh_network1_proxy_new_for_bus_sync(
-				G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
-				BLUEZ_MESH_NAME, objectPath.c_str(), NULL, &error);
-		}
+		DEBUG("org.bluez.mesh.Network1 interface added");
+		if (!meshAdv->mNetworkInterface)
+			meshAdv->mNetworkInterface = meshProxy<BluezMeshNetwork1>(bluez_mesh_network1_proxy_new_sync,
+			                                                          meshAdv->mDbusConn, objectPath, "Network1");
+		g_object_unref(networkInterface);
 	}
 
 	auto meshManagementInterface = g_dbus_object_get_interface(object, "org.bluez.mesh.Management1");
 	if (meshManagementInterface)
 	{
 		DEBUG("org.bluez.mesh.Management1 interface added");
-		meshAdv->mMgmtInterface = bluez_mesh_management1_proxy_new_for_bus_sync(
-			G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
-			BLUEZ_MESH_NAME, objectPath.c_str(), NULL, &error);
+		if (meshAdv->mMgmtInterface)
+			g_object_unref(meshAdv->mMgmtInterface);
+		meshAdv->mMgmtInterface = meshProxy<BluezMeshManagement1>(bluez_mesh_management1_proxy_new_sync,
+		                                                          meshAdv->mDbusConn, objectPath, "Management1");
+		g_object_unref(meshManagementInterface);
 	}
 
 	auto meshNodeInterface = g_dbus_object_get_interface(object, "org.bluez.mesh.Node1");
 	if (meshNodeInterface)
 	{
 		DEBUG("org.bluez.mesh.Node1 interface added");
-		meshAdv->mNodeInterface = bluez_mesh_node1_proxy_new_for_bus_sync(
-			G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
-			BLUEZ_MESH_NAME, objectPath.c_str(), NULL, &error);
+		if (meshAdv->mNodeInterface)
+			g_object_unref(meshAdv->mNodeInterface);
+		meshAdv->mNodeInterface = meshProxy<BluezMeshNode1>(bluez_mesh_node1_proxy_new_sync,
+		                                                     meshAdv->mDbusConn, objectPath, "Node1");
+		g_object_unref(meshNodeInterface);
 	}
 }
 
-void Bluez5MeshAdv::handleObjectRemoved(GDBusObjectManager *objectManager,
+// The node object going (the node left, or was released) takes its proxies with it: calls on them were lost and
+// reported as done.
+void Bluez5MeshAdv::handleObjectRemoved(GDBusObjectManager */*objectManager*/,
 											GDBusObject *object, void *userData)
 {
+	Bluez5MeshAdv *meshAdv = static_cast<Bluez5MeshAdv *>(userData);
+	std::string objectPath = g_dbus_object_get_object_path(object);
+
+	if (proxyIsFor(meshAdv->mMgmtInterface, objectPath))
+	{
+		g_object_unref(meshAdv->mMgmtInterface);
+		meshAdv->mMgmtInterface = 0;
+	}
+	if (proxyIsFor(meshAdv->mNodeInterface, objectPath))
+	{
+		g_object_unref(meshAdv->mNodeInterface);
+		meshAdv->mNodeInterface = 0;
+	}
 }
 
+// Calls on meshd's proxies need them: before meshd runs, or before attach or createNetwork completed, they are
+// NULL, and the generated calls then return without an error, so the SIL reported success for what was never sent.
 BluetoothError Bluez5MeshAdv::scanUnprovisionedDevices(const uint16_t scanTimeout)
 {
+	if (!mMgmtInterface)
+		return BLUETOOTH_ERROR_NOT_ALLOWED;
+
 	GVariantBuilder *builder = 0;
 	GVariant *params = 0;
 	builder = g_variant_builder_new (G_VARIANT_TYPE ("a{sv}"));
@@ -346,6 +516,9 @@ BluetoothError Bluez5MeshAdv::scanUnprovisionedDevices(const uint16_t scanTimeou
 
 BluetoothError Bluez5MeshAdv::unprovisionedScanCancel()
 {
+	if (!mMgmtInterface)
+		return BLUETOOTH_ERROR_NOT_ALLOWED;
+
 	GError *error = 0;
 	bluez_mesh_management1_call_unprovisioned_scan_cancel_sync(mMgmtInterface, NULL, &error);
 	if (error)
@@ -357,28 +530,36 @@ BluetoothError Bluez5MeshAdv::unprovisionedScanCancel()
 	return BLUETOOTH_ERROR_NONE;
 }
 
-static unsigned char gethex(const char *s, char **endptr) {
-  return strtoul(s, endptr, 16);
-}
 
-BluetoothError Bluez5MeshAdv::provision(const std::string &uuid, const uint16_t timeout)
+BluetoothError Bluez5MeshAdv::provision(const std::string &uuid, const uint16_t /*timeout*/)
 {
+	// 32 hex digits, from the app: a shorter string was read past its end.
+	if (uuid.size() != 32 || uuid.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+		return BLUETOOTH_ERROR_PARAM_INVALID;
+
+	if (!mMgmtInterface)
+		return BLUETOOTH_ERROR_NOT_ALLOWED;
+
 	const char *uuidStr = uuid.c_str();
 	uint8_t uuidByte[16] = {0};
 	int j = 0;
 
-	auto provisionCallback = [this](GAsyncResult *result) {
-
+	// meshd answers a rejected AddNode with an error only, no AddNodeFailed: the client waited for its
+	// provisionResult forever.
+	auto provisionCallback = [this, alive = mLifetime.token(), uuid = convertToLowerCase(uuid)](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
-		bluez_mesh_management1_call_add_node_finish(mMgmtInterface, result, &error);
-		if (error)
+		bluez_mesh_management1_call_add_node_finish(BLUEZ_MESH_MANAGEMENT1(source), result, &error);
+		if (!error)
 		{
-			ERROR(MSGID_MESH_PROFILE_ERROR, 0, "provision failed: %s", error->message);
-			g_error_free(error);
-			return BLUETOOTH_ERROR_FAIL;
+			DEBUG("provision started\n");
+			return;
 		}
-		DEBUG("provision success\n");
-		return BLUETOOTH_ERROR_NONE;
+		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "provision failed: %s", error->message);
+		g_error_free(error);
+		if (alive.expired())	// the profile went with its adapter
+			return;
+		mMesh->getMeshObserver()->provisionResult(BLUETOOTH_ERROR_FAIL, convertAddressToLowerCase(mAdapter->getAddress()),
+		                                          "endProvision", "", 0, "", "", 0, 0, uuid);
 	};
 
 	for (int i = 0; i < 16; ++i)
@@ -390,6 +571,7 @@ BluetoothError Bluez5MeshAdv::provision(const std::string &uuid, const uint16_t 
 
 	GBytes *bytes = g_bytes_new(uuidByte, 16);
 	GVariant *uuidVar = g_variant_new_from_bytes(G_VARIANT_TYPE_BYTESTRING, bytes, true);
+	g_bytes_unref(bytes);	// the variant holds its own reference: this one leaked
 
 	bluez_mesh_management1_call_add_node(mMgmtInterface, uuidVar, createEmptyStringArrayVariant(), NULL, glibAsyncMethodWrapper,
 										new GlibAsyncFunctionWrapper(provisionCallback));
@@ -409,6 +591,9 @@ BluetoothError Bluez5MeshAdv::supplyStatic(const std::string &oobData)
 
 BluetoothError Bluez5MeshAdv::createAppKey(uint16_t netKeyIndex, uint16_t appKeyIndex)
 {
+	if (!mMgmtInterface)
+		return BLUETOOTH_ERROR_NOT_ALLOWED;
+
 	GError *error = 0;
 	bluez_mesh_management1_call_create_app_key_sync(mMgmtInterface,
 													netKeyIndex, appKeyIndex, NULL, &error);
@@ -421,7 +606,7 @@ BluetoothError Bluez5MeshAdv::createAppKey(uint16_t netKeyIndex, uint16_t appKey
 	return BLUETOOTH_ERROR_NONE;
 }
 
-BluetoothError Bluez5MeshAdv::modelSend(uint16_t srcAddress, uint16_t destAddress,
+BluetoothError Bluez5MeshAdv::modelSend(uint16_t /*srcAddress*/, uint16_t destAddress,
 										uint16_t appKeyIndex,
 										const std::string &command,
 										BleMeshPayload &payload)
@@ -442,8 +627,9 @@ BluetoothError Bluez5MeshAdv::modelSend(uint16_t srcAddress, uint16_t destAddres
 
 BluetoothError Bluez5MeshAdv::sendPassThrough(uint16_t destAddress, uint16_t appIndex, const std::vector<uint8_t> value)
 {
-	uint8_t msg[32];
-	uint16_t n;
+	if (!mNodeInterface)
+		return BLUETOOTH_ERROR_NOT_ALLOWED;
+
 	GError *error = 0;
 	GVariantBuilder *builder = 0;
 	GVariant *params = 0;
@@ -478,18 +664,38 @@ BluetoothError Bluez5MeshAdv::sendPassThrough(uint16_t destAddress, uint16_t app
 
 BluetoothError Bluez5MeshAdv::setOnOff(uint16_t destAddress, uint16_t appIndex, bool onoff, bool ack)
 {
+	if (!mNodeInterface || mElements.empty())
+		return BLUETOOTH_ERROR_NOT_ALLOWED;
+
 	if (ack)
 	{
 		startTimer("setOnOff");
 		mConfiguration.setOnOffState(onoff);
+		mOnOffAckPending = true;	// for this node's OnOff Status only, see takeOnOffAck
+		mOnOffAckDest = destAddress;
 	}
-	return mElements[0].setOnOff(destAddress, appIndex, onoff);
+	BluetoothError error = mElements[0].setOnOff(destAddress, appIndex, onoff);
+	if (error != BLUETOOTH_ERROR_NONE)
+		mOnOffAckPending = false;	// send() stopped the timer
+	return error;
+}
+
+bool Bluez5MeshAdv::takeOnOffAck(uint32_t opcode, uint16_t src)
+{
+	if (!mOnOffAckPending || !mReqExpTimerId || !isOnOffStatusFor(opcode, src, mOnOffAckDest))
+		return false;
+	mOnOffAckPending = false;
+	stopReqTimer();
+	return true;
 }
 
 BluetoothError Bluez5MeshAdv::configGet(uint16_t destAddress,
 										const std::string &config,
 										uint16_t netKeyIndex)
 {
+	if (!mNodeInterface || mElements.empty())
+		return BLUETOOTH_ERROR_NOT_ALLOWED;
+
 	return mElements[0].configGet(destAddress, config, netKeyIndex);
 
 }
@@ -499,7 +705,7 @@ BluetoothError Bluez5MeshAdv::configSet(
 		uint8_t gattProxyState, uint16_t netKeyIndex, uint16_t appKeyIndex,
 		uint32_t modelId, uint8_t ttl, BleMeshRelayStatus *relayStatus)
 {
-	if (!mNodeInterface)
+	if (!mNodeInterface || mElements.empty())
 	{
 		return BLUETOOTH_ERROR_NOT_ALLOWED;
 	}
@@ -510,7 +716,7 @@ BluetoothError Bluez5MeshAdv::configSet(
 
 BluetoothError Bluez5MeshAdv::deleteNode(uint16_t destAddress, uint8_t count)
 {
-	if (!mNodeInterface)
+	if (!mNodeInterface || mElements.empty())
 	{
 		return BLUETOOTH_ERROR_NOT_ALLOWED;
 	}
@@ -539,6 +745,12 @@ GVariant* Bluez5MeshAdv::prepareSendDevKeyData(uint8_t *msg, uint16_t n)
 BluetoothError Bluez5MeshAdv::send(uint16_t destAddress, uint16_t appKeyIndex,
 									uint8_t *msg, uint16_t msgLen)
 {
+	if (!mNodeInterface)
+	{
+		stopReqTimer();
+		return BLUETOOTH_ERROR_NOT_ALLOWED;
+	}
+
 	BluetoothError silError = BLUETOOTH_ERROR_FAIL;
 
 	GError *error = 0;
@@ -574,6 +786,9 @@ BluetoothError Bluez5MeshAdv::send(uint16_t destAddress, uint16_t appKeyIndex,
 
 BluetoothError Bluez5MeshAdv::devKeySend(uint16_t destAddress, uint16_t netKeyIndex, uint8_t *msg, uint16_t n)
 {
+	if (!mNodeInterface)
+		return BLUETOOTH_ERROR_NOT_ALLOWED;
+
 	GError *error = 0;
 	BluetoothError silError = BLUETOOTH_ERROR_FAIL;
 
@@ -618,20 +833,26 @@ BluetoothError Bluez5MeshAdv::registerElement(uint8_t index,
 	return BLUETOOTH_ERROR_NONE;
 }
 
-static gboolean atTimeOut(gpointer userdata)
+gboolean Bluez5MeshAdv::handleReqTimerExpired(gpointer userdata)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
 	Bluez5MeshAdv *adv = (Bluez5MeshAdv *)userdata;
+	// This source ends with the return below: the id was kept, and the next stopReqTimer() removed a source that
+	// was gone (a GLib critical), or by then another one with a reused id.
+	adv->mReqExpTimerId = 0;
 	if (adv->mConfiguration.getConfig() == "setOnOff")
 	{
-		// Ack is not supported buy nrf Device so returning same state
+		// No ack in time: reported as done with the state that was set, as the nRF devices this was written for
+		// do not ack. An acknowledged set is effectively fire-and-forget; takeOnOffAck() ends it early when the
+		// addressed node does answer.
+		adv->mOnOffAckPending = false;
 		adv->mMesh->getMeshObserver()->modelSetOnOffResult(convertAddressToLowerCase(adv->mAdapter->getAddress()), adv->mConfiguration.getOnOffState(), BLUETOOTH_ERROR_NONE);
 	}
 	else
 	{
 		adv->mMesh->getMeshObserver()->modelConfigResult(convertAddressToLowerCase(adv->mAdapter->getAddress()), adv->mConfiguration, BLUETOOTH_ERROR_MESH_NO_RESPONSE_FROM_NODE);
 	}
-	return false;
+	return G_SOURCE_REMOVE;
 }
 
 void Bluez5MeshAdv::startTimer(const std::string config)
@@ -639,7 +860,7 @@ void Bluez5MeshAdv::startTimer(const std::string config)
 	stopReqTimer();
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
 	mConfiguration.setConfig(std::move(config));
-	mReqExpTimerId = g_timeout_add( RESPOND_WAIT_DURATION * ONE_SECOND, atTimeOut, this);
+	mReqExpTimerId = g_timeout_add( RESPOND_WAIT_DURATION * ONE_SECOND, handleReqTimerExpired, this);
 	DEBUG("Request timer started [%d]",mReqExpTimerId);
 }
 
@@ -657,6 +878,9 @@ void Bluez5MeshAdv::stopReqTimer()
 
 BluetoothError Bluez5MeshAdv::getCompositionData(uint16_t destAddress)
 {
+	if (!mNodeInterface || mElements.empty())
+		return BLUETOOTH_ERROR_NOT_ALLOWED;
+
 	return mElements[0].getCompositionData(destAddress);
 }
 
@@ -674,7 +898,6 @@ BluetoothError Bluez5MeshAdv::deleteRemoteNodeFromLocalKeyDatabase(uint16_t prim
 	}
 
 	GError *error = 0;
-	BluetoothError silError = BLUETOOTH_ERROR_FAIL;
 
 	bluez_mesh_management1_call_delete_remote_node_sync(mMgmtInterface,
 													primaryAddress, count, NULL, &error);
@@ -776,11 +999,15 @@ void Bluez5MeshAdv::distributeKeys(bool refreshAppKeys, std::vector<uint16_t> ap
 	}
 }
 
-void Bluez5MeshAdv::setKeyRefreshPhase(uint16_t netKeyIndex, uint16_t phase, std::vector<BleMeshNode> nodes)
+// False when meshd is gone: the call went to a NULL proxy and was reported as done.
+bool Bluez5MeshAdv::setKeyRefreshPhase(uint16_t netKeyIndex, uint16_t phase, std::vector<BleMeshNode> nodes)
 {
 	GError *error = nullptr;
 	std::string	status = "active";
 	BluetoothError btError = BLUETOOTH_ERROR_NONE;
+
+	if (!mMgmtInterface || !mNodeInterface || mElements.empty())
+		return false;
 
 	bluez_mesh_management1_call_set_key_phase_sync(mMgmtInterface, netKeyIndex, phase, NULL, &error);
 	if (error)
@@ -788,6 +1015,7 @@ void Bluez5MeshAdv::setKeyRefreshPhase(uint16_t netKeyIndex, uint16_t phase, std
 		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Set key phase failed: %s", error->message);
 		g_error_free(error);
 		error = NULL;
+		// The phase it is still in.
 		mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_FAIL,
 										convertAddressToLowerCase(mAdapter->getAddress()),
 										netKeyIndex, status, phase - 1);
@@ -814,104 +1042,151 @@ void Bluez5MeshAdv::setKeyRefreshPhase(uint16_t netKeyIndex, uint16_t phase, std
 					node.getPrimaryElementAddress());
 		}
 	}
+	return true;
 }
 
+// Phase 1 here, on the main loop like everything else; phases 2 and 3 and the completion follow from
+// handleKeyRefreshStep, each after the client's wait.
 void Bluez5MeshAdv::keyRefresh(BluetoothResultCallback callback,
 	bool refreshAppKeys, std::vector<uint16_t> appKeyIndexesToRefresh,
 	std::vector<uint16_t> blackListedNodes,
 	std::vector<BleMeshNode> nodes, uint16_t netKeyIndex, int32_t waitTime)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
+
+	if (!mMgmtInterface || !mNodeInterface || mElements.empty())
+	{
+		callback(BLUETOOTH_ERROR_NOT_ALLOWED);
+		return;
+	}
+
+	// From the LS2 client unchecked: a negative wait slept for about 136 years.
+	waitTime = clampWaitSeconds(waitTime);
+
+	std::string status = "idle";
+
 	GError *error = 0;
 
-	std::thread t( [this, callback, refreshAppKeys, appKeyIndexesToRefresh,
-									blackListedNodes, nodes, netKeyIndex, waitTime]() mutable
+	/* Start of phase 1 */
+	/* Update netKey in the provisioner */
+	bluez_mesh_management1_call_update_subnet_sync(mMgmtInterface, netKeyIndex,
+	NULL, &error);
+	if (error)
 	{
-		std::string status = "idle";
-
-		GError *error = 0;
-
-		/* Start of phase 1 */
-		/* Update netKey in the provisioner */
-		bluez_mesh_management1_call_update_subnet_sync(mMgmtInterface, netKeyIndex,
-		NULL, &error);
-		if (error)
+		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "UpdateSubnet failed: %s", error->message);
+		if (strstr(error->message, "Does not exist")) // Wrong net key
 		{
-			ERROR(MSGID_MESH_PROFILE_ERROR, 0, "devKeySend failed: %s", error->message);
-			if (strstr(error->message, "Does not exist")) // Wrong net key
+			callback(BLUETOOTH_ERROR_MESH_NET_KEY_INDEX_DOES_NOT_EXIST);
+		}
+		else
+			callback(BLUETOOTH_ERROR_FAIL);
+		g_error_free(error);
+		error = NULL;
+		return;
+	}
+	DEBUG("Updating netKeyIndex in provisioner completed");
+	callback(BLUETOOTH_ERROR_NONE);
+	mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_NONE,
+									convertAddressToLowerCase(mAdapter->getAddress()),
+									netKeyIndex, status, 0);
+
+	status = "active";
+	mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_NONE,
+										convertAddressToLowerCase(mAdapter->getAddress()),
+										netKeyIndex, status, 1);
+	// Update network key in local node: of the subnet being refreshed, it was always subnet and index 0.
+	bluez_mesh_node1_call_add_net_key_sync(
+		mNodeInterface, BLUEZ_MESH_ELEMENT_PATH, LOCAL_NODE_ADDRESS, netKeyIndex, netKeyIndex, true, NULL, &error);
+	if (error)
+	{
+		// Adding local node to the network failed. this should never happen!!
+		mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_MESH_NETKEY_UPDATE_FAILED,
+										convertAddressToLowerCase(mAdapter->getAddress()),
+										netKeyIndex, status, 1, LOCAL_NODE_ADDRESS);
+		g_error_free(error);
+		error = NULL;
+	}
+	DEBUG("Distributing netKeyIndex to local node completed");
+
+	/* Remove blackilisted node from list of nodes so that keys are distributed to
+	* nodes that are not blacklisted
+	*/
+	for (size_t i = 0 ; i < blackListedNodes.size(); ++i)
+	{
+		for (auto node = nodes.begin(); node != nodes.end();)
+		{
+			if (blackListedNodes[i] == node->getPrimaryElementAddress())
 			{
-				callback(BLUETOOTH_ERROR_MESH_NET_KEY_INDEX_DOES_NOT_EXIST);
+				//delete the blacklisted node
+				deleteRemoteNodeFromLocalKeyDatabase(node->getPrimaryElementAddress(), node->getNumberOfElements());
+				node = nodes.erase(node);
 			}
 			else
-				callback(BLUETOOTH_ERROR_FAIL);
-			g_error_free(error);
-			error = NULL;
-			return;
-		}
-		DEBUG("Updating netKeyIndex in provisioner completed");
-		callback(BLUETOOTH_ERROR_NONE);
-		mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_NONE,
-										convertAddressToLowerCase(mAdapter->getAddress()),
-										netKeyIndex, status, 0);
-
-		status = "active";
-		mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_NONE,
-											convertAddressToLowerCase(mAdapter->getAddress()),
-											netKeyIndex, status, 1);
-		// Update network key in local node
-		bluez_mesh_node1_call_add_net_key_sync(
-			mNodeInterface, BLUEZ_MESH_ELEMENT_PATH, LOCAL_NODE_ADDRESS, 0, 0, true, NULL, &error);
-		if (error)
-		{
-			// Adding local node to the network failed. this should never happen!!
-			mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_MESH_NETKEY_UPDATE_FAILED,
-											convertAddressToLowerCase(mAdapter->getAddress()),
-											netKeyIndex, status, 1, LOCAL_NODE_ADDRESS);
-			g_error_free(error);
-			error = NULL;
-		}
-		DEBUG("Distributing netKeyIndex to local node completed");
-
-		/* Remove blackilisted node from list of nodes so that keys are distributed to
-		* nodes that are not blacklisted
-		*/
-		for (int i = 0 ; i < blackListedNodes.size(); ++i)
-		{
-			for (auto node = nodes.begin(); node != nodes.end();)
 			{
-				if (blackListedNodes[i] == node->getPrimaryElementAddress())
-				{
-					//delete the blacklisted node
-					deleteRemoteNodeFromLocalKeyDatabase(node->getPrimaryElementAddress(), node->getNumberOfElements());
-					node = nodes.erase(node);
-				}
-				else
-				{
-					++node;
-				}
+				++node;
 			}
 		}
+	}
 
-		distributeKeys(refreshAppKeys, appKeyIndexesToRefresh,
-						nodes, netKeyIndex, waitTime);
-		/* RESPOND_WAIT_DURATION is added because otherwise it is observed that
-		 * timer expired and fail response
-		 * was sent to application after entering phase 2.
-		 */
-		sleep(waitTime + RESPOND_WAIT_DURATION);
-		/* Start of Phase 2 */
-		setKeyRefreshPhase(netKeyIndex, 2, nodes);
-		sleep(waitTime);
-		/* Start of Phase 3 */
-		setKeyRefreshPhase(netKeyIndex, 3, nodes);
-		sleep(waitTime);
-		/* Normal Operation */
-		status = "completed";
-		mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_NONE,
-											convertAddressToLowerCase(mAdapter->getAddress()),
-											netKeyIndex, status, 0);
-	});
-	t.detach();
+	distributeKeys(refreshAppKeys, appKeyIndexesToRefresh,
+					nodes, netKeyIndex, waitTime);
 
-	return;
+	auto job = std::make_unique<KeyRefreshJob>();
+	job->adv = this;
+	job->netKeyIndex = netKeyIndex;
+	job->waitTime = waitTime;
+	job->nodes = std::move(nodes);
+	/* RESPOND_WAIT_DURATION is added because otherwise it is observed that
+	 * timer expired and fail response
+	 * was sent to application after entering phase 2.
+	 */
+	job->timer = g_timeout_add_seconds((guint)(waitTime + RESPOND_WAIT_DURATION), handleKeyRefreshStep, job.get());
+	mKeyRefreshJobs.push_back(std::move(job));
+}
+
+gboolean Bluez5MeshAdv::handleKeyRefreshStep(gpointer userData)
+{
+	auto *job = static_cast<KeyRefreshJob *>(userData);
+	Bluez5MeshAdv *adv = job->adv;
+	job->timer = 0;	// this source ends with the return below
+
+	if (job->nextPhase <= 3)
+	{
+		/* Start of Phase 2, then 3 */
+		if (!adv->setKeyRefreshPhase(job->netKeyIndex, job->nextPhase, job->nodes))
+		{
+			// meshd went away meanwhile: the refresh cannot go on.
+			std::string status = "active";
+			adv->mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_FAIL,
+										convertAddressToLowerCase(adv->mAdapter->getAddress()),
+										job->netKeyIndex, status, job->nextPhase - 1);
+			adv->endKeyRefreshJob(job);
+			return G_SOURCE_REMOVE;
+		}
+		job->nextPhase++;
+		job->timer = g_timeout_add_seconds((guint)job->waitTime, handleKeyRefreshStep, job);
+		return G_SOURCE_REMOVE;
+	}
+
+	/* Normal Operation */
+	std::string status = "completed";
+	adv->mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_NONE,
+										convertAddressToLowerCase(adv->mAdapter->getAddress()),
+										job->netKeyIndex, status, 0);
+	adv->endKeyRefreshJob(job);
+	return G_SOURCE_REMOVE;
+}
+
+void Bluez5MeshAdv::endKeyRefreshJob(KeyRefreshJob *job)
+{
+	for (auto it = mKeyRefreshJobs.begin(); it != mKeyRefreshJobs.end(); ++it)
+	{
+		if (it->get() == job)
+		{
+			if (job->timer)
+				g_source_remove(job->timer);
+			mKeyRefreshJobs.erase(it);
+			return;
+		}
+	}
 }

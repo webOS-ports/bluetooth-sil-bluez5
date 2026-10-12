@@ -14,6 +14,12 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <cerrno>
+#include <cstring>
+#include <poll.h>
+#include <unistd.h>
+#include <vector>
+
 #include "bluez5profilespp.h"
 #include "logging.h"
 #include "bluez5adapter.h"
@@ -24,6 +30,16 @@
 
 const std::string BLUETOOTH_PROFILE_SPP_UUID = "00001101-0000-1000-8000-00805f9b34fb";
 const std::string BASE_OBJ_PATH = "/bluetooth/profile/serial_port/";
+
+// BlueZ keys external profiles by their object path, for the whole process, while channel ids are counted per
+// adapter: with two adapters both registered ".../serial_port/<id>", and the second got AlreadyExists (an SPP
+// connect between two local adapters failed). The adapter's name keeps them apart.
+std::string Bluez5ProfileSpp::profileObjectPath(BluetoothSppChannelId channelId) const
+{
+	std::string adapterPath = mAdapter->getObjectPath();
+	std::string adapterName = adapterPath.substr(adapterPath.rfind('/') + 1);
+	return BASE_OBJ_PATH + adapterName + "/" + std::to_string(channelId);
+}
 
 Bluez5ProfileSpp::Bluez5ProfileSpp(Bluez5Adapter *adapter):
 	Bluez5ProfileBase(adapter, BLUETOOTH_PROFILE_SPP_UUID), mAdapter(adapter), mConn(0)
@@ -41,6 +57,69 @@ Bluez5ProfileSpp::Bluez5ProfileSpp(Bluez5Adapter *adapter):
 Bluez5ProfileSpp::~Bluez5ProfileSpp()
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
+
+	// Their fd watches and exported skeletons point at the channel infos freed with the map.
+	std::vector<BluetoothSppChannelId> channels;
+	for (auto &device : mConnectedDevices)
+		channels.push_back(device.first);
+	for (auto channelId : channels)
+		releaseChannel(channelId);
+
+	if (mConn)
+		g_object_unref(mConn);
+}
+
+// Ends a channel's RFCOMM link: removes its watch, and shuts the GIOChannel down, which closes the fd (it was
+// closed a second time after, by when the number could belong to another descriptor).
+void Bluez5ProfileSpp::closeLink(SppDeviceInfo *deviceInfo, bool notify)
+{
+	bool connected = deviceInfo->mChannel != nullptr;
+
+	if (deviceInfo->mIoWatchId)
+	{
+		g_source_remove(deviceInfo->mIoWatchId);
+		deviceInfo->mIoWatchId = 0;
+	}
+
+	if (deviceInfo->mChannel)
+	{
+		GError *error = nullptr;
+		g_io_channel_shutdown(deviceInfo->mChannel, TRUE, &error);
+		if (error)
+		{
+			ERROR(MSGID_PROFILE_MANAGER_ERROR, 0, "Failed to shutdown channel %s", error->message);
+			g_error_free(error);
+		}
+		g_io_channel_unref(deviceInfo->mChannel);
+		deviceInfo->mChannel = nullptr;
+	}
+	else if (deviceInfo->mSockfd >= 0)
+		close(deviceInfo->mSockfd);	// received but never wrapped in a channel
+	deviceInfo->mSockfd = -1;
+
+	if (notify && connected)
+		getSppObserver()->channelStateChanged(deviceInfo->mAdapterAddress, deviceInfo->mDeviceAddress, deviceInfo->mUuid, deviceInfo->mChannelId, false);
+}
+
+// Ends a channel for good: its link, its exported profile object and its id; the entry goes last, as nothing
+// may use it after (both disconnect paths read the freed entry's id).
+void Bluez5ProfileSpp::releaseChannel(BluetoothSppChannelId channelId)
+{
+	SppDeviceInfo *deviceInfo = getSppDevice(channelId);
+	if (!deviceInfo)
+		return;
+
+	closeLink(deviceInfo, false);
+
+	if (deviceInfo->mInterface)
+	{
+		g_dbus_interface_skeleton_unexport(G_DBUS_INTERFACE_SKELETON(deviceInfo->mInterface));
+		g_object_unref(deviceInfo->mInterface);
+		deviceInfo->mInterface = nullptr;
+	}
+
+	deallocateChannelId(channelId);
+	removeConnectedDevice(channelId);
 }
 
 void Bluez5ProfileSpp::initialiseChannelIds()
@@ -81,14 +160,19 @@ int Bluez5ProfileSpp::registerProfile(spDeviceInfo &deviceInfo, std::string objP
 			g_variant_new_string((deviceInfo->mUuid).c_str()));
 	g_variant_builder_close(&profileBuilder);
 
+	// A server channel takes connections from whoever is in range, and its data goes to the app: BlueZ is asked to
+	// require an authenticated (paired) link and the agent's authorisation. Paired devices are unaffected. An
+	// outgoing (client) link is ours, so it stays as it was.
+	gboolean secure = deviceInfo->mDeviceRole == SERVER ? TRUE : FALSE;
+
 	g_variant_builder_open(&profileBuilder, G_VARIANT_TYPE("{sv}"));
 	g_variant_builder_add (&profileBuilder, "s", "RequireAuthorization");
-	g_variant_builder_add (&profileBuilder, "v", g_variant_new_boolean(FALSE));
+	g_variant_builder_add (&profileBuilder, "v", g_variant_new_boolean(secure));
 	g_variant_builder_close(&profileBuilder);
 
 	g_variant_builder_open(&profileBuilder, G_VARIANT_TYPE("{sv}"));
 	g_variant_builder_add (&profileBuilder, "s", "RequireAuthentication");
-	g_variant_builder_add (&profileBuilder, "v", g_variant_new_boolean(FALSE));
+	g_variant_builder_add (&profileBuilder, "v", g_variant_new_boolean(secure));
 	g_variant_builder_close(&profileBuilder);
 
 	g_variant_builder_open(&profileBuilder, G_VARIANT_TYPE("{sv}"));
@@ -113,6 +197,10 @@ int Bluez5ProfileSpp::registerProfile(spDeviceInfo &deviceInfo, std::string objP
 	g_variant_builder_close(&profileBuilder);
 	profileVariant = g_variant_builder_end(&profileBuilder);
 
+	// Synchronous on purpose: bluetoothd answers RegisterProfile itself (BlueZ 5.86 src/profile.c
+	// register_profile: the profile and its SDP record and listening socket are set up locally, nothing is sent to
+	// a device or waited for). The same holds for the UnregisterProfile calls in this file (unregister_profile and
+	// remove_ext; a RequestDisconnection to us is sent without waiting for our reply).
 	GVariant *ret = g_dbus_proxy_call_sync (G_DBUS_PROXY(proxy),
 				"RegisterProfile",
 				profileVariant,
@@ -134,8 +222,8 @@ int Bluez5ProfileSpp::registerProfile(spDeviceInfo &deviceInfo, std::string objP
 void Bluez5ProfileSpp::getProperties(const std::string &address, BluetoothPropertiesResultCallback callback)
 {
 	UNUSED(address);
-	UNUSED(callback);
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
+	callback(BLUETOOTH_ERROR_UNSUPPORTED, BluetoothPropertiesList());	// never answered
 }
 
 void Bluez5ProfileSpp::getProperty(const std::string &address, BluetoothProperty::Type type,
@@ -220,6 +308,16 @@ gboolean Bluez5ProfileSpp::handleNewConnection (GDBusMethodInvocation *invocatio
 	UNUSED(fd_props);
 	message = g_dbus_method_invocation_get_message (invocation);
 	fd_list = g_dbus_message_get_unix_fd_list (message);
+	if (!fd_list)
+	{
+		g_dbus_method_invocation_return_dbus_error(invocation, "org.bluez.Error.InvalidArguments", "No file descriptor");
+		return TRUE;
+	}
+
+	// A new link on a channel that still has one (a server's second client, or a link whose end was missed):
+	// the old fd, channel and watch were overwritten and leaked, and both kept delivering data.
+	if (devieInfo->mChannel || devieInfo->mSockfd >= 0)
+		closeLink(devieInfo, true);
 
 	devieInfo->mSockfd = g_unix_fd_list_get (fd_list, 0, &error);
 
@@ -227,7 +325,9 @@ gboolean Bluez5ProfileSpp::handleNewConnection (GDBusMethodInvocation *invocatio
 	{
 		ERROR(MSGID_PROFILE_MANAGER_ERROR, 0, "Failed to handle_new_connection due to  %s", error->message);
 		g_error_free(error);
-		return FALSE;
+		devieInfo->mSockfd = -1;
+		g_dbus_method_invocation_return_dbus_error(invocation, "org.bluez.Error.Failed", "No file descriptor");
+		return TRUE;	// answered; on FALSE the skeleton answers it again
 	}
 
 	// finished with method call; no reply sent
@@ -235,15 +335,17 @@ gboolean Bluez5ProfileSpp::handleNewConnection (GDBusMethodInvocation *invocatio
 
 	Bluez5Device *bluezDevice = mAdapter->findDeviceByObjectPath(device);
 	std::string deviceAddress;
+	// Lower case, as every other profile reports them: getChannelState(), which lower-cases its query, never
+	// matched the upper-case address BlueZ gives.
 	if (bluezDevice)
 	{
-		deviceAddress = bluezDevice->getAddress();
-		devieInfo->mDeviceAddress = bluezDevice->getAddress();
+		deviceAddress = convertAddressToLowerCase(bluezDevice->getAddress());
+		devieInfo->mDeviceAddress = deviceAddress;
 	}
 
-	devieInfo->mAdapterAddress = mAdapter->getAddress();
+	devieInfo->mAdapterAddress = convertAddressToLowerCase(mAdapter->getAddress());
 
-	getSppObserver()->channelStateChanged(mAdapter->getAddress(), deviceAddress, devieInfo->mUuid, devieInfo->mChannelId, true);
+	getSppObserver()->channelStateChanged(devieInfo->mAdapterAddress, deviceAddress, devieInfo->mUuid, devieInfo->mChannelId, true);
 
 	devieInfo->mChannel = g_io_channel_unix_new (devieInfo->mSockfd);
 
@@ -252,9 +354,20 @@ gboolean Bluez5ProfileSpp::handleNewConnection (GDBusMethodInvocation *invocatio
 	{
 		ERROR(MSGID_PROFILE_MANAGER_ERROR, 0, "Failed to set encoding due to  %s", error->message);
 		g_error_free(error);
+		error = nullptr;
+	}
+	// Reads return what is there: a buffered or blocking read waited for a full buffer on the main loop.
+	g_io_channel_set_buffered(devieInfo->mChannel, FALSE);
+	g_io_channel_set_flags(devieInfo->mChannel, G_IO_FLAG_NONBLOCK, &error);
+	if (error)
+	{
+		ERROR(MSGID_PROFILE_MANAGER_ERROR, 0, "Failed to set non-blocking due to  %s", error->message);
+		g_error_free(error);
 	}
 
-	devieInfo->mIoWatchId = g_io_add_watch (devieInfo->mChannel, G_IO_IN, ioCallback, devieInfo);
+	// Hang-ups and errors too: on G_IO_IN alone a closed link stayed readable and spun the main loop forever.
+	devieInfo->mIoWatchId = g_io_add_watch (devieInfo->mChannel, (GIOCondition)(G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL),
+	                                        ioCallback, devieInfo);
 
 	DEBUG("devieInfo->mIoWatchId = %d", devieInfo->mIoWatchId);
 	return TRUE;
@@ -267,37 +380,24 @@ gboolean Bluez5ProfileSpp::handleRequestDisconnection (BluezProfile1 *interface,
 	UNUSED(device);
 	UNUSED(interface);
 
+	UNUSED(error);
 	getSppObserver()->channelStateChanged(devieInfo->mAdapterAddress, devieInfo->mDeviceAddress, devieInfo->mUuid, devieInfo->mChannelId, false);
-
-	if (devieInfo->mChannel)
-	{
-		if (devieInfo->mIoWatchId)
-			g_source_remove(devieInfo->mIoWatchId);
-		g_io_channel_shutdown(devieInfo->mChannel, TRUE, &error);
-		g_io_channel_unref (devieInfo->mChannel);
-		if (error)
-		{
-			ERROR(MSGID_PROFILE_MANAGER_ERROR, 0, "Failed to shutdown channel %s",error->message);
-			g_error_free(error);
-		}
-		devieInfo->mChannel = nullptr;
-	}
-
-	if (devieInfo->mSockfd > 0)
-	{
-		close(devieInfo->mSockfd);
-		devieInfo->mSockfd = -1;
-	}
+	closeLink(devieInfo, false);
 
 	// finished with method call; no reply sent
 	g_dbus_method_invocation_return_value(invocation, NULL);
 
 	if ((devieInfo->mDeviceRole == CLIENT) && devieInfo->mInterface)
 	{
-		std::string objPath = BASE_OBJ_PATH + std::to_string(devieInfo->mChannelId);
-		auto unRegisterCallback = [this](GAsyncResult *result) {
+		std::string objPath = profileObjectPath(devieInfo->mChannelId);
+		auto unRegisterCallback = [this, alive = mLifetime.token()](GAsyncResult *result) {
+			// The profile goes with its adapter, also while this call is out: nothing of it is touched.
+			if (alive.expired())
+			{
+				return;
+			}
 			GError *error = nullptr;
-			gboolean ret;
+			[[maybe_unused]] gboolean ret;
 
 			ret = bluez_profile_manager1_call_unregister_profile_finish(mAdapter->getProfileManager(), result, &error);
 			if (error)
@@ -307,9 +407,7 @@ gboolean Bluez5ProfileSpp::handleRequestDisconnection (BluezProfile1 *interface,
 			}
 		};
 		bluez_profile_manager1_call_unregister_profile(mAdapter->getProfileManager(), objPath.c_str(), NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(unRegisterCallback));
-		g_object_unref(devieInfo->mInterface);
-		removeConnectedDevice(devieInfo->mChannelId);
-		deallocateChannelId(devieInfo->mChannelId);
+		releaseChannel(devieInfo->mChannelId);	// read the entry's id after freeing it
 	}
 
 	return TRUE;
@@ -317,23 +415,17 @@ gboolean Bluez5ProfileSpp::handleRequestDisconnection (BluezProfile1 *interface,
 
 gboolean Bluez5ProfileSpp::handleRelease()
 {
-	auto deviceIterator = mConnectedDevices.begin();
-
-	while (deviceIterator != mConnectedDevices.end())
+	// Watches stayed with freed channel infos, channels never connected were unreffed while NULL, and the ids
+	// were never freed, so SPP had none left after a bluetoothd restart.
+	std::vector<BluetoothSppChannelId> channels;
+	for (auto &device : mConnectedDevices)
+		channels.push_back(device.first);
+	for (auto channelId : channels)
 	{
-		GError *error = nullptr;
-		g_io_channel_shutdown(deviceIterator->second->mChannel, TRUE, &error);
-		if (error)
-		{
-			ERROR(MSGID_PROFILE_MANAGER_ERROR, 0, "Failed to release profile on system bus %s",error->message);
-			g_error_free(error);
-		}
-		g_io_channel_unref (deviceIterator->second->mChannel);
-		g_object_unref(deviceIterator->second->mInterface);
-		++deviceIterator;
+		if (SppDeviceInfo *deviceInfo = getSppDevice(channelId))
+			closeLink(deviceInfo, true);
+		releaseChannel(channelId);
 	}
-
-	mConnectedDevices.clear();
 	return TRUE;
 }
 
@@ -341,24 +433,24 @@ gboolean Bluez5ProfileSpp::ioCallback(GIOChannel * io, GIOCondition condition, g
 {
 	SppDeviceInfo* sppDevice = static_cast<SppDeviceInfo*>(data);
 
-	return sppDevice->mSppProfile->handleRxData(io, condition, sppDevice->mChannelId, sppDevice->mAdapterAddress);
+	return sppDevice->mSppProfile->handleRxData(io, condition, sppDevice);
 }
 
-gboolean Bluez5ProfileSpp::handleRxData(GIOChannel *io, GIOCondition condition, BluetoothSppChannelId channelId, const std::string &adapterAddress)
+gboolean Bluez5ProfileSpp::handleRxData(GIOChannel *io, GIOCondition condition, SppDeviceInfo *deviceInfo)
 {
-	char buf[1024] = { 0 };
-	gsize bytesRead = 0;
-	GError *error = nullptr;
-	UNUSED(condition);
+	char buf[1024];
+	bool closed = (condition & (G_IO_HUP | G_IO_ERR | G_IO_NVAL)) && !(condition & G_IO_IN);
 
-	do
+	while (!closed)
 	{
+		gsize bytesRead = 0;
+		GError *error = nullptr;
 		GIOStatus status = g_io_channel_read_chars (io, buf, sizeof(buf), &bytesRead, &error);
 
-		if (status == G_IO_STATUS_NORMAL && bytesRead > 0)
+		if (bytesRead > 0)
 		{
-			getSppObserver()->dataReceived(channelId, adapterAddress, (const uint8_t *)buf, bytesRead);
-			DEBUG("received [%s] bytes_read[%lu]", buf, bytesRead);
+			getSppObserver()->dataReceived(deviceInfo->mChannelId, deviceInfo->mAdapterAddress, (const uint8_t *)buf, bytesRead);
+			DEBUG("received %" G_GSIZE_FORMAT " bytes", bytesRead);	// the buffer is binary, and not terminated
 		}
 
 		if (error)
@@ -367,9 +459,16 @@ gboolean Bluez5ProfileSpp::handleRxData(GIOChannel *io, GIOCondition condition, 
 			g_error_free(error);
 		}
 
-	} while (bytesRead > 0);
+		if (status == G_IO_STATUS_AGAIN)
+			return G_SOURCE_CONTINUE;
+		if (status == G_IO_STATUS_EOF || status == G_IO_STATUS_ERROR)
+			closed = true;
+	}
 
-	return TRUE;
+	// The peer closed the link, which BlueZ does not report with RequestDisconnection: the channel ends here.
+	deviceInfo->mIoWatchId = 0;	// this source ends with G_SOURCE_REMOVE
+	closeLink(deviceInfo, true);
+	return G_SOURCE_REMOVE;
 }
 
 
@@ -410,20 +509,24 @@ void Bluez5ProfileSpp::connectUuid(const std::string &address, const std::string
 		return;
 	}
 
-	BluezProfile1 *mInterface = channelInfo->mInterface;
-	auto ConnectedCallback = [this, callback, channelId, mInterface](BluetoothError error)
+	auto ConnectedCallback = [this, alive = mLifetime.token(), callback, channelId](BluetoothError error)
 	{
+		// Called back after the profile may have gone with its adapter.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL, BLUETOOTH_SPP_CHANNEL_ID_INVALID);
+			return;
+		}
 		if (error == BLUETOOTH_ERROR_NONE)
 		{
 			callback(BLUETOOTH_ERROR_NONE, channelId);
 		}
 		else
 		{
-			std::string objPath = BASE_OBJ_PATH + std::to_string(channelId);
+			std::string objPath = profileObjectPath(channelId);
 			bluez_profile_manager1_call_unregister_profile_sync(mAdapter->getProfileManager(), objPath.c_str(), NULL, NULL);
-			if (mInterface)
-				g_object_unref(mInterface);
-			deallocateChannelId(channelId);
+			// The entry went too: it stayed, with its released skeleton, which later paths released again.
+			releaseChannel(channelId);
 			callback(BLUETOOTH_ERROR_NOT_READY, BLUETOOTH_SPP_CHANNEL_ID_INVALID);
 		}
 	};
@@ -457,7 +560,7 @@ void Bluez5ProfileSpp::disconnectUuid(const BluetoothSppChannelId channelId, Blu
 		return;
 	}
 
-	auto disConnectedCallback = [this, callback, channelId, sppConnectionInfo](BluetoothError error)
+	auto disConnectedCallback = [callback](BluetoothError error)
 	{
 		if (error == BLUETOOTH_ERROR_NONE)
 		{
@@ -486,10 +589,32 @@ void Bluez5ProfileSpp::writeData(const BluetoothSppChannelId channelId, const ui
 	}
 
 	SppDeviceInfo *sppConnectionInfo = (deviceIterator->second).get();
-	int status = write(sppConnectionInfo->mSockfd, data, size);
+	if (sppConnectionInfo->mSockfd < 0)
+	{
+		callback(BLUETOOTH_ERROR_NOT_READY);	// written to fd -1 and reported as sent
+		return;
+	}
 
-	if (status < 0) {
-		perror("client: write to socket failed!\n");
+	// All of it, or an error: short writes were dropped and failures reported as success.
+	uint32_t written = 0;
+	while (written < size)
+	{
+		ssize_t n = write(sppConnectionInfo->mSockfd, data + written, size - written);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+		{
+			struct pollfd pfd = { sppConnectionInfo->mSockfd, POLLOUT, 0 };
+			if (poll(&pfd, 1, 1000) > 0)
+				continue;
+		}
+		if (n <= 0)
+		{
+			ERROR(MSGID_PROFILE_MANAGER_ERROR, 0, "Failed to write to channel %d: %s", channelId, strerror(errno));
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
+		written += (uint32_t)n;
 	}
 
 	callback(BLUETOOTH_ERROR_NONE);
@@ -541,12 +666,10 @@ BluetoothError Bluez5ProfileSpp::removeChannel(const std::string &uuid)
 
 	if (sppConnectionInfo->mInterface)
 	{
-		std::string objPath = BASE_OBJ_PATH + std::to_string(sppConnectionInfo->mChannelId);
+		std::string objPath = profileObjectPath(sppConnectionInfo->mChannelId);
 		bluez_profile_manager1_call_unregister_profile_sync(mAdapter->getProfileManager(), objPath.c_str(), NULL, NULL);
-		g_object_unref(sppConnectionInfo->mInterface);
 		getSppObserver()->channelStateChanged(sppConnectionInfo->mAdapterAddress, sppConnectionInfo->mDeviceAddress, uuid, sppConnectionInfo->mChannelId, false);
-		removeConnectedDevice(sppConnectionInfo->mChannelId);
-		deallocateChannelId(sppConnectionInfo->mChannelId);
+		releaseChannel(sppConnectionInfo->mChannelId);	// read the entry's id after freeing it
 	}
 
 	return BLUETOOTH_ERROR_NONE;
@@ -614,7 +737,7 @@ BluetoothError Bluez5ProfileSpp::createSkeletonAndExport(std::string uuid, spDev
 {
 	GError *error = nullptr;
 	UNUSED(uuid);
-	std::string objPath = BASE_OBJ_PATH + std::to_string(channelInfo->mChannelId);
+	std::string objPath = profileObjectPath(channelInfo->mChannelId);
 
 	if (registerProfile(channelInfo, objPath, mAdapter->getProfileManager()))
 	{
@@ -647,6 +770,8 @@ BluetoothError Bluez5ProfileSpp::createSkeletonAndExport(std::string uuid, spDev
 						&error))
 	{
 		deallocateChannelId(channelInfo->mChannelId);
+		g_object_unref(channelInfo->mInterface);
+		channelInfo->mInterface = nullptr;
 		ERROR(MSGID_PROFILE_MANAGER_ERROR, 0, "Failed to export profile on system bus");
 		if (error)
 		{

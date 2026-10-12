@@ -41,8 +41,8 @@ Bluez5MeshModelOnOffClient::~Bluez5MeshModelOnOffClient()
 {
 }
 
-BluetoothError Bluez5MeshModelOnOffClient::sendData(uint16_t srcAddress, uint16_t destAddress,
-                                         uint16_t appIndex, uint8_t data[])
+BluetoothError Bluez5MeshModelOnOffClient::sendData(uint16_t /*srcAddress*/, uint16_t /*destAddress*/,
+                                         uint16_t /*appIndex*/, uint8_t /*data*/[])
 {
 	return BLUETOOTH_ERROR_UNSUPPORTED;
 }
@@ -68,7 +68,8 @@ bool Bluez5MeshModelOnOffClient::recvData(uint16_t srcAddress, uint16_t destAddr
 		return true;
 	}
 	DEBUG("Opcode received: %x", opcode);
-    switch (opcode & ~OP_UNRELIABLE)
+	// The exact opcode: with bit 8 masked off, 0x8304 was taken for an OnOff Status.
+    switch (opcode)
 	{
 	    case OP_GENERIC_ONOFF_STATUS:
 	    {
@@ -89,10 +90,12 @@ bool Bluez5MeshModelOnOffClient::recvData(uint16_t srcAddress, uint16_t destAddr
 	}
 	if(isMsgHandled)
 	{
-		//if onOFF cmd Status ack msg received
-		mMeshProfile->getMeshObserver()->modelSetOnOffResult(
-			convertAddressToLowerCase(mAdapter->getAddress()),
-			onoff, BLUETOOTH_ERROR_NONE);
+		// The result of a set only for the ack it waits for: any OnOff Status from any node was reported as the
+		// result, also with no set pending (a publication, another node's state).
+		if (mMeshAdv->takeOnOffAck(opcode, srcAddress))
+			mMeshProfile->getMeshObserver()->modelSetOnOffResult(
+				convertAddressToLowerCase(mAdapter->getAddress()),
+				onoff, BLUETOOTH_ERROR_NONE);
 		mMeshProfile->getMeshObserver()->modelDataReceived(convertAddressToLowerCase(mAdapter->getAddress()),
 				srcAddress, destAddress, appIndex, dataToSend, dataLenToSend);
 		return true;

@@ -20,8 +20,10 @@
 #include "asyncutils.h"
 #include "bluez5profilemesh.h"
 #include "bluez5meshadv.h"
+#include "meshcomposition.h"
 #include "bluez5meshmodelconfigclient.h"
 #include "bluez5adapter.h"
+#include <algorithm>
 #include <cstdint>
 
 #define BLUEZ_MESH_ELEMENT_PATH "/element"
@@ -190,177 +192,122 @@ Bluez5MeshModel(modelId, meshProfile, meshAdv, adapter)
 {
 }
 
+// Pending requests were left with their timers, which fired on the freed client and its freed requests.
 Bluez5MeshModelConfigClient::~Bluez5MeshModelConfigClient()
 {
+	std::lock_guard<std::mutex> guard(pendingReqMutex);
+	for (auto *req : pendingRequests)
+	{
+		if (req->timer)
+			g_source_remove(req->timer);
+		delete req;
+	}
+	pendingRequests.clear();
 }
 
-BluetoothError Bluez5MeshModelConfigClient::sendData(uint16_t srcAddress, uint16_t destAddress,
-										 uint16_t appIndex, uint8_t data[])
+BluetoothError Bluez5MeshModelConfigClient::sendData(uint16_t /*srcAddress*/, uint16_t /*destAddress*/,
+										 uint16_t /*appIndex*/, uint8_t /*data*/[])
 {
 	return BLUETOOTH_ERROR_UNSUPPORTED;
 }
 
-std::vector<BleMeshPendingRequest*>::iterator Bluez5MeshModelConfigClient::getRequestFromResponse(uint32_t opcode,
-											   uint16_t destAddr)
+// The request a reply answers: waiting for this status opcode from this node, and, where the reply echoes key
+// indexes or a model, for those. Several requests to one node can wait for the same status (AppKey add, delete
+// and update; bind and unbind): the first of them got every reply. When nothing matches the echoed fields, the
+// first by opcode and node, as before.
+BleMeshPendingRequest *Bluez5MeshModelConfigClient::findRequestForResponse(uint32_t opcode, uint16_t srcAddr,
+                                                                           const MeshRequestKey &replyKey)
 {
-	DEBUG("%s::%d, destAddr: %d", __FUNCTION__, __LINE__ , destAddr);
+	DEBUG("%s::%d, srcAddr: %d", __FUNCTION__, __LINE__ , srcAddr);
 	std::lock_guard<std::mutex> guard(pendingReqMutex);
-	for (auto req = pendingRequests.begin();
-			req != pendingRequests.end(); ++req)
+	BleMeshPendingRequest *first = nullptr;
+	for (auto *req : pendingRequests)
 	{
-		DEBUG("resp: %d, opcode: %d, addr: %d", (*req)->resp, opcode, (*req)->addr);
-		if ((*req)->resp == opcode && (*req)->addr == destAddr)
-		{
+		if (req->resp != opcode || req->addr != srcAddr)
+			continue;
+		if (meshKeysMatch(req->key, replyKey))
 			return req;
-		}
+		if (!first)
+			first = req;
 	}
-	return pendingRequests.end();
+	return first;
+}
+
+void Bluez5MeshModelConfigClient::removePendingRequest(BleMeshPendingRequest *req)
+{
+	std::lock_guard<std::mutex> guard(pendingReqMutex);
+	auto it = std::find(pendingRequests.begin(), pendingRequests.end(), req);
+	if (it == pendingRequests.end())
+		return;
+	pendingRequests.erase(it);
+	if (req->timer)
+		g_source_remove(req->timer);
+	delete req;
+}
+
+// Only for the key refresh requests: a refused or unanswered AppKey add or delete is not a key refresh failure,
+// and was reported as one (for NetKey index 0, as it has no key refresh data).
+void Bluez5MeshModelConfigClient::reportKeyRefreshFailure(const BleMeshPendingRequest &req)
+{
+	std::string status = "active";
+	std::string adapterAddress = convertAddressToLowerCase(mMeshAdv->mAdapter->getAddress());
+	if (req.req == OP_NETKEY_UPDATE)
+	{
+		mMeshAdv->mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_MESH_NETKEY_UPDATE_FAILED,
+			adapterAddress, req.keyRefreshData.netKeyIndex, status, 1, req.addr);
+		mMeshAdv->deleteRemoteNodeFromLocalKeyDatabase(req.addr, req.keyRefreshData.numberOfElements);
+	}
+	else if (req.req == OP_APPKEY_UPDATE)
+	{
+		mMeshAdv->mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_MESH_CANNOT_UPDATE_APPKEY,
+			adapterAddress, req.keyRefreshData.netKeyIndex, status, 1, req.addr, req.keyRefreshData.appKeyIndex);
+	}
+	DEBUG("%s::netKeyIndex: %d, appKeyIndex: %d, numElements: %d", __FUNCTION__, req.keyRefreshData.netKeyIndex,
+	      req.keyRefreshData.appKeyIndex, req.keyRefreshData.numberOfElements);
 }
 
 static gboolean pendingRequestTimerExpired(gpointer userdata)
 {
 	BleMeshPendingRequest *pendingReq = (BleMeshPendingRequest *)userdata;
+	Bluez5MeshModelConfigClient *client = pendingReq->configClient;
 
-	DEBUG("No response for: %s, destAddress: %d\n", pendingReq->desc.c_str(), pendingReq->addr);
+	// Off the queue first, and kept as a copy: the observer may call back into the client.
+	BleMeshPendingRequest expired = *pendingReq;
+	pendingReq->timer = 0;	// this source ends with the return below
+	client->removePendingRequest(pendingReq);
+
+	DEBUG("No response for: %s, destAddress: %d\n", expired.desc.c_str(), expired.addr);
 
 	BleMeshConfiguration meshConfig;
-
-	meshConfig.setConfig(pendingReq->desc);
-	meshConfig.setNodeAddress(pendingReq->addr);
-
-	pendingReq->configClient->mMeshAdv->mMesh->getMeshObserver()->modelConfigResult(
-		convertAddressToLowerCase(pendingReq->configClient->mMeshAdv->mAdapter->getAddress()),
+	meshConfig.setConfig(expired.desc);
+	meshConfig.setNodeAddress(expired.addr);
+	client->mMeshAdv->mMesh->getMeshObserver()->modelConfigResult(
+		convertAddressToLowerCase(client->mMeshAdv->mAdapter->getAddress()),
 		meshConfig, BLUETOOTH_ERROR_MESH_NO_RESPONSE_FROM_NODE);
-	if (pendingReq->resp == OP_NETKEY_STATUS)
-	{
-		std::string status = "active";
-		pendingReq->configClient->mMeshAdv->mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_MESH_NETKEY_UPDATE_FAILED,
-										convertAddressToLowerCase(pendingReq->configClient->mMeshAdv->mAdapter->getAddress()),
-										pendingReq->keyRefreshData.netKeyIndex, status, 1,
-										pendingReq->addr);
-		pendingReq->configClient->mMeshAdv->deleteRemoteNodeFromLocalKeyDatabase(
-			pendingReq->addr, pendingReq->keyRefreshData.numberOfElements);
-		DEBUG("%s::%d::netKeyIndex: %d, appKeyIndex: %d, numElements: %d",
-				__FUNCTION__, __LINE__,
-				pendingReq->keyRefreshData.netKeyIndex,
-				pendingReq->keyRefreshData.appKeyIndex,
-				pendingReq->keyRefreshData.numberOfElements);
 
-	}
-	if (pendingReq->resp == OP_APPKEY_STATUS)
-	{
-		std::string status = "active";
-		pendingReq->configClient->mMeshAdv->mMesh->getMeshObserver()->keyRefreshResult(BLUETOOTH_ERROR_MESH_CANNOT_UPDATE_APPKEY,
-										convertAddressToLowerCase(pendingReq->configClient->mMeshAdv->mAdapter->getAddress()),
-										pendingReq->keyRefreshData.netKeyIndex, status, 1,
-										pendingReq->addr, pendingReq->keyRefreshData.appKeyIndex);
-		DEBUG("%s::%d::netKeyIndex: %d, appKeyIndex: %d, numElements: %d",
-				__FUNCTION__, __LINE__,
-				pendingReq->keyRefreshData.netKeyIndex,
-				pendingReq->keyRefreshData.appKeyIndex,
-				pendingReq->keyRefreshData.numberOfElements);
-	}
+	client->reportKeyRefreshFailure(expired);
 
-	if(pendingReq->req == OP_NODE_RESET)
-	{
-		pendingReq->configClient->mMeshAdv->deleteRemoteNodeFromLocalKeyDatabase(
-			pendingReq->addr, pendingReq->count);
-	}
+	if (expired.req == OP_NODE_RESET)
+		client->mMeshAdv->deleteRemoteNodeFromLocalKeyDatabase(expired.addr, expired.count);
 
-	std::lock_guard<std::mutex> guard(pendingReq->configClient->pendingReqMutex);
-	for (auto req = pendingReq->configClient->pendingRequests.begin();
-			req != pendingReq->configClient->pendingRequests.end(); )
-	{
-		DEBUG("%s::req: %x, addr: %d, expred req: %x, expired for: %d", __FUNCTION__, (*req)->req, (*req)->addr,
-					pendingReq->req, pendingReq->addr);
-		if ((*req)->timer == pendingReq->timer)
-		{
-			DEBUG("Erasing request: %x, destAddr: %d, appKeyIndex: %d", (*req)->req, (*req)->addr, (*req)->keyRefreshData.appKeyIndex);
-			req = pendingReq->configClient->pendingRequests.erase(req);
-			delete(pendingReq);
-			break;
-		}
-		else
-		{
-			++req;
-		}
-	}
-	return false;
+	return G_SOURCE_REMOVE;
 }
 
-bool Bluez5MeshModelConfigClient::requestExists(uint32_t opcode,
-											   uint16_t destAddr)
+BleMeshPendingRequest *Bluez5MeshModelConfigClient::addPendingRequest(uint32_t opcode, uint16_t destAddr, uint8_t count,
+                                                                      const MeshRequestKey &key)
 {
-	std::lock_guard<std::mutex> guard(pendingReqMutex);
-	for (auto req = pendingRequests.begin();
-			req != pendingRequests.end(); ++req)
-	{
-		if ((*req)->req == opcode && (*req)->addr == destAddr)
-		{
-			return true;
-		}
-	}
-	return false;
+	BleMeshKeyRefreshData none;
+	BleMeshPendingRequest *req = addPendingRequest(opcode, destAddr, none, key);
+	if (req)
+		req->count = count;
+	return req;
 }
 
-BluetoothError Bluez5MeshModelConfigClient::deletePendingRequest(uint32_t opcode,
-											   uint16_t destAddr)
+BleMeshPendingRequest *Bluez5MeshModelConfigClient::addPendingRequest(uint32_t opcode, uint16_t destAddr,
+                                                                      BleMeshKeyRefreshData keyRefreshData,
+                                                                      const MeshRequestKey &key)
 {
-	DEBUG("%s::%d, destAddr: %d", __FUNCTION__, __LINE__ , destAddr);
-	std::lock_guard<std::mutex> guard(pendingReqMutex);
-	for (auto req = pendingRequests.begin();
-			req != pendingRequests.end(); )
-	{
-
-		DEBUG("resp: %d, opcode: %d, addr: %d", (*req)->resp, opcode, (*req)->addr);
-		if ((*req)->resp == opcode && (*req)->addr == destAddr)
-		{
-			DEBUG("Found the request in queue, deleting it");
-			g_source_remove((*req)->timer);
-			(*req)->timer = 0;
-			delete(*req);
-			req = pendingRequests.erase(req);
-			break;
-		}
-		else
-		{
-			++req;
-		}
-	}
-	return BLUETOOTH_ERROR_NONE;
-}
-
-BluetoothError Bluez5MeshModelConfigClient::addPendingRequest(uint32_t opcode,
-											   uint16_t destAddr, uint8_t count)
-{
-	for (int i = 0; i < (sizeof(cmds)/sizeof(cmds[0])); ++i)
-	{
-		if (opcode == cmds[i].opcode && NO_RESPONSE != cmds[i].rsp)
-		{
-			DEBUG("%s::%d::opcode: %d, destAddr: %d", __FUNCTION__, __LINE__, opcode, destAddr);
-			BleMeshPendingRequest *pendingReq = new BleMeshPendingRequest();
-			pendingReq->req = opcode;
-			pendingReq->count = count;
-			pendingReq->resp = cmds[i].rsp;
-			pendingReq->desc = cmds[i].desc;
-			pendingReq->addr = destAddr;
-			pendingReq->configClient = this;
-			pendingReq->timer = g_timeout_add(RESPOND_WAIT_DURATION * ONE_SECOND,
-							  pendingRequestTimerExpired, pendingReq);
-			std::lock_guard<std::mutex> guard(pendingReqMutex);
-			pendingRequests.push_back(pendingReq);
-			break;
-		}
-	}
-
-	return BLUETOOTH_ERROR_NONE;
-}
-
-BluetoothError Bluez5MeshModelConfigClient::addPendingRequest(uint32_t opcode,
-											   uint16_t destAddr,
-												BleMeshKeyRefreshData keyRefreshData)
-{
-	for (int i = 0; i < (sizeof(cmds)/sizeof(cmds[0])); ++i)
+	for (size_t i = 0; i < (sizeof(cmds)/sizeof(cmds[0])); ++i)
 	{
 		if (opcode == cmds[i].opcode && NO_RESPONSE != cmds[i].rsp)
 		{
@@ -370,23 +317,19 @@ BluetoothError Bluez5MeshModelConfigClient::addPendingRequest(uint32_t opcode,
 			pendingReq->resp = cmds[i].rsp;
 			pendingReq->desc = cmds[i].desc;
 			pendingReq->addr = destAddr;
+			pendingReq->key = key;
 			pendingReq->configClient = this;
-			if (!keyRefreshData.waitTime)
-				keyRefreshData.waitTime = RESPOND_WAIT_DURATION * ONE_SECOND;
-			else
-				keyRefreshData.waitTime = keyRefreshData.waitTime * ONE_SECOND;
+			// The client's wait, in seconds: unchecked, a negative one became a huge timer, a large one overflowed.
 			pendingReq->keyRefreshData = keyRefreshData;
-			pendingReq->timer = g_timeout_add(keyRefreshData.waitTime,
+			pendingReq->timer = g_timeout_add(waitMilliseconds(keyRefreshData.waitTime, RESPOND_WAIT_DURATION * ONE_SECOND),
 							  pendingRequestTimerExpired, pendingReq);
 
 			std::lock_guard<std::mutex> guard(pendingReqMutex);
 			pendingRequests.push_back(pendingReq);
-			break;
-
+			return pendingReq;
 		}
 	}
-
-	return BLUETOOTH_ERROR_NONE;
+	return nullptr;
 }
 
 uint32_t Bluez5MeshModelConfigClient::printModId(uint8_t *data, bool vendor, const char *offset)
@@ -472,99 +415,21 @@ const char * Bluez5MeshModelConfigClient::sigModelString(uint16_t sigModelId)
 	}
 }
 
+// Parsed by parseCompositionData() (meshcomposition.cpp), which is unit tested and fuzzed.
 void Bluez5MeshModelConfigClient::compositionReceived(uint8_t *data, uint16_t len,
 											BleMeshCompositionData &compositionData)
 {
-	uint16_t features;
-	int i = 0;
-
-	DEBUG("Received composion:\n");
-
-	/* skip page -- We only support Page Zero */
-	data++;
-	len--;
-
-	DEBUG("\tCID: %4.4x", get_le16(&data[0]));
-	DEBUG("\tPID: %4.4x", get_le16(&data[2]));
-	DEBUG("\tVID: %4.4x", get_le16(&data[4]));
-	DEBUG("\tCRPL: %4.4x", get_le16(&data[6]));
-
-	compositionData.setCompanyId(get_le16(&data[0]));
-	compositionData.setProductId(get_le16(&data[2]));
-	compositionData.setVersionId(get_le16(&data[4]));
-	compositionData.setNumRplEnteries(get_le16(&data[6]));
-
-	features = get_le16(&data[8]);
-	data += 10;
-	len -= 10;
-
-	DEBUG("\tFeature support:\n");
-	DEBUG("\t\trelay: %s\n", (features & FEATURE_RELAY) ?
-								"yes" : "no");
-	DEBUG("\t\tproxy: %s\n", (features & FEATURE_PROXY) ?
-								"yes" : "no");
-	DEBUG("\t\tfriend: %s\n", (features & FEATURE_FRIEND) ?
-								"yes" : "no");
-	DEBUG("\t\tlpn: %s\n", (features & FEATURE_LPN) ?
-								"yes" : "no");
-
-	BleMeshFeature meshFeatures(features & FEATURE_RELAY, features & FEATURE_PROXY,
-								features & FEATURE_FRIEND, features & FEATURE_LPN);
-
-	compositionData.setFeatures(meshFeatures);
-	std::vector<BleMeshElement> elements;
-
-	while (len) {
-		BleMeshElement element;
-		uint8_t m, v;
-
-		DEBUG("\t Element %d:\n", i);
-		DEBUG("\t\tlocation: %4.4x\n", get_le16(data));
-		element.setLoc(get_le16(data));
-		data += 2;
-		len -= 2;
-
-		m = *data++;
-		v = *data++;
-		len -= 2;
-		element.setNumS(m);
-		element.setNumV(v);
-		std::vector<uint32_t> sigModId;
-		std::vector<uint32_t> vendorModId;
-
-		if (m)
-			DEBUG("\t\tSIG defined models:\n");
-
-		while (len >= 2 && m--) {
-			printModId(data, false, "\t\t  ");
-			uint32_t modId = get_le16(data);
-			sigModId.push_back(modId);
-			data += 2;
-			len -= 2;
-		}
-		element.setSigModelIds(sigModId);
-
-		if (v)
-			DEBUG("\t\t Vendor defined models:\n");
-
-		while (len >= 4 && v--) {
-			printModId(data, true, "\t\t  ");
-			uint32_t modId = get_le16(data);
-			modId = get_le16(data) << 16 | modId;
-			vendorModId.push_back(modId);
-			data += 4;
-			len -= 4;
-		}
-		element.setVendorModelIds(vendorModId);
-		elements.push_back(element);
-		i++;
+	if (!parseCompositionData(data, len, compositionData))
+	{
+		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Composition data too short: %u bytes", len);
+		return;
 	}
-	DEBUG("Elements size: %d", elements.size());
-	compositionData.setElements(elements);
+	DEBUG("Received composition: CID %4.4x PID %4.4x VID %4.4x, %zu elements", compositionData.getCompanyId(),
+	      compositionData.getProductId(), compositionData.getVersionId(), compositionData.getElements().size());
 }
 
 bool Bluez5MeshModelConfigClient::recvData(uint16_t srcAddress, uint16_t destAddress,
-									uint16_t appIndex, uint8_t data[], uint32_t dataLen)
+									uint16_t /*appIndex*/, uint8_t data[], uint32_t dataLen)
 {
 	DEBUG("%s::%s",__FILE__,__FUNCTION__);
 	DEBUG("srcAddress:%d::destAddress:%d",srcAddress,destAddress);
@@ -585,30 +450,64 @@ bool Bluez5MeshModelConfigClient::recvData(uint16_t srcAddress, uint16_t destAdd
 		return false;
 	}
 	DEBUG("Opcode received: %x", opcode);
-	auto req = getRequestFromResponse(opcode, srcAddress);
-	if (req == pendingRequests.end())
+
+	// What the reply echoes, parsed first to find the request it answers.
+	MeshRequestKey replyKey;
+	MeshAppKeyStatus appKeyStatus;
+	MeshModelAppStatus modelAppStatus;
+	MeshNetKeyStatus netKeyStatus;
+	bool parsedAppKeyStatus = opcode == OP_APPKEY_STATUS && parseAppKeyStatus(data, dataLen, appKeyStatus);
+	bool parsedModelAppStatus = opcode == OP_MODEL_APP_STATUS && parseModelAppStatus(data, dataLen, modelAppStatus);
+	bool parsedNetKeyStatus = opcode == OP_NETKEY_STATUS && parseNetKeyStatus(data, dataLen, netKeyStatus);
+	if (parsedAppKeyStatus)
+	{
+		replyKey.hasNetKey = replyKey.hasAppKey = true;
+		replyKey.netKeyIndex = appKeyStatus.netKeyIndex;
+		replyKey.appKeyIndex = appKeyStatus.appKeyIndex;
+	}
+	else if (parsedModelAppStatus)
+	{
+		replyKey.hasAppKey = replyKey.hasModel = true;
+		replyKey.appKeyIndex = modelAppStatus.appKeyIndex;
+		replyKey.modelId = modelAppStatus.modelId;
+	}
+	else if (parsedNetKeyStatus)
+	{
+		replyKey.hasNetKey = true;
+		replyKey.netKeyIndex = netKeyStatus.netKeyIndex;
+	}
+
+	BleMeshPendingRequest *found = findRequestForResponse(opcode, srcAddress, replyKey);
+	if (!found)
 	{
 		DEBUG("Request not present\n");
 		return false;
 	}
-	configuration.setConfig((*req)->desc);
+	// A copy, and off the queue now: the request was used through an iterator the lock no longer covered, and the
+	// observer below may call back into the client.
+	BleMeshPendingRequest request = *found;
+	removePendingRequest(found);
+	configuration.setConfig(request.desc);
 
-	switch (opcode & ~OP_UNRELIABLE)
+	// The node's status code: it was only logged, so a refused AppKey add or model bind was reported as done.
+	BluetoothError result = BLUETOOTH_ERROR_NONE;
+
+	// The exact opcode: OP_UNRELIABLE is a convention for opcodes sent, and masking it off a received one turned
+	// other opcodes into config statuses.
+	switch (opcode)
 	{
 		case OP_APPKEY_STATUS:
 		{
-			if (dataLen != 4)
+			if (!parsedAppKeyStatus)
 				break;
 
-			DEBUG("Node %4.4x AppKey status %x\n", srcAddress, data[0]);
-			uint16_t net_idx = get_le16(data + 1) & 0xfff;
-			uint16_t app_idx = get_le16(data + 2) >> 4;
-
-			DEBUG("NetKey\t%3.3x\n", net_idx);
-			DEBUG("AppKey\t%3.3x\n", app_idx);
-
-			configuration.setNetKeyIndex(net_idx);
-			configuration.setAppKeyIndex(app_idx);
+			DEBUG("Node %4.4x AppKey status %x, NetKey %3.3x, AppKey %3.3x\n", srcAddress, appKeyStatus.status,
+			      appKeyStatus.netKeyIndex, appKeyStatus.appKeyIndex);
+			configuration.setNetKeyIndex(appKeyStatus.netKeyIndex);
+			configuration.setAppKeyIndex(appKeyStatus.appKeyIndex);
+			result = meshStatusToError(appKeyStatus.status);
+			if (result != BLUETOOTH_ERROR_NONE)
+				reportKeyRefreshFailure(request);	// for an AppKey update of a key refresh
 			opCodeHandled = true;
 			break;
 		}
@@ -651,19 +550,18 @@ bool Bluez5MeshModelConfigClient::recvData(uint16_t srcAddress, uint16_t destAdd
 		}
 		case OP_MODEL_APP_STATUS:
 		{
-			if (dataLen != 7 && dataLen != 9)
+			if (!parsedModelAppStatus)
 				break;
 
-			DEBUG("Node %4.4x: Model App status %d\n", srcAddress, data[0]);
-			uint16_t addr = get_le16(data + 1);
-			uint16_t app_idx = get_le16(data + 3);
-
-			DEBUG("Element Addr\t%4.4x\n", addr);
-
-			uint32_t mod_id = get_le16(data + 5);
-			DEBUG("Model ID\t %4.4x\n",mod_id);
-
-			DEBUG("AppIdx\t\t%3.3x\n ", app_idx);
+			DEBUG("Node %4.4x: Model App status %d, element %4.4x, AppKey %3.3x, model %8.8x\n", srcAddress,
+			      modelAppStatus.status, modelAppStatus.elementAddress, modelAppStatus.appKeyIndex,
+			      modelAppStatus.modelId);
+			configuration.setAppKeyIndex(modelAppStatus.appKeyIndex);
+			// The status has no NetKey index: the one the bind or unbind was sent with. (BleMeshConfiguration has
+			// no field for the model id; the reply was matched on it above.)
+			if (request.key.hasNetKey)
+				configuration.setNetKeyIndex(request.key.netKeyIndex);
+			result = meshStatusToError(modelAppStatus.status);
 			opCodeHandled = true;
 			break;
 		}
@@ -674,7 +572,7 @@ bool Bluez5MeshModelConfigClient::recvData(uint16_t srcAddress, uint16_t destAdd
 
 			DEBUG("Node %4.4x  Default TTL %d\n", srcAddress, data[0]);
 			configuration.setTTL(data[0]);
-			DEBUG("Config:%s\n",configuration.getConfig());
+			DEBUG("Config:%s\n", configuration.getConfig().c_str());	// a std::string through varargs: undefined (clang refused it)
 			opCodeHandled = true;
 			break;
 		}
@@ -715,27 +613,27 @@ bool Bluez5MeshModelConfigClient::recvData(uint16_t srcAddress, uint16_t destAdd
 		}
 		case OP_NODE_RESET_STATUS:
 		{
-			mMeshAdv->deleteRemoteNodeFromLocalKeyDatabase((*req)->addr, (*req)->count);
+			mMeshAdv->deleteRemoteNodeFromLocalKeyDatabase(request.addr, request.count);
 			break;
 		}
 		case OP_NETKEY_STATUS:
 		{
-			if (dataLen != 3)
+			if (!parsedNetKeyStatus)
 				break;
 
-			DEBUG("Node %4.4x NetKey status %d\n", srcAddress,
-							data[0]);
+			DEBUG("Node %4.4x NetKey status %d\n", srcAddress, netKeyStatus.status);
+			// A refused NetKey update of a key refresh: it was taken for success, only a missing reply failed.
+			if (netKeyStatus.status != MESH_STATUS_SUCCESS)
+				reportKeyRefreshFailure(request);
 			break;
 		}
 		default:
 			DEBUG("Op code not handled");
 	}
 
-	deletePendingRequest(opcode, srcAddress);
-
 	if (opCodeHandled)
 	{
-		mMeshProfile->getMeshObserver()->modelConfigResult(convertAddressToLowerCase(mAdapter->getAddress()), configuration, BLUETOOTH_ERROR_NONE);
+		mMeshProfile->getMeshObserver()->modelConfigResult(convertAddressToLowerCase(mAdapter->getAddress()), configuration, result);
 		return true;
 	}
 	return false;
@@ -838,21 +736,10 @@ BluetoothError Bluez5MeshModelConfigClient::configGet(uint16_t destAddress,
 	return BLUETOOTH_ERROR_PARAM_INVALID;
 }
 
-uint16_t Bluez5MeshModelConfigClient::putModelId(uint8_t *buf, uint32_t *args)
-{
-		uint16_t n = 2;
-
-		put_le16((uint16_t)(*args), buf);
-
-		return n;
-}
-
 BluetoothError Bluez5MeshModelConfigClient::configNetKeyUpdate(uint16_t destAddress,
 												uint16_t netKeyIndex, int32_t waitTime,
 												int32_t numberOfElements)
 {
-	uint16_t n;
-	uint8_t msg[32];
 	GError *error = 0;
 
 	DEBUG("%s::%s::waitTime: %d",__FILE__,__FUNCTION__, waitTime);
@@ -860,8 +747,10 @@ BluetoothError Bluez5MeshModelConfigClient::configNetKeyUpdate(uint16_t destAddr
 	keyRefreshData.netKeyIndex = netKeyIndex;
 	keyRefreshData.waitTime = waitTime;
 	keyRefreshData.numberOfElements = numberOfElements;
-	addPendingRequest(OP_NETKEY_UPDATE, destAddress,
-							keyRefreshData);
+	MeshRequestKey key;
+	key.hasNetKey = true;
+	key.netKeyIndex = netKeyIndex;
+	BleMeshPendingRequest *pending = addPendingRequest(OP_NETKEY_UPDATE, destAddress, keyRefreshData, key);
 
 	bluez_mesh_node1_call_add_net_key_sync(
 			mMeshAdv->getBluezNodeInterface(), BLUEZ_MESH_ELEMENT_PATH,
@@ -871,7 +760,7 @@ BluetoothError Bluez5MeshModelConfigClient::configNetKeyUpdate(uint16_t destAddr
 		ERROR(MSGID_MESH_PROFILE_ERROR, 0, "bluez_mesh_node1_call_add_net_key_sync failed: %s", error->message);
 		g_error_free(error);
 		error = NULL;
-		deletePendingRequest(OP_NETKEY_STATUS, destAddress);
+		removePendingRequest(pending);	// this one: by opcode and node, it could be another request's
 		return BLUETOOTH_ERROR_FAIL;
 	}
 	return BLUETOOTH_ERROR_NONE;
@@ -891,12 +780,18 @@ BluetoothError Bluez5MeshModelConfigClient::configUnBindAppKey(uint16_t destAddr
 	n += 2;
 	put_le16(appKeyIndex, msg + n);
 	n += 2;
-	n += putModelId(msg + n, &modelId);
+	n += putModelId(msg + n, modelId);	// 4 bytes for a vendor model: it was cut to 2
 
 	btError = mMeshAdv->devKeySend(destAddress, netKeyIndex, msg, n);
 	if (BLUETOOTH_ERROR_NONE == btError)
 	{
-		addPendingRequest(OP_MODEL_APP_UNBIND, destAddress);
+		MeshRequestKey key;
+		key.hasAppKey = key.hasModel = true;
+		key.appKeyIndex = appKeyIndex;
+		key.modelId = modelId;
+		key.hasNetKey = true;	// not in the status: kept for the result (the reply is matched without it)
+		key.netKeyIndex = netKeyIndex;
+		addPendingRequest(OP_MODEL_APP_UNBIND, destAddress, 0, key);
 	}
 	return btError;
 }
@@ -916,12 +811,18 @@ BluetoothError Bluez5MeshModelConfigClient::configBindAppKey(uint16_t destAddres
 	put_le16(appKeyIndex, msg + n);
 	n += 2;
 
-	n += putModelId(msg + n, &modelId);
+	n += putModelId(msg + n, modelId);	// 4 bytes for a vendor model: it was cut to 2
 
 	btError = mMeshAdv->devKeySend(destAddress, netKeyIndex, msg, n);
 	if (BLUETOOTH_ERROR_NONE == btError)
 	{
-		addPendingRequest(OP_MODEL_APP_BIND, destAddress);
+		MeshRequestKey key;
+		key.hasAppKey = key.hasModel = true;
+		key.appKeyIndex = appKeyIndex;
+		key.modelId = modelId;
+		key.hasNetKey = true;	// not in the status: kept for the result (the reply is matched without it)
+		key.netKeyIndex = netKeyIndex;
+		addPendingRequest(OP_MODEL_APP_BIND, destAddress, 0, key);
 	}
 	return btError;
 }
@@ -996,17 +897,22 @@ BluetoothError Bluez5MeshModelConfigClient::addAppKey(uint16_t destAddress,
 	GError *error = 0;
 	BluetoothError silError = BLUETOOTH_ERROR_NONE;
 
+	MeshRequestKey key;
+	key.hasNetKey = key.hasAppKey = true;
+	key.netKeyIndex = netKeyIndex;
+	key.appKeyIndex = appKeyIndex;
+	BleMeshPendingRequest *pending;
 	if (update)
 	{
 		BleMeshKeyRefreshData keyRefreshData;
 		keyRefreshData.netKeyIndex = netKeyIndex;
 		keyRefreshData.appKeyIndex = appKeyIndex;
 		keyRefreshData.waitTime = waitTime;
-		addPendingRequest(OP_APPKEY_UPDATE, destAddress, keyRefreshData);
+		pending = addPendingRequest(OP_APPKEY_UPDATE, destAddress, keyRefreshData, key);
 	}
 	else
 	{
-		addPendingRequest(OP_APPKEY_ADD, destAddress);
+		pending = addPendingRequest(OP_APPKEY_ADD, destAddress, 0, key);
 	}
 
 	bluez_mesh_node1_call_add_app_key_sync(mMeshAdv->getBluezNodeInterface(), BLUEZ_MESH_ELEMENT_PATH,
@@ -1027,7 +933,7 @@ BluetoothError Bluez5MeshModelConfigClient::addAppKey(uint16_t destAddress,
 		else
 			silError = BLUETOOTH_ERROR_FAIL;
 		g_error_free(error);
-		deletePendingRequest(OP_APPKEY_STATUS, destAddress);
+		removePendingRequest(pending);	// this one: by opcode and node, it could be another request's
 	}
 	return silError;
 }
@@ -1050,7 +956,11 @@ BluetoothError Bluez5MeshModelConfigClient::configAppKeyDelete(uint16_t destAddr
 	btError = mMeshAdv->devKeySend(destAddress, netKeyIndex, msg, n);
 	if (BLUETOOTH_ERROR_NONE == btError)
 	{
-		addPendingRequest(OP_APPKEY_DELETE, destAddress);
+		MeshRequestKey key;
+		key.hasNetKey = key.hasAppKey = true;
+		key.netKeyIndex = netKeyIndex;
+		key.appKeyIndex = appKeyIndex;
+		addPendingRequest(OP_APPKEY_DELETE, destAddress, 0, key);
 	}
 	return btError;
 }

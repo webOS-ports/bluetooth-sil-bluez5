@@ -14,11 +14,21 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <cinttypes>
 #include "bluez5mediaplayer.h"
 #include "bluez5profileavrcp.h"
 #include "bluez5mediafolder.h"
 #include "logging.h"
 #include <utils.h>
+
+// The calls made synchronously, which bluetoothd answers itself (BlueZ 5.86 profiles/audio/player.c): the
+// pass-through ones (Play, Pause, Next...), replied to once the AVCTP command is queued, and the GetAll property
+// reads from its cache. 3 s bounds how long a hung bluetoothd holds the service.
+static const gint LOCAL_CALL_TIMEOUT_MS = 3000;
+// A Set of a player application setting is completed by BlueZ only when the remote device answers (its own AVCTP
+// timeout is 10 s, retried once): asynchronous, with the default D-Bus timeout, so that it does not give up while
+// BlueZ still waits.
+static const gint REMOTE_CALL_TIMEOUT_MS = -1;
 
 const std::map<BluetoothAvrcpPassThroughKeyCode, bluezSendPassThroughCommand> Bluez5MediaPlayer::mPassThroughCmd = {
 	{KEY_CODE_PLAY, &bluez_media_player1_call_play_sync},
@@ -45,9 +55,11 @@ Bluez5MediaPlayer::Bluez5MediaPlayer(Bluez5ProfileAvcrp *avrcp,
 	mAvrcp(avrcp),
 	mPlayerInterface(nullptr),
 	mPropertiesProxy(nullptr),
+	mObject(nullptr),
 	mMediaFolder(nullptr)
 {
 	mPlayerInfo.setPath(g_dbus_object_get_object_path(object));
+	objPathToDevAddress(mPlayerInfo.getPath(), mDeviceAddress);
 	DEBUG("Bluez5MediaPlayer:: playrObjPath: %s", mPlayerInfo.getPath().c_str());
 	GError *error = 0;
 	mPlayerInterface = bluez_media_player1_proxy_new_for_bus_sync(
@@ -70,23 +82,62 @@ Bluez5MediaPlayer::Bluez5MediaPlayer(Bluez5ProfileAvcrp *avrcp,
 		return;
 	}
 
+	g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mPlayerInterface), LOCAL_CALL_TIMEOUT_MS);
+	g_dbus_proxy_set_default_timeout(G_DBUS_PROXY(mPropertiesProxy), LOCAL_CALL_TIMEOUT_MS);
+
 	g_signal_connect(G_OBJECT(mPropertiesProxy), "properties-changed",
 					 G_CALLBACK(handlePropertiesChanged), this);
+	mObject = G_DBUS_OBJECT(g_object_ref(object));
 	g_signal_connect(object, "interface-added",
 					 G_CALLBACK(handleInterfaceAdded), this);
 	g_signal_connect(object, "interface-removed",
 					 G_CALLBACK(handleInterfaceRemoved), this);
+	// A player found with its MediaFolder1 already there (at service start) never got a folder.
+	updateMediaFolder(object);
+}
+
+// The folder follows the MediaFolder1 interface of the player object.
+void Bluez5MediaPlayer::updateMediaFolder(GDBusObject *object)
+{
+	GDBusInterface *folderInterface = g_dbus_object_get_interface(object, "org.bluez.MediaFolder1");
+	if (folderInterface && !mMediaFolder)
+	{
+		DEBUG("MediaFolder interface added");
+		mMediaFolder = new Bluez5MediaFolder(mAvrcp, g_dbus_object_get_object_path(object));
+	}
+	else if (!folderInterface && mMediaFolder)
+	{
+		DEBUG("Bluez5MediaPlayer:: Deleting MediaFolder");
+		delete mMediaFolder;
+		mMediaFolder = nullptr;
+	}
+	if (folderInterface)
+		g_object_unref(folderInterface);	// a new reference, leaked
+}
+
+bool Bluez5MediaPlayer::reporting() const
+{
+	return mAvrcp->isDeviceConnected(mDeviceAddress);
 }
 
 Bluez5MediaPlayer::~Bluez5MediaPlayer()
 {
+	if (mObject)
+	{
+		g_signal_handlers_disconnect_by_data(mObject, this);	// left connected, to this deleted player
+		g_object_unref(mObject);
+		mObject = nullptr;
+	}
+	// A pending call keeps a proxy, and its handlers' pointer to this player, alive.
 	if (mPlayerInterface)
 	{
+		g_signal_handlers_disconnect_by_data(mPlayerInterface, this);
 		g_object_unref(mPlayerInterface);
 		mPlayerInterface = nullptr;
 	}
 	if (mPropertiesProxy)
 	{
+		g_signal_handlers_disconnect_by_data(mPropertiesProxy, this);
 		g_object_unref(mPropertiesProxy);
 		mPropertiesProxy = nullptr;
 	}
@@ -99,19 +150,24 @@ Bluez5MediaPlayer::~Bluez5MediaPlayer()
 
 void Bluez5MediaPlayer::getAllProperties()
 {
-	GVariant *propsVar;
+	// Set only on success: on a failure (the player gone again, a timeout) stack garbage was tested and unreffed.
+	GVariant *propsVar = nullptr;
+	if (!mPropertiesProxy)
+		return;
 	free_desktop_dbus_properties_call_get_all_sync(
 		mPropertiesProxy,
 		"org.bluez.MediaPlayer1", &propsVar, NULL, NULL);
 	if (propsVar != NULL)
+	{
 		mediaPlayerPropertiesChanged(propsVar);
-	g_variant_unref(propsVar);
+		g_variant_unref(propsVar);
+	}
 }
 
 void Bluez5MediaPlayer::handlePropertiesChanged(
-	BluezMediaPlayer1 *playerInterface,
+	BluezMediaPlayer1 */*playerInterface*/,
 	gchar *interface, GVariant *changedProperties,
-	GVariant *invalidatedProperties, gpointer userData)
+	GVariant */*invalidatedProperties*/, gpointer userData)
 {
 	std::string interfaceName = interface;
 	auto mediaPlayer = static_cast<Bluez5MediaPlayer *>(userData);
@@ -119,42 +175,28 @@ void Bluez5MediaPlayer::handlePropertiesChanged(
 	mediaPlayer->mediaPlayerPropertiesChanged(changedProperties);
 }
 
+// GDBusObjectProxy drops an interface from the object before it emits interface-removed, so the folder is kept
+// or dropped by what the object still has: the MediaFolder1 lookup missed its own removal, deleted the folder for
+// an unrelated interface's, and created a second folder (leaking the first) for any interface added.
 void Bluez5MediaPlayer::handleInterfaceAdded(
-	GDBusObject *object, GDBusInterface *interface, gpointer userData)
+	GDBusObject *object, GDBusInterface */*interface*/, gpointer userData)
 {
 	DEBUG("Bluez5MediaPlayer:: handleInterfaceAdded");
-	Bluez5MediaPlayer *mediaPlayer = static_cast<Bluez5MediaPlayer *>(userData);
-	std::string objectPath = g_dbus_object_get_object_path(object);
-
-	auto mediaFolderInterface = g_dbus_object_get_interface(object, "org.bluez.MediaFolder1");
-	if (mediaFolderInterface)
-	{
-		DEBUG("MediaFolder interface added");
-		mediaPlayer->mMediaFolder = new Bluez5MediaFolder(mediaPlayer->mAvrcp, objectPath);
-	}
+	static_cast<Bluez5MediaPlayer *>(userData)->updateMediaFolder(object);
 }
 
 void Bluez5MediaPlayer::handleInterfaceRemoved(
-	GDBusObject *object, GDBusInterface *interface, gpointer userData)
+	GDBusObject *object, GDBusInterface */*interface*/, gpointer userData)
 {
 	DEBUG("Bluez5MediaPlayer:: handleInterfaceRemoved");
-	Bluez5MediaPlayer *mediaPlayer = static_cast<Bluez5MediaPlayer *>(userData);
-	std::string objectPath = g_dbus_object_get_object_path(object);
-
-	auto mediaFolderInterface = g_dbus_object_get_interface(object, "org.bluez.MediaFolder1");
-	if (mediaFolderInterface)
-	{
-		DEBUG("Bluez5MediaPlayer:: Deleting MediaFolder");
-		delete mediaPlayer->mMediaFolder;
-		mediaPlayer->mMediaFolder = nullptr;
-	}
+	static_cast<Bluez5MediaPlayer *>(userData)->updateMediaFolder(object);
 }
 
 void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 	GVariant *changedProperties)
 {
 	BluetoothPlayerApplicationSettingsPropertiesList applicationSettings;
-	for (int n = 0; n < g_variant_n_children(changedProperties); n++)
+	for (size_t n = 0; n < g_variant_n_children(changedProperties); n++)
 	{
 		GVariant *propertyVar = g_variant_get_child_value(changedProperties, n);
 		GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -168,13 +210,13 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 			if (mMediaPlayStatus.getPosition() != position)
 			{
 				mMediaPlayStatus.setPosition(position);
-				DEBUG("Bluez5MediaPlayer::Position: %ld", mMediaPlayStatus.getPosition());
-				if (!mAvrcp->getConnectedDeviceAddress().empty())
+				DEBUG("Bluez5MediaPlayer::Position: %" PRIu64, mMediaPlayStatus.getPosition());
+				if (reporting())
 				{
 					mAvrcp->getAvrcpObserver()->mediaPlayStatusReceived(
 						mMediaPlayStatus,
 						convertAddressToLowerCase(mAvrcp->getAdapterAddress()),
-						convertAddressToLowerCase(mAvrcp->getConnectedDeviceAddress()));
+						convertAddressToLowerCase(mDeviceAddress));
 				}
 			}
 		}
@@ -186,12 +228,12 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 				if (playStatusIt->second != mMediaPlayStatus.getStatus())
 				{
 					mMediaPlayStatus.setStatus(playStatusIt->second);
-					if (!mAvrcp->getConnectedDeviceAddress().empty())
+					if (reporting())
 					{
 						mAvrcp->getAvrcpObserver()->mediaPlayStatusReceived(
 							mMediaPlayStatus,
 							convertAddressToLowerCase(mAvrcp->getAdapterAddress()),
-							convertAddressToLowerCase(mAvrcp->getConnectedDeviceAddress()));
+							convertAddressToLowerCase(mDeviceAddress));
 					}
 				}
 				DEBUG("Bluez5MediaPlayer::Play status: %d", mMediaPlayStatus.getStatus());
@@ -199,7 +241,7 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 		}
 		else if ("Track" == key)
 		{
-			GVariantIter *iter;
+			GVariantIter *iter = nullptr;
 			g_variant_get(valueVar, "a{sv}", &iter);
 			GVariant *valueTrack;
 			gchar *keyVar;
@@ -215,12 +257,12 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 					if (mMediaPlayStatus.getDuration() != duration)
 					{
 						mMediaPlayStatus.setDuration(duration);
-						if (!mAvrcp->getConnectedDeviceAddress().empty())
+						if (reporting())
 						{
 							mAvrcp->getAvrcpObserver()->mediaPlayStatusReceived(
 								mMediaPlayStatus,
 								convertAddressToLowerCase(mAvrcp->getAdapterAddress()),
-								convertAddressToLowerCase(mAvrcp->getConnectedDeviceAddress()));
+								convertAddressToLowerCase(mDeviceAddress));
 						}
 					}
 					mediaMetadata.setDuration(duration);
@@ -250,13 +292,14 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 					mediaMetadata.setTrackNumber(g_variant_get_uint32(valueTrack));
 				}
 			}
-			if (!mAvrcp->getConnectedDeviceAddress().empty())
+			if (reporting())
 			{
 				mAvrcp->getAvrcpObserver()->mediaDataReceived(
 					mediaMetadata,
 					convertAddressToLowerCase(mAvrcp->getAdapterAddress()),
-					convertAddressToLowerCase(mAvrcp->getConnectedDeviceAddress()));
+					convertAddressToLowerCase(mDeviceAddress));
 			}
+			g_variant_iter_free(iter);	// leaked on every track change
 		}
 		else if ("Equalizer" == key)
 		{
@@ -264,12 +307,12 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 				equalizerStringToEnum(g_variant_get_string(valueVar, NULL));
 			applicationSettings.push_back(BluetoothPlayerApplicationSettingsProperty(
 				BluetoothPlayerApplicationSettingsProperty::Type::EQUALIZER, equalizer));
-			if (!mAvrcp->getConnectedDeviceAddress().empty())
+			if (reporting())
 			{
 				mAvrcp->getAvrcpObserver()->playerApplicationSettingsReceived(
 					applicationSettings,
 					convertAddressToLowerCase(mAvrcp->getAdapterAddress()),
-					convertAddressToLowerCase(mAvrcp->getConnectedDeviceAddress()));
+					convertAddressToLowerCase(mDeviceAddress));
 			}
 		}
 		else if ("Repeat" == key)
@@ -278,12 +321,12 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 				repeatStringToEnum(g_variant_get_string(valueVar, NULL));
 			applicationSettings.push_back(BluetoothPlayerApplicationSettingsProperty(
 				BluetoothPlayerApplicationSettingsProperty::Type::REPEAT, repeat));
-			if (!mAvrcp->getConnectedDeviceAddress().empty())
+			if (reporting())
 			{
 				mAvrcp->getAvrcpObserver()->playerApplicationSettingsReceived(
 					applicationSettings,
 					convertAddressToLowerCase(mAvrcp->getAdapterAddress()),
-					convertAddressToLowerCase(mAvrcp->getConnectedDeviceAddress()));
+					convertAddressToLowerCase(mDeviceAddress));
 			}
 		}
 		else if ("Shuffle" == key)
@@ -292,12 +335,12 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 				shuffleStringToEnum(g_variant_get_string(valueVar, NULL));
 			applicationSettings.push_back(BluetoothPlayerApplicationSettingsProperty(
 				BluetoothPlayerApplicationSettingsProperty::Type::SHUFFLE, shuffle));
-			if (!mAvrcp->getConnectedDeviceAddress().empty())
+			if (reporting())
 			{
 				mAvrcp->getAvrcpObserver()->playerApplicationSettingsReceived(
 					applicationSettings,
 					convertAddressToLowerCase(mAvrcp->getAdapterAddress()),
-					convertAddressToLowerCase(mAvrcp->getConnectedDeviceAddress()));
+					convertAddressToLowerCase(mDeviceAddress));
 			}
 		}
 		else if ("Scan" == key)
@@ -306,12 +349,12 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 				scanStringToEnum(g_variant_get_string(valueVar, NULL));
 			applicationSettings.push_back(BluetoothPlayerApplicationSettingsProperty(
 				BluetoothPlayerApplicationSettingsProperty::Type::SCAN, scan));
-			if (!mAvrcp->getConnectedDeviceAddress().empty())
+			if (reporting())
 			{
 				mAvrcp->getAvrcpObserver()->playerApplicationSettingsReceived(
 					applicationSettings,
 					convertAddressToLowerCase(mAvrcp->getAdapterAddress()),
-					convertAddressToLowerCase(mAvrcp->getConnectedDeviceAddress()));
+					convertAddressToLowerCase(mDeviceAddress));
 			}
 		}
 		else if ("Name" == key || "Type" == key || "Browsable" == key ||
@@ -322,13 +365,19 @@ void Bluez5MediaPlayer::mediaPlayerPropertiesChanged(
 			if (changed)
 			{
 				DEBUG("Updating player info");
-				mAvrcp->updatePlayerInfo();
+				mAvrcp->updatePlayerInfo(mDeviceAddress);
 			}
 		}
 		else
 		{
 			DEBUG("Bluez5MediaPlayer::Key: %s", key.c_str());
 		}
+
+		// All four leaked for every property, and BlueZ sends Position every second while playing.
+		g_variant_unref(valueVar);
+		g_variant_unref(valueVariant);
+		g_variant_unref(keyVar);
+		g_variant_unref(propertyVar);
 	}
 }
 
@@ -338,11 +387,19 @@ BluetoothError Bluez5MediaPlayer::sendPassThroughCommand(
 {
 	DEBUG("Bluez5MediaPlayer: sendPassThroughCommand");
 	GError *error = 0;
+
+	// MediaPlayer1 has one call per action, sent on the press: a press and its release ran the action twice
+	// (two tracks skipped, play/pause toggled back).
+	if (keyStatus != KEY_STATUS_PRESSED)
+		return mPassThroughCmd.count(keyCode) ? BLUETOOTH_ERROR_NONE : BLUETOOTH_ERROR_UNSUPPORTED;
 	/* process the command if avrcp is connected in CT role.  */
 
 	auto passThroughCmdIt = mPassThroughCmd.find(keyCode);
 	if (passThroughCmdIt != mPassThroughCmd.end())
 	{
+		if (!mPlayerInterface)
+			return BLUETOOTH_ERROR_FAIL;
+		// Synchronous: bluetoothd replies once the AVCTP command is queued, not when the device answers.
 		passThroughCmdIt->second(mPlayerInterface, NULL, &error);
 		if (error)
 		{
@@ -464,85 +521,117 @@ BluetoothPlayerApplicationSettingsEqualizer Bluez5MediaPlayer::equalizerStringTo
 		return BluetoothPlayerApplicationSettingsEqualizer::EQUALIZER_UNKNOWN;
 }
 
-BluetoothError Bluez5MediaPlayer::setPlayerApplicationSettingsProperties(
-	const BluetoothPlayerApplicationSettingsPropertiesList &properties)
+void Bluez5MediaPlayer::setPlayerApplicationSettingsProperties(
+	const BluetoothPlayerApplicationSettingsPropertiesList &properties,
+	BluetoothResultCallback callback)
 {
-	GError *error = 0;
-	std::string property;
-	std::string value;
+	auto settings = std::make_shared<PlayerSettings>();
 	for (auto prop : properties)
 	{
 		switch (prop.getType())
 		{
 			case BluetoothPlayerApplicationSettingsProperty::Type::EQUALIZER:
-				{
-					property = "Equalizer";
-					value = equalizerEnumToString(
-						prop.getValue<BluetoothPlayerApplicationSettingsEqualizer>());
-					break;
-				}
+				settings->emplace_back("Equalizer", equalizerEnumToString(
+					prop.getValue<BluetoothPlayerApplicationSettingsEqualizer>()));
+				break;
 			case BluetoothPlayerApplicationSettingsProperty::Type::REPEAT:
-				{
-					property = "Repeat";
-					value = repeatEnumToString(
-						prop.getValue<BluetoothPlayerApplicationSettingsRepeat>());
-					break;
-				}
+				settings->emplace_back("Repeat", repeatEnumToString(
+					prop.getValue<BluetoothPlayerApplicationSettingsRepeat>()));
+				break;
 			case BluetoothPlayerApplicationSettingsProperty::Type::SHUFFLE:
-				{
-					property = "Shuffle";
-					value = shuffleEnumToString(
-						prop.getValue<BluetoothPlayerApplicationSettingsShuffle>());
-					break;
-				}
+				settings->emplace_back("Shuffle", shuffleEnumToString(
+					prop.getValue<BluetoothPlayerApplicationSettingsShuffle>()));
+				break;
 			case BluetoothPlayerApplicationSettingsProperty::Type::SCAN:
-				{
-					property = "Scan";
-					value = scanEnumToString(
-						prop.getValue<BluetoothPlayerApplicationSettingsScan>());
-					break;
-				}
-		}
-		GVariant *var = g_variant_new_string(value.c_str());
-		free_desktop_dbus_properties_call_set_sync(mPropertiesProxy,
-				"org.bluez.MediaPlayer1", property.c_str(),
-				g_variant_new_variant(var), NULL, &error);
-		if (error)
-		{
-			DEBUG ("%s: error is %s for prop: %s, value: %s",
-					__func__, error->message, property.c_str(), value.c_str());
-			g_error_free(error);
-			return BLUETOOTH_ERROR_FAIL;
+				settings->emplace_back("Scan", scanEnumToString(
+					prop.getValue<BluetoothPlayerApplicationSettingsScan>()));
+				break;
+			default:
+				break;	// no setting: it was sent to BlueZ as a property with an empty name
 		}
 	}
-	return BLUETOOTH_ERROR_NONE;
+	setNextPlayerSetting(settings, 0, callback);
+}
+
+// BlueZ completes each Set only when the device has answered: waited for, an unresponsive phone held the whole
+// service. One after the other as before, stopping at the first failure.
+void Bluez5MediaPlayer::setNextPlayerSetting(std::shared_ptr<const PlayerSettings> settings, size_t index,
+		BluetoothResultCallback callback)
+{
+	if (index >= settings->size())
+	{
+		callback(BLUETOOTH_ERROR_NONE);
+		return;
+	}
+	if (!mPropertiesProxy)
+	{
+		callback(BLUETOOTH_ERROR_FAIL);
+		return;
+	}
+
+	const auto &setting = (*settings)[index];
+	auto setCallback = [this, alive = mLifetime.token(), settings, index, callback](GObject *source,
+			GAsyncResult *result) {
+		const auto &done = (*settings)[index];
+		GError *error = 0;
+		GVariant *reply = g_dbus_proxy_call_finish(G_DBUS_PROXY(source), result, &error);
+		const bool ok = reply && !error;
+		if (reply)
+			g_variant_unref(reply);
+		if (!ok)
+		{
+			DEBUG("setPlayerApplicationSettingsProperties: error is %s for prop: %s, value: %s",
+				  error ? error->message : "no reply",
+				  done.first.c_str(), done.second.c_str());
+			g_clear_error(&error);
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
+		if (index + 1 >= settings->size())
+		{
+			callback(BLUETOOTH_ERROR_NONE);
+			return;
+		}
+		// The player went with its device: the remaining settings cannot be made.
+		if (alive.expired())
+		{
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
+		setNextPlayerSetting(settings, index + 1, callback);
+	};
+
+	g_dbus_proxy_call(G_DBUS_PROXY(mPropertiesProxy), "Set",
+			g_variant_new("(ssv)", "org.bluez.MediaPlayer1", setting.first.c_str(),
+						  g_variant_new_string(setting.second.c_str())),
+			G_DBUS_CALL_FLAGS_NONE, REMOTE_CALL_TIMEOUT_MS, NULL, glibAsyncMethodWrapper,
+			new GlibAsyncFunctionWrapper(setCallback));
 }
 
 bool Bluez5MediaPlayer::updatePlayerProperties()
 {
 	bool changed = false;
-	GError *error = 0;
 
 	if (mPropertiesProxy)
 	{
 		DEBUG("Getting the player properties");
-		GVariant *changedProperties;
+		GVariant *changedProperties = nullptr;	// set only on success
 		free_desktop_dbus_properties_call_get_all_sync(
 			mPropertiesProxy,
 			"org.bluez.MediaPlayer1", &changedProperties, NULL, NULL);
 		if (changedProperties != NULL)
 		{
-			for (int n = 0; n < g_variant_n_children(changedProperties); n++)
+			for (size_t n = 0; n < g_variant_n_children(changedProperties); n++)
 			{
 				GVariant *propertyVar = g_variant_get_child_value(changedProperties, n);
 				GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
 				GVariant *propVar = g_variant_get_child_value(propertyVar, 1);
+				GVariant *valueVar = g_variant_get_variant(propVar);	// each was leaked
 
 				std::string key = g_variant_get_string(keyVar, NULL);
 				if ("Name" == key)
 				{
-					std::string value = g_variant_get_string(
-						g_variant_get_variant(propVar), NULL);
+					std::string value = g_variant_get_string(valueVar, NULL);
 					if (mPlayerInfo.getName() != value)
 					{
 						mPlayerInfo.setName(value);
@@ -552,8 +641,7 @@ bool Bluez5MediaPlayer::updatePlayerProperties()
 				}
 				else if ("Type" == key)
 				{
-					std::string value = g_variant_get_string(
-					g_variant_get_variant(propVar), NULL);
+					std::string value = g_variant_get_string(valueVar, NULL);
 					BluetoothAvrcpPlayerType type = playerTypeStringToEnum(value);
 					if (mPlayerInfo.getType() != type)
 					{
@@ -564,8 +652,7 @@ bool Bluez5MediaPlayer::updatePlayerProperties()
 				}
 				else if ("Playlist" == key)
 				{
-					std::string value = g_variant_get_string(
-						g_variant_get_variant(propVar), NULL);
+					std::string value = g_variant_get_string(valueVar, NULL);
 
 					size_t pos = value.find("player");
 					if (pos != std::string::npos)
@@ -582,8 +669,7 @@ bool Bluez5MediaPlayer::updatePlayerProperties()
 				}
 				else if ("Browsable" == key)
 				{
-					bool browsable = g_variant_get_boolean(
-						g_variant_get_variant(propVar));
+					bool browsable = g_variant_get_boolean(valueVar);
 					if (mPlayerInfo.getBrowsable() != browsable)
 					{
 						mPlayerInfo.setBrowsable(browsable);
@@ -593,8 +679,7 @@ bool Bluez5MediaPlayer::updatePlayerProperties()
 				}
 				else if ("Searchable" == key)
 				{
-					bool searchable = g_variant_get_boolean(
-						g_variant_get_variant(propVar));
+					bool searchable = g_variant_get_boolean(valueVar);
 					if (mPlayerInfo.getSearchable() != searchable)
 					{
 						mPlayerInfo.setSearchable(searchable);
@@ -602,9 +687,13 @@ bool Bluez5MediaPlayer::updatePlayerProperties()
 						DEBUG("searchable: %d", searchable);
 					}
 				}
+				g_variant_unref(valueVar);
+				g_variant_unref(propVar);
+				g_variant_unref(keyVar);
+				g_variant_unref(propertyVar);
 			}
+			g_variant_unref(changedProperties);	// was also called with NULL when GetAll failed
 		}
-		g_variant_unref(changedProperties);
 	}
 
 	return changed;
@@ -651,7 +740,7 @@ void Bluez5MediaPlayer::getFolderItems(uint32_t startIndex, uint32_t endIndex,
 	mMediaFolder->getFolderItems(startIndex, endIndex, callback);
 }
 
-BluetoothError Bluez5MediaPlayer::changePath(const std::string &itemPath)
+BluetoothError Bluez5MediaPlayer::changePath(const std::string &itemPath, BluetoothResultCallback done)
 {
 	if (!mMediaFolder)
 	{
@@ -669,10 +758,10 @@ BluetoothError Bluez5MediaPlayer::changePath(const std::string &itemPath)
 	}
 	std::string finalItemPath = playerPath + itemPath;
 	DEBUG("ItemPath : %s", finalItemPath.c_str());
-	return mMediaFolder->changePath(finalItemPath);
+	return mMediaFolder->changePath(finalItemPath, done);
 }
 
-BluetoothError Bluez5MediaPlayer::playItem(const std::string &itemPath)
+BluetoothError Bluez5MediaPlayer::playItem(const std::string &itemPath, BluetoothResultCallback done)
 {
 	if (!mMediaFolder)
 	{
@@ -690,7 +779,7 @@ BluetoothError Bluez5MediaPlayer::playItem(const std::string &itemPath)
 	}
 	std::string finalItemPath = playerPath + itemPath;
 	DEBUG("ItemPath : %s", finalItemPath.c_str());
-	return mMediaFolder->playItem(finalItemPath);
+	return mMediaFolder->playItem(finalItemPath, done);
 }
 
 BluetoothError Bluez5MediaPlayer::addToNowPlaying(const std::string &itemPath)

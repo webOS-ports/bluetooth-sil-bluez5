@@ -32,16 +32,16 @@ class Bluez5ProfilePbap : public Bluez5ObexProfileBase,
 public:
     Bluez5ProfilePbap(Bluez5Adapter *adapter);
     ~Bluez5ProfilePbap();
-    void supplyAccessConfirmation(BluetoothPbapAccessRequestId accessRequestId, bool accept, BluetoothResultCallback callback);
-    void setPhoneBook(const std::string &address, const std::string &repository, const std::string &object, BluetoothResultCallback callback);
-    void getPhonebookSize(const std::string &address, BluetoothPbapGetSizeResultCallback callback);
-    void vCardListing(const std::string &address, BluetoothPbapVCardListResultCallback callback);
-    void getPhoneBookProperties(const std::string &address, BluetoothPbapApplicationParameterCallback callback);
-    void getvCardFilters(const std::string &address, BluetoothPbapListFiltersResultCallback callback);
-    void pullvCard(const std::string &address, const std::string &targetFile, const std::string &vCardHandle, const std::string &vCardVersion, BluetoothPbapVCardFilterList &vCardFilters, BluetoothResultCallback callback);
-    void updateProperties(GVariant *changedProperties);
-    void pullPhoneBook(const std::string &address,const std::string &destinationFile,const std::string &vCardVersion,BluetoothPbapVCardFilterList &vCardFilters, const uint16_t &startIndex, const uint16_t &maxCount, BluetoothGetPhoneBookResultCallback callback);
-    void searchPhoneBook (const std::string &address, const std::string &searchOrder, const std::string &searchKey, const std::string &searchValue, BluetoothPbapVCardListResultCallback callback);
+    void supplyAccessConfirmation(BluetoothPbapAccessRequestId accessRequestId, bool accept, BluetoothResultCallback callback) override;
+    void setPhoneBook(const std::string &address, const std::string &repository, const std::string &object, BluetoothResultCallback callback) override;
+    void getPhonebookSize(const std::string &address, BluetoothPbapGetSizeResultCallback callback) override;
+    void vCardListing(const std::string &address, BluetoothPbapVCardListResultCallback callback) override;
+    void getPhoneBookProperties(const std::string &address, BluetoothPbapApplicationParameterCallback callback) override;
+    void getvCardFilters(const std::string &address, BluetoothPbapListFiltersResultCallback callback) override;
+    void pullvCard(const std::string &address, const std::string &targetFile, const std::string &vCardHandle, const std::string &vCardVersion, BluetoothPbapVCardFilterList &vCardFilters, BluetoothResultCallback callback) override;
+    void updateSessionProperties(GObject *propertiesProxy, GVariant *changedProperties) override;
+    void pullPhoneBook(const std::string &address,const std::string &destinationFile,const std::string &vCardVersion,BluetoothPbapVCardFilterList &vCardFilters, const uint16_t &startIndex, const uint16_t &maxCount, BluetoothGetPhoneBookResultCallback callback) override;
+    void searchPhoneBook (const std::string &address, const std::string &searchOrder, const std::string &searchKey, const std::string &searchValue, BluetoothPbapVCardListResultCallback callback) override;
 private:
     bool isObjectValid( const std::string &object);
     bool isRepositoryValid( const std::string &repository);
@@ -52,25 +52,22 @@ private:
     std::string convertToSupportedVcardVersion(const std::string &vCardVersion);
     void parseAllProperties(GVariant *propsVar);
     void addPropertyFromVariant(const std::string &key, GVariant *valueVar);
-    void notifyUpdatedProperties();
-    void updateVersion();
-    std::string getDeviceAddress() const { return mDeviceAddress; }
+    void notifyUpdatedProperties(const std::string &deviceAddress, FreeDesktopDBusProperties *propertiesProxy);
+    void updateVersion(BluezObexPhonebookAccess1 *phonebookProxy);
     GVariant * setFilters(const std::string &vCardVersion, BluetoothPbapVCardFilterList &vCardFilters);
     GVariant * setSearchFilters(const std::string &searchOrder);
-    void startTransfer( const std::string &objectPath, BluetoothResultCallback callback, Bluez5ObexTransfer::TransferType type);
-    void startPhoneBookTransfer(const std::string &objectPath, const std::string &address ,Bluez5ObexTransfer::TransferType type);
+    void startTransfer( const std::string &objectPath, const ObexPeer &peer, BluetoothResultCallback callback, Bluez5ObexTransfer::TransferType type);
+    void startPhoneBookTransfer(const std::string &objectPath, const ObexPeer &peer, const std::string &address ,Bluez5ObexTransfer::TransferType type);
     void removeTransfer(const std::string &objectPath);
     void updateActiveTransfer(const std::string &objectPath, Bluez5ObexTransfer *transfer, BluetoothResultCallback callback);
     void monitorTransfer(const std::string &objectPath, const std::string &address, Bluez5ObexTransfer *transfer);
     GVariant * setPhoneBookFilters(const std::string &vCardVersion, BluetoothPbapVCardFilterList &vCardFilters , uint16_t startOffset , uint16_t maxCount);
     void clearTransferMap();
-    std::string mDeviceAddress;
     Bluez5Adapter *mAdapter;
-    BluezObexPhonebookAccess1 *mObjectPhonebookProxy;
     std::map <std::string, Bluez5ObexTransfer*> mTransfersMap;
     std::map <std::string, std::string> mTransferStateMap;
-    FreeDesktopDBusProperties *mPropertiesProxy;
     BluetoothPbapApplicationParameters pbapApplicationParameters;
+    void removeSessionTransfers(Bluez5ObexSession *session) override;
 };
 
 #endif

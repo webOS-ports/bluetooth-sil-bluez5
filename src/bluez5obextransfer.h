@@ -22,6 +22,9 @@
 
 #include <bluetooth-sil-api.h>
 
+#include "asyncutils.h"
+#include "obexpush.h"
+
 extern "C" {
 #include "freedesktop-interface.h"
 #include "bluez-interface.h"
@@ -50,7 +53,8 @@ public:
 		RECEIVING
 	};
 
-	Bluez5ObexTransfer(const std::string &objectPath, TransferType type = RECEIVING);
+	// peer: the obexd that made the transfer, as the proxy its answer came on tells (obexPeerOfProxy).
+	Bluez5ObexTransfer(const std::string &objectPath, const ObexPeer &peer, TransferType type = RECEIVING);
 	~Bluez5ObexTransfer();
 
 	Bluez5ObexTransfer(const Bluez5ObexTransfer&) = delete;
@@ -81,13 +85,15 @@ private:
 	uint64_t mBytesTransferred;
 	uint64_t mFileSize;
 	State mState;
-	TransferType mTransferType;
+	[[maybe_unused]] TransferType mTransferType;	// both directions are completed alike
 	std::string mFileName;
 	std::string mFilePath;
 	std::string mMessageHandle;
+	LifetimeGuard mLifetime;
 	void updateFromProperties(GVariant *properties);
 	bool parsePropertyFromVariant(const std::string &key, GVariant *valueVar);
 	void notifyWatcherAboutChangedProperties();
+	void failSoon();
 };
 
 #endif // BLUEZ5OBEXTRANSFER_H

@@ -19,7 +19,12 @@
 
 #include <bluetooth-sil-api.h>
 #include <map>
+#include <memory>
 #include <string>
+#include <utility>
+#include <vector>
+
+#include "asyncutils.h"
 
 extern "C" {
 #include "freedesktop-interface.h"
@@ -46,21 +51,26 @@ public:
 	/* AVRCP CT player control APIs */
 	BluetoothError sendPassThroughCommand(BluetoothAvrcpPassThroughKeyCode keyCode,
 			BluetoothAvrcpPassThroughKeyStatus keyStatus);
-	BluetoothError setPlayerApplicationSettingsProperties(
-			const BluetoothPlayerApplicationSettingsPropertiesList &properties);
+	// Answered with callback, once, after the remote device has answered every setting (BlueZ completes the Set
+	// only then) or the first one failed.
+	void setPlayerApplicationSettingsProperties(
+			const BluetoothPlayerApplicationSettingsPropertiesList &properties,
+			BluetoothResultCallback callback);
 
 	/* AVRCP CT browse APIs called from Bluez5ProfileAvcrp */
 	void getNumberOfItems(BluetoothAvrcpBrowseTotalNumberOfItemsCallback callback);
 	void getFolderItems(uint32_t startIndex, uint32_t endIndex,
 						BluetoothAvrcpBrowseFolderItemsCallback callback);
-	BluetoothError changePath(const std::string &itemPath);
-	BluetoothError playItem(const std::string &itemPath);
+	// As Bluez5MediaFolder's: an error without calling done when not sent, else done gets the device's answer.
+	BluetoothError changePath(const std::string &itemPath, BluetoothResultCallback done = BluetoothResultCallback());
+	BluetoothError playItem(const std::string &itemPath, BluetoothResultCallback done = BluetoothResultCallback());
 	BluetoothError addToNowPlaying(const std::string &itemPath);
 	void search(const std::string &searchString,
                 BluetoothAvrcpBrowseSearchListCallback callback);
 
 	/* AVRCP CT helper functions called from AVRCP profile class */
 	std::string getPlayerObjPath() const { return mPlayerInfo.getPath(); }
+	const std::string &getDeviceAddress() const { return mDeviceAddress; }
 	bool getAddressed() const { return mPlayerInfo.getAddressed(); }
 	BluetoothPlayerInfo getPlayerInfo() const { return mPlayerInfo; }
 	void getAllProperties();
@@ -70,6 +80,10 @@ private:
 	Bluez5ProfileAvcrp *mAvrcp;
 	BluezMediaPlayer1 *mPlayerInterface;
 	FreeDesktopDBusProperties *mPropertiesProxy;
+	GDBusObject *mObject;	// for its interface-added/removed handlers
+	// The device this player belongs to, from its object path: events were reported under the one address the
+	// profile kept, whichever device sent them.
+	std::string mDeviceAddress;
 	BluetoothMediaPlayStatus mMediaPlayStatus;
 	BluetoothPlayerInfo mPlayerInfo;
 	Bluez5MediaFolder *mMediaFolder;
@@ -82,6 +96,8 @@ private:
 	static void handleInterfaceRemoved(GDBusObject *object,
 			GDBusInterface *interface, gpointer userData);
 	void mediaPlayerPropertiesChanged(GVariant *changedProperties);
+	void updateMediaFolder(GDBusObject *object);
+	bool reporting() const;
 
 	/* Player application settings helper functions */
 	BluetoothPlayerApplicationSettingsRepeat repeatStringToEnum(std::string repeatVal);
@@ -94,6 +110,13 @@ private:
 	std::string scanEnumToString(BluetoothPlayerApplicationSettingsScan scan);
 	bool updatePlayerProperties();
 	BluetoothAvrcpPlayerType playerTypeStringToEnum(const std::string type);
+
+	// {property, value} for org.bluez.MediaPlayer1, set one after the other.
+	typedef std::vector<std::pair<std::string, std::string>> PlayerSettings;
+	void setNextPlayerSetting(std::shared_ptr<const PlayerSettings> settings, size_t index,
+			BluetoothResultCallback callback);
+
+	LifetimeGuard mLifetime;	// last: replies after the player went see it expire first
 };
 
 #endif //BLUEZ5MEDIAPLAYER_H

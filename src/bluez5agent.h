@@ -45,6 +45,7 @@ public:
 	bool supplyPairingSecret(const std::string &address, const std::string &pin);
 	bool supplyPairingSecret(const std::string &address, BluetoothPasskey passkey);
 	bool cancelPairing(const std::string address);
+	void pairedStateChanged(Bluez5Device *device);
 
 	static void handleBusAcquired(GDBusConnection *connection, const gchar *name, gpointer user_data);
 
@@ -62,12 +63,14 @@ public:
 	static gboolean handleRequestAuthorization(BluezAgent1 *proxy, GDBusMethodInvocation *invocation,
                                                const gchar *address, gpointer user_data);
 	static gboolean handleAuthorizeService(BluezAgent1 *proxy, GDBusMethodInvocation *invocation,
-                                           const gchar *address, const gchar *service, gpointer user_data);
+                                           const gchar *objectPath, const gchar *service, gpointer user_data);
 	static gboolean handleCancel(BluezAgent1 *proxy, GDBusMethodInvocation *invocation, gpointer user_data);
 	static gboolean handleRelease(BluezAgent1 *proxy, GDBusMethodInvocation *invocation, gpointer user_data);
 
 
 private:
+	void finishIncomingPairing(Bluez5AgentPairingInfo *pairingInfo);
+
 	Bluez5AgentPairingInfo* findPairingInfoForDevice(const std::string &objectPath);
 	Bluez5AgentPairingInfo* findPairingInfoForAddress(const std::string &address);
 	Bluez5AgentPairingInfo* initiatePairing(GDBusMethodInvocation *invocation, const gchar *objectPath);

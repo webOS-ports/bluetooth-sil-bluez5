@@ -14,6 +14,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <utility>
+
+#include "asyncutils.h"
 #include "logging.h"
 #include "utils.h"
 #include "bluez5profilegatt.h"
@@ -40,92 +43,147 @@ const std::map <BluetoothGattPermission, std::string> GattRemoteDescriptor::desc
 	{ PERMISSION_WRITE_SIGNED, "secure-write"}
 };
 
-bool GattRemoteCharacteristic::startNotify()
+GattRemoteCharacteristic::GattRemoteCharacteristic(BluezGattCharacteristic1 *interface, Bluez5ProfileGatt *gattProfile)
+	: mInterface(interface), mGattProfile(gattProfile),
+	  mNotifyQueue([this](bool enable, GattNotifyQueue::Result done) { callNotify(enable, std::move(done)); })
 {
-	GError *error = NULL;
-	bool result = bluez_gatt_characteristic1_call_start_notify_sync(mInterface, NULL, &error);
-	if (error)
-	{
-		ERROR(MSGID_GATT_PROFILE_ERROR, 0, "startNotify failed due to %s for path %s", error->message, objectPath.c_str());
-		g_error_free(error);
-		return false;
-	}
-	return result;
+	mPropertiesChangedHandler = g_signal_connect(G_DBUS_PROXY(interface), "g-properties-changed",
+	                                             G_CALLBACK(GattRemoteCharacteristic::onCharacteristicPropertiesChanged), this);
 }
 
-bool GattRemoteCharacteristic::stopNotify()
+// One call at a time per characteristic: BlueZ fails a second StartNotify of the same client while the first waits
+// for the device (InProgress), and a StopNotify meanwhile removes the session under it. See GattNotifyQueue.
+void GattRemoteCharacteristic::startNotify(GattRemoteResultCallback callback)
 {
-	GError *error = NULL;
-	bool result = bluez_gatt_characteristic1_call_stop_notify_sync(mInterface, NULL, &error);
-	if (error)
-	{
-		ERROR(MSGID_GATT_PROFILE_ERROR, 0, "startNotify failed due to %s for path %s", error->message, objectPath.c_str());
-		g_error_free(error);
-		return false;
-	}
-	return result;
+	mNotifyQueue.request(true, std::move(callback));
 }
 
-void GattRemoteCharacteristic::onCharacteristicPropertiesChanged(GDBusProxy *proxy, GVariant *changed_properties, GStrv invalidated_properties, gpointer userdata)
+void GattRemoteCharacteristic::stopNotify(GattRemoteResultCallback callback)
+{
+	mNotifyQueue.request(false, std::move(callback));
+}
+
+// StartNotify writes the remote's Client Characteristic Configuration descriptor and is answered only when the
+// device has acknowledged it. Like reads and writes, the callback keeps nothing of the characteristic: the call
+// holds its own reference to the proxy, and the reply is finished on that. The queue is called only while the
+// characteristic is there.
+void GattRemoteCharacteristic::callNotify(bool enable, GattRemoteResultCallback done)
+{
+	auto notifyCallback = [done = std::move(done), enable, path = objectPath](GObject *source, GAsyncResult *result) {
+		GError *error = NULL;
+		gboolean ret = enable
+			? bluez_gatt_characteristic1_call_start_notify_finish(BLUEZ_GATT_CHARACTERISTIC1(source), result, &error)
+			: bluez_gatt_characteristic1_call_stop_notify_finish(BLUEZ_GATT_CHARACTERISTIC1(source), result, &error);
+		if (!ret || error)
+		{
+			ERROR(MSGID_GATT_PROFILE_ERROR, 0, "%s failed on %s: %s", enable ? "StartNotify" : "StopNotify",
+			      path.c_str(), error ? error->message : "no result");
+			g_clear_error(&error);
+			done(false);
+			return;
+		}
+		done(true);
+	};
+	if (enable)
+		bluez_gatt_characteristic1_call_start_notify(mInterface, NULL, glibAsyncMethodWrapper,
+		                                             new GlibAsyncFunctionWrapper(notifyCallback));
+	else
+		bluez_gatt_characteristic1_call_stop_notify(mInterface, NULL, glibAsyncMethodWrapper,
+		                                            new GlibAsyncFunctionWrapper(notifyCallback));
+}
+
+void GattRemoteCharacteristic::onCharacteristicPropertiesChanged(GDBusProxy */*proxy*/, GVariant *changed_properties, GStrv /*invalidated_properties*/, gpointer userdata)
 {
 	auto characteristic = static_cast<GattRemoteCharacteristic*>(userdata);
 	if (characteristic && characteristic->mGattProfile)
 		characteristic->mGattProfile->onCharacteristicPropertiesChanged(characteristic, changed_properties);
 }
 
-std::vector<unsigned char> GattRemoteCharacteristic::readValue(uint16_t offset)
-{
-	GError *error = NULL;
-	std::vector<unsigned char> result;
+namespace {
 
+GVariant *noOptions()
+{
 	GVariantDict dict;
 	g_variant_dict_init(&dict, NULL);
-
-	if (offset)
-		g_variant_dict_insert_value(&dict, "offset", g_variant_new_uint16(offset));
-
-	GVariant *variant = g_variant_dict_end(&dict);
-
-	GVariant *value;
-
-	bluez_gatt_characteristic1_call_read_value_sync(mInterface, variant, &value, NULL, &error);
-
-	if (error)
-	{
-		ERROR(MSGID_GATT_PROFILE_ERROR, 0, "readValue failed due to %s", error->message);
-		g_error_free(error);
-		return result;
-	}
-
-	result = convertArrayByteGVariantToVector(value);
-
-	return result;
+	return g_variant_dict_end(&dict);
 }
 
-bool GattRemoteCharacteristic::writeValue(const std::vector<unsigned char> &characteristicValue, uint16_t offset)
-{
-	GError *error = NULL;
-	bool result = true;
+} // namespace
 
-	GVariant *variantValue = convertVectorToArrayByteGVariant(characteristicValue);
+void GattRemoteCharacteristic::readValue(GattRemoteReadCallback callback)
+{
+	auto readCallback = [callback, path = objectPath](GObject *source, GAsyncResult *result) {
+		GError *error = NULL;
+		GVariant *value = nullptr;
+		gboolean ret = bluez_gatt_characteristic1_call_read_value_finish(BLUEZ_GATT_CHARACTERISTIC1(source), &value, result, &error);
+		if (!ret || error)
+		{
+			ERROR(MSGID_GATT_PROFILE_ERROR, 0, "ReadValue failed on %s: %s", path.c_str(), error ? error->message : "no result");
+			g_clear_error(&error);
+			callback(false, std::vector<unsigned char>());
+			return;
+		}
+		std::vector<unsigned char> bytes = convertArrayByteGVariantToVector(value);
+		g_variant_unref(value);
+		callback(true, bytes);
+	};
+	bluez_gatt_characteristic1_call_read_value(mInterface, noOptions(), NULL, glibAsyncMethodWrapper,
+	                                           new GlibAsyncFunctionWrapper(readCallback));
+}
+
+void GattRemoteCharacteristic::writeValue(const std::vector<unsigned char> &characteristicValue, bool withoutResponse,
+                                          GattRemoteWriteCallback callback)
+{
 	GVariantDict dict;
 	g_variant_dict_init(&dict, NULL);
+	if (withoutResponse)
+		g_variant_dict_insert_value(&dict, "type", g_variant_new_string("command"));
+	GVariant *options = g_variant_dict_end(&dict);
 
-	if (offset)
-		g_variant_dict_insert_value(&dict, "offset", g_variant_new_uint16(offset));
+	auto writeCallback = [callback, path = objectPath](GObject *source, GAsyncResult *result) {
+		GError *error = NULL;
+		gboolean ret = bluez_gatt_characteristic1_call_write_value_finish(BLUEZ_GATT_CHARACTERISTIC1(source), result, &error);
+		if (!ret || error)
+		{
+			ERROR(MSGID_GATT_PROFILE_ERROR, 0, "WriteValue failed on %s: %s", path.c_str(), error ? error->message : "no result");
+			g_clear_error(&error);
+			callback(false);
+			return;
+		}
+		callback(true);
+	};
+	bluez_gatt_characteristic1_call_write_value(mInterface, convertVectorToArrayByteGVariant(characteristicValue), options,
+	                                            NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(writeCallback));
+}
 
-	GVariant *variant = g_variant_dict_end(&dict);
+std::vector<unsigned char> GattRemoteCharacteristic::cachedValue()
+{
+	GVariant *value = bluez_gatt_characteristic1_get_value(mInterface);	// owned by the proxy
+	return value ? convertArrayByteGVariantToVector(value) : std::vector<unsigned char>();
+}
 
-	result = bluez_gatt_characteristic1_call_write_value_sync(mInterface, variantValue, variant, NULL, &error);
+GattRemoteCharacteristic::~GattRemoteCharacteristic()
+{
+	for (auto descriptor : gattRemoteDescriptors)
+		delete descriptor;
+	if (mPropertiesChangedHandler)
+		g_signal_handler_disconnect(mInterface, mPropertiesChangedHandler);
+	if (mInterface)
+		g_object_unref(mInterface);
+}
 
-	if (error)
-	{
-		ERROR(MSGID_GATT_PROFILE_ERROR, 0, "WriteValue failed due to %s", error->message);
-		g_error_free(error);
-		return false;
-	}
+GattRemoteService::~GattRemoteService()
+{
+	for (auto characteristic : gattRemoteCharacteristics)
+		delete characteristic;
+	if (mInterface)
+		g_object_unref(mInterface);
+}
 
-	return result;
+GattRemoteDescriptor::~GattRemoteDescriptor()
+{
+	if (mInterface)
+		g_object_unref(mInterface);
 }
 
 BluetoothGattCharacteristicProperties GattRemoteCharacteristic::readProperties()
@@ -145,57 +203,41 @@ BluetoothGattCharacteristicProperties GattRemoteCharacteristic::readProperties()
 	return 	properties;
 }
 
-std::vector<unsigned char> GattRemoteDescriptor::readValue(uint16_t offset)
+void GattRemoteDescriptor::readValue(GattRemoteReadCallback callback)
 {
-	GError *error = NULL;
-	std::vector<unsigned char> result;
-
-	GVariantDict dict;
-	g_variant_dict_init(&dict, NULL);
-
-	if (offset)
-		g_variant_dict_insert_value(&dict, "offset", g_variant_new_uint16(offset));
-
-	GVariant *variant = g_variant_dict_end(&dict);
-
-	GVariant *value;
-
-	bluez_gatt_descriptor1_call_read_value_sync(mInterface, variant, &value, NULL, &error);
-
-	if (error)
-	{
-		ERROR(MSGID_GATT_PROFILE_ERROR, 0, "readValue failed due to %s", error->message);
-		g_error_free(error);
-		return result;
-	}
-
-	result = convertArrayByteGVariantToVector(value);
-
-	return result;
+	auto readCallback = [callback, path = objectPath](GObject *source, GAsyncResult *result) {
+		GError *error = NULL;
+		GVariant *value = nullptr;
+		gboolean ret = bluez_gatt_descriptor1_call_read_value_finish(BLUEZ_GATT_DESCRIPTOR1(source), &value, result, &error);
+		if (!ret || error)
+		{
+			ERROR(MSGID_GATT_PROFILE_ERROR, 0, "ReadValue failed on %s: %s", path.c_str(), error ? error->message : "no result");
+			g_clear_error(&error);
+			callback(false, std::vector<unsigned char>());
+			return;
+		}
+		std::vector<unsigned char> bytes = convertArrayByteGVariantToVector(value);
+		g_variant_unref(value);
+		callback(true, bytes);
+	};
+	bluez_gatt_descriptor1_call_read_value(mInterface, noOptions(), NULL, glibAsyncMethodWrapper,
+	                                       new GlibAsyncFunctionWrapper(readCallback));
 }
 
-bool GattRemoteDescriptor::writeValue(const std::vector<unsigned char> &descriptorValue, uint16_t offset)
+void GattRemoteDescriptor::writeValue(const std::vector<unsigned char> &descriptorValue, GattRemoteWriteCallback callback)
 {
-	GError *error = NULL;
-	bool result = true;
-
-	GVariant *variantValue = convertVectorToArrayByteGVariant(descriptorValue);
-	GVariantDict dict;
-	g_variant_dict_init(&dict, NULL);
-
-	if (offset)
-		g_variant_dict_insert_value(&dict, "offset", g_variant_new_uint16(offset));
-
-	GVariant *variant = g_variant_dict_end(&dict);
-
-	result = bluez_gatt_descriptor1_call_write_value_sync(mInterface, variantValue, variant, NULL, &error);
-
-	if (error)
-	{
-		ERROR(MSGID_GATT_PROFILE_ERROR, 0, "WriteValue failed due to %s", error->message);
-		g_error_free(error);
-		return false;
-	}
-
-	return result;
+	auto writeCallback = [callback, path = objectPath](GObject *source, GAsyncResult *result) {
+		GError *error = NULL;
+		gboolean ret = bluez_gatt_descriptor1_call_write_value_finish(BLUEZ_GATT_DESCRIPTOR1(source), result, &error);
+		if (!ret || error)
+		{
+			ERROR(MSGID_GATT_PROFILE_ERROR, 0, "WriteValue failed on %s: %s", path.c_str(), error ? error->message : "no result");
+			g_clear_error(&error);
+			callback(false);
+			return;
+		}
+		callback(true);
+	};
+	bluez_gatt_descriptor1_call_write_value(mInterface, convertVectorToArrayByteGVariant(descriptorValue), noOptions(),
+	                                        NULL, glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(writeCallback));
 }

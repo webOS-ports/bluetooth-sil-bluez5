@@ -68,6 +68,10 @@ Bluez5Device::Bluez5Device(Bluez5Adapter *adapter, const std::string &objectPath
 	GError *error = 0;
 	GVariant *propsVar = NULL;
 
+	// From the path ("dev_XX_XX_..."), in case GetAll below fails (a timeout, the object going away) or a proxy
+	// cannot be made: the device was kept, and reported, with an empty address.
+	objPathToDevAddress(objectPath, mAddress);
+
 	mDeviceProxy = bluez_device1_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE,
 														"org.bluez", objectPath.c_str(), NULL, &error);
 	if (error)
@@ -97,7 +101,7 @@ Bluez5Device::Bluez5Device(Bluez5Adapter *adapter, const std::string &objectPath
 	DEBUG("Before calling g_variant_n_children() propsVar value %p\n", propsVar);
 	if(!error && propsVar != NULL)
 	{
-		for (int n = 0; n < g_variant_n_children(propsVar); n++)
+		for (size_t n = 0; n < g_variant_n_children(propsVar); n++)
 		{
 			GVariant *propertyVar = g_variant_get_child_value(propsVar, n);
 			GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -105,12 +109,15 @@ Bluez5Device::Bluez5Device(Bluez5Adapter *adapter, const std::string &objectPath
 
 			std::string key = g_variant_get_string(keyVar, NULL);
 
-			parsePropertyFromVariant(key, g_variant_get_variant(valueVar));
+			GVariant *innerVar = g_variant_get_variant(valueVar);	// a new reference: it leaked
+			parsePropertyFromVariant(key, innerVar);
+			g_variant_unref(innerVar);
 
 			g_variant_unref(propertyVar);
 			g_variant_unref(keyVar);
 			g_variant_unref(valueVar);
 		}
+		g_variant_unref(propsVar);
 	}
 
 	g_signal_connect(G_OBJECT(mDeviceProxy), "media-play-request", G_CALLBACK(handleMediaPlayRequest), this);
@@ -120,11 +127,18 @@ Bluez5Device::Bluez5Device(Bluez5Adapter *adapter, const std::string &objectPath
 
 Bluez5Device::~Bluez5Device()
 {
+	// A pending call keeps a proxy alive after the device, and with it these handlers' pointer to it.
 	if (mDeviceProxy)
+	{
+		g_signal_handlers_disconnect_by_data(mDeviceProxy, this);
 		g_object_unref(mDeviceProxy);
+	}
 
 	if (mPropertiesProxy)
+	{
+		g_signal_handlers_disconnect_by_data(mPropertiesProxy, this);
 		g_object_unref(mPropertiesProxy);
+	}
 }
 
 bool Bluez5Device::isLittleEndian()
@@ -153,12 +167,17 @@ void Bluez5Device::handleMediaMetaRequest(BluezDevice1 *, gpointer userData)
 }
 
 void Bluez5Device::handlePropertiesChanged(BluezDevice1 *, gchar *interface,  GVariant *changedProperties,
-												   GVariant *invalidatedProperties, gpointer userData)
+												   GVariant */*invalidatedProperties*/, gpointer userData)
 {
 	bool propertiesChanged = false;
 	auto device = static_cast<Bluez5Device*>(userData);
 
-	for (int n = 0; n < g_variant_n_children(changedProperties); n++)
+	// Device1 only: the proxy sees the changes of every interface on the device's path, and the Connected of
+	// MediaControl1 or Network1 going false marked the whole device disconnected.
+	if (g_strcmp0(interface, "org.bluez.Device1") != 0)
+		return;
+
+	for (gsize n = 0; n < g_variant_n_children(changedProperties); n++)
 	{
 		GVariant *propertyVar = g_variant_get_child_value(changedProperties, n);
 		GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -166,8 +185,11 @@ void Bluez5Device::handlePropertiesChanged(BluezDevice1 *, gchar *interface,  GV
 
 		std::string key = g_variant_get_string(keyVar, NULL);
 
-		if (device->parsePropertyFromVariant(key, g_variant_get_variant(valueVar)))
+		// A new reference, leaked for every property of every signal: during a scan, for every advertisement.
+		GVariant *innerVar = g_variant_get_variant(valueVar);
+		if (device->parsePropertyFromVariant(key, innerVar))
 			propertiesChanged = true;
+		g_variant_unref(innerVar);
 
 		g_variant_unref(valueVar);
 		g_variant_unref(keyVar);
@@ -218,7 +240,11 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 	}
 	else if (key == "Paired")
 	{
-		mPaired = g_variant_get_boolean(valueVar);
+		bool paired = g_variant_get_boolean(valueVar);
+		// An incoming pairing that only displayed a secret has no other end.
+		if (paired != mPaired && mAdapter && mAdapter->getAgent())
+			mAdapter->getAgent()->pairedStateChanged(this);
+		mPaired = paired;
 		changed = true;
 	}
 	else if (key == "Connected")
@@ -226,13 +252,17 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 		mConnected = g_variant_get_boolean(valueVar);
 		changed = true;
 	}
+	else if (key == "ServicesResolved")
+	{
+		mServicesResolved = g_variant_get_boolean(valueVar);
+	}
 	else if (key == "ConnectedUUIDS")
 	{
 		auto prevConnectedUuis = mConnectedUuids;
 
 		mConnectedUuids.clear();
 
-		for (int m = 0; m < g_variant_n_children(valueVar); m++)
+		for (size_t m = 0; m < g_variant_n_children(valueVar); m++)
 		{
 			GVariant *uuidVar = g_variant_get_child_value(valueVar, m);
 
@@ -248,7 +278,7 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 	{
 		mUuids.clear();
 
-		for (int m = 0; m < g_variant_n_children(valueVar); m++)
+		for (size_t m = 0; m < g_variant_n_children(valueVar); m++)
 		{
 			GVariant *uuidVar = g_variant_get_child_value(valueVar, m);
 
@@ -264,7 +294,7 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 	{
 		mMapInstancesName.clear();
 
-		for (int m = 0; m < g_variant_n_children(valueVar); m++)
+		for (size_t m = 0; m < g_variant_n_children(valueVar); m++)
 		{
 			GVariant *mapInstanceVar = g_variant_get_child_value(valueVar, m);
 
@@ -280,7 +310,7 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 	{
 		mMapSupportedMessageTypes.clear();
 
-		for (int m = 0; m < g_variant_n_children(valueVar) && m < mMapInstancesName.size(); m++)
+		for (size_t m = 0; m < g_variant_n_children(valueVar) && m < mMapInstancesName.size(); m++)
 		{
 			GVariant *mapInstanceVar = g_variant_get_child_value(valueVar, m);
 			std::uint32_t mapInstance = (std::uint32_t)g_variant_get_int32(mapInstanceVar);
@@ -309,7 +339,7 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 		DEBUG("Got blocked as %d for address %s", mBlocked, mAddress.c_str());
 		changed = true;
 	}
-	else if (key == "ManufacturerData")
+	else if (key == "ManufacturerData" && g_variant_is_of_type(valueVar, G_VARIANT_TYPE("a{qv}")))
 	{
 		GVariantIter *iter;
 		g_variant_get (valueVar, "a{qv}", &iter);
@@ -318,7 +348,10 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 		uint16_t key;
 		uint8_t val;
 
-		while (g_variant_iter_loop(iter, "{qv}", &key, &array))
+		// The new data replaces the old: every update was appended, growing without bound while a device advertised.
+		mManufacturerData.clear();
+		// The first entry only, as before; g_variant_iter_next, as breaking out of g_variant_iter_loop leaks the value.
+		if (g_variant_iter_next(iter, "{qv}", &key, &array))
 		{
 			if (isLittleEndian())
 			{
@@ -330,18 +363,21 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 				mManufacturerData.push_back(key & 0x00FF);
 				mManufacturerData.push_back((key & 0xFF00) >> 8);
 			}
-			GVariantIter it_array;
-			g_variant_iter_init(&it_array, array);
-			while(g_variant_iter_loop(&it_array, "y", &val))
+			if (g_variant_is_of_type(array, G_VARIANT_TYPE("ay")))
 			{
-				mManufacturerData.push_back(val);
+				GVariantIter it_array;
+				g_variant_iter_init(&it_array, array);
+				while(g_variant_iter_loop(&it_array, "y", &val))
+				{
+					mManufacturerData.push_back(val);
+				}
 			}
-			break;
+			g_variant_unref(array);
 		}
 		g_variant_iter_free(iter);
 		changed = true;
 	}
-	else if (key == "ServiceData")
+	else if (key == "ServiceData" && g_variant_is_of_type(valueVar, G_VARIANT_TYPE("a{sv}")))
 	{
 		GVariantIter *iter;
 		g_variant_get (valueVar, "a{sv}", &iter);
@@ -350,16 +386,20 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 		const gchar *key;
 		uint8_t val;
 
-		while (g_variant_iter_loop(iter, "{&sv}", &key, &array))
+		mServiceData.mScanRecord.clear();	// replaced, not appended to
+		if (g_variant_iter_next(iter, "{&sv}", &key, &array))
 		{
 			mServiceData.mServiceDataUuid = key;
-			GVariantIter it_array;
-			g_variant_iter_init(&it_array, array);
-			while(g_variant_iter_loop(&it_array, "y", &val))
+			if (g_variant_is_of_type(array, G_VARIANT_TYPE("ay")))
 			{
-				mServiceData.mScanRecord.push_back(val);
+				GVariantIter it_array;
+				g_variant_iter_init(&it_array, array);
+				while(g_variant_iter_loop(&it_array, "y", &val))
+				{
+					mServiceData.mScanRecord.push_back(val);
+				}
 			}
-			break;
+			g_variant_unref(array);
 		}
 		g_variant_iter_free(iter);
 		changed = true;
@@ -374,32 +414,35 @@ bool Bluez5Device::parsePropertyFromVariant(const std::string &key, GVariant *va
 		mRSSI = g_variant_get_int16(valueVar);
 		changed = true;
 	}
-	else if (key == "KeyCode")
+	else if (key == "KeyCode" && g_variant_is_of_type(valueVar, G_VARIANT_TYPE("a{sv}")))
 	{
 		GVariantIter *iter;
 		g_variant_get (valueVar, "a{sv}", &iter);
-		char state[32] = {0x00};
+		// Built as a string: it was copied byte by byte into char[32] without a bound, and the key passed on was
+		// uninitialised when the dictionary was empty.
+		std::string state;
 		std::string key_code;
 
 		GVariant *array;
-		const gchar *key;
+		const gchar *entryKey;
 		char val;
 
-		while (g_variant_iter_loop(iter, "{&sv}", &key, &array))
+		if (g_variant_iter_next(iter, "{&sv}", &entryKey, &array))
 		{
-			key_code = key;
-			GVariantIter it_array;
-			g_variant_iter_init(&it_array, array);
-			unsigned int i = 0;
-			while(g_variant_iter_loop(&it_array, "y", &val))
+			key_code = entryKey;
+			if (g_variant_is_of_type(array, G_VARIANT_TYPE("ay")))
 			{
-				state[i++] = val;
+				GVariantIter it_array;
+				g_variant_iter_init(&it_array, array);
+				while(g_variant_iter_loop(&it_array, "y", &val) && val != '\0')
+					state.push_back(val);
 			}
-			break;
+			g_variant_unref(array);
 		}
 		g_variant_iter_free(iter);
-		DEBUG("key[%s] and state[%s]", key_code.c_str(), state);
-		mAdapter->recievePassThroughCommand(getAddress(), key, state);
+		DEBUG("key[%s] and state[%s]", key_code.c_str(), state.c_str());
+		if (!key_code.empty())
+			mAdapter->recievePassThroughCommand(getAddress(), key_code, state);
 	}
 	else if(key == "AvrcpCTFeatures")
 	{
@@ -478,14 +521,16 @@ void Bluez5Device::setDevicePropertyAsync(const BluetoothProperty& property, Blu
 		return;
 	}
 
-	auto setStateCallback = [this, callback](GAsyncResult *result) {
+	// Replies finish on the proxy the call was made on and use nothing of the device, which may be deleted by
+	// then (removed or unpaired while the call was pending): they read its freed proxies.
+	auto setStateCallback = [callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = free_desktop_dbus_properties_call_set_finish(mPropertiesProxy, result, &error);
-		if (error)
+		ret = free_desktop_dbus_properties_call_set_finish(FREE_DESKTOP_DBUS_PROPERTIES(source), result, &error);
+		if (!ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}
@@ -530,27 +575,44 @@ void Bluez5Device::pair(BluetoothResultCallback callback)
 		      "Not able to pair with device %s because no agent was yet assigned to our adapter",
 		      mAddress.c_str());
 
+		mAdapter->setPairing(false);	// stayed set, and every later pair() was BUSY
 		callback(BLUETOOTH_ERROR_NOT_READY);
 		return;
 	}
 
-	auto pairCallback = [this, callback](GAsyncResult *result) {
+	auto pairCallback = [this, alive = mLifetime.token(), callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_device1_call_pair_finish(mDeviceProxy, result, &error);
+		ret = bluez_device1_call_pair_finish(BLUEZ_DEVICE1(source), result, &error);
 
-		mAdapter->getAgent()->stopPairingForDevice(this);
+		// Removed (or bluetoothd restarted) while pairing: its pairing was stopped with it.
+		if (alive.expired())
+		{
+			g_clear_error(&error);
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
+
+		if (mAdapter->getAgent())	// gone when the agent manager went away
+			mAdapter->getAgent()->stopPairingForDevice(this);
+
+		if (!ret && !error)
+		{
+			callback(BLUETOOTH_ERROR_FAIL);
+			return;
+		}
 
 		if (error)
 		{
 			DEBUG("Pairing error: %s", error->message);
 
-			auto cancelPairingCallback = [this](GAsyncResult *result) {
+			auto cancelPairingCallback = [](GObject *source, GAsyncResult *result) {
 				GError *error = 0;
 				gboolean ret;
 
-				ret = bluez_device1_call_cancel_pairing_finish(mDeviceProxy, result, &error);
+				ret = bluez_device1_call_cancel_pairing_finish(BLUEZ_DEVICE1(source), result, &error);
+				static_cast<void>(ret);
 				if (error)
 				{
 					ERROR(MSGID_PAIRING_CANCEL_ERROR, 0,
@@ -598,20 +660,21 @@ void Bluez5Device::cancelPairing(BluetoothResultCallback callback)
 {
 	DEBUG("Cancel current ongoing pairing process");
 
-	auto cancelPairingCallback = [this, callback](GAsyncResult *result) {
+	auto cancelPairingCallback = [this, alive = mLifetime.token(), callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_device1_call_cancel_pairing_finish(mDeviceProxy, result, &error);
-		if (error)
+		ret = bluez_device1_call_cancel_pairing_finish(BLUEZ_DEVICE1(source), result, &error);
+		if (!ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			if (callback)
 				callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}
 
-		mAdapter->setPairing(false);
+		if (!alive.expired())	// a live device has a live adapter: the adapter deletes its devices first
+			mAdapter->setPairing(false);
 
 		if (callback)
 			callback(BLUETOOTH_ERROR_NONE);
@@ -623,14 +686,14 @@ void Bluez5Device::cancelPairing(BluetoothResultCallback callback)
 
 void Bluez5Device::connect(const std::string &uuid, BluetoothResultCallback callback)
 {
-	auto connectCallback = [this, callback](GAsyncResult *result) {
+	auto connectCallback = [callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_device1_call_connect_profile_finish(mDeviceProxy, result, &error);
-		if (error)
+		ret = bluez_device1_call_connect_profile_finish(BLUEZ_DEVICE1(source), result, &error);
+		if (!ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}
@@ -644,14 +707,14 @@ void Bluez5Device::connect(const std::string &uuid, BluetoothResultCallback call
 
 void Bluez5Device::disconnect(const std::string &uuid, BluetoothResultCallback callback)
 {
-	auto disconnectCallback = [this, callback](GAsyncResult *result) {
+	auto disconnectCallback = [callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_device1_call_disconnect_profile_finish(mDeviceProxy, result, &error);
-		if (error)
+		ret = bluez_device1_call_disconnect_profile_finish(BLUEZ_DEVICE1(source), result, &error);
+		if (!ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}
@@ -665,14 +728,14 @@ void Bluez5Device::disconnect(const std::string &uuid, BluetoothResultCallback c
 
 void Bluez5Device::connect(BluetoothResultCallback callback)
 {
-	auto connectCallback = [this, callback](GAsyncResult *result) {
+	auto connectCallback = [callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_device1_call_connect_finish(mDeviceProxy, result, &error);
-		if (error)
+		ret = bluez_device1_call_connect_finish(BLUEZ_DEVICE1(source), result, &error);
+		if (!ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}
@@ -686,14 +749,14 @@ void Bluez5Device::connect(BluetoothResultCallback callback)
 
 void Bluez5Device::disconnect(BluetoothResultCallback callback)
 {
-	auto disconnectCallback = [this, callback](GAsyncResult *result) {
+	auto disconnectCallback = [callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_device1_call_disconnect_finish(mDeviceProxy, result, &error);
-		if (error)
+		ret = bluez_device1_call_disconnect_finish(BLUEZ_DEVICE1(source), result, &error);
+		if (!ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}
@@ -707,14 +770,14 @@ void Bluez5Device::disconnect(BluetoothResultCallback callback)
 
 void Bluez5Device::connectGatt(BluetoothResultCallback callback)
 {
-	auto connectCallback = [this, callback](GAsyncResult *result) {
+	auto connectCallback = [callback](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_device1_call_connect_finish(mDeviceProxy, result, &error);
-		if (error)
+		ret = bluez_device1_call_connect_finish(BLUEZ_DEVICE1(source), result, &error);
+		if (!ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}

@@ -19,6 +19,8 @@
 
 #include <bluetooth-sil-api.h>
 #include <bluez5profilebase.h>
+#include "avrcpdevices.h"
+#include <map>
 #include <string>
 
 extern "C" {
@@ -57,10 +59,10 @@ public:
 	void supplyMediaPlayStatus(BluetoothAvrcpRequestId requestId, const BluetoothMediaPlayStatus &playStatus, BluetoothResultCallback callback) override;
 	void mediaMetaDataRequested(const std::string &address);
 	void mediaPlayStatusRequested(const std::string &address);
-	void updateConnectionStatus(const std::string &address, bool status, const std::string &uuid);
+	void updateConnectionStatus(const std::string &address, bool status, const std::string &uuid) override;
 	void updateVolume(const std::string &address, int volume);
 	void recievePassThroughCommand(std::string address, std::string key, std::string state);
-	BluetoothError setAbsoluteVolume(const std::string &address, int volume);
+	BluetoothError setAbsoluteVolume(const std::string &address, int volume) override;
 	BluetoothError sendPassThroughCommand(const std::string& address, BluetoothAvrcpPassThroughKeyCode keyCode,
 		BluetoothAvrcpPassThroughKeyStatus keyStatus) override;
 	void setPlayerApplicationSettingsProperties(const BluetoothPlayerApplicationSettingsPropertiesList &properties,
@@ -68,13 +70,13 @@ public:
 	void updateRemoteFeatures(uint8_t features, const std::string &role, const std::string &address);
 	void updateSupportedNotificationEvents(uint16_t notificationEvents, const std::string &address);
 	void addressedPlayerChanged(const std::string &playerPath);
-	const std::string getDeviceObjPath();
 	void addMediaPlayer(GDBusObject *object);
 	void removeMediaPlayer(const std::string &playerPath);
-	std::string getConnectedDeviceAddress() { return mConnectedDeviceAddress ; }
+	bool isDeviceConnected(const std::string &address) const;
 	std::string getAdapterAddress();
 	BluetoothAvrcpStatusObserver* getAvrcpObserver() { return BluetoothAvrcpProfile::getAvrcpObserver(); }
-	void updatePlayerInfo();
+	// The players of one device, reported under that device.
+	void updatePlayerInfo(const std::string &address);
 	void notifyMediaPlayStatus(const BluetoothMediaPlayStatus &playStatus,
 			BluetoothResultCallback callback) override;
 
@@ -83,29 +85,30 @@ public:
 	void getNumberOfItems(BluetoothAvrcpBrowseTotalNumberOfItemsCallback callback) override;
 	void getFolderItems(uint32_t startIndex, uint32_t endIndex,
 						BluetoothAvrcpBrowseFolderItemsCallback callback) override;
+	// Return once the request went out; the variants with a callback report the remote device's answer.
 	BluetoothError changePath(const std::string &itemPath) override;
-	BluetoothError playItem(const std::string &itemPath);
-	BluetoothError addToNowPlaying(const std::string &itemPath);
+	BluetoothError playItem(const std::string &itemPath) override;
+	void changePath(const std::string &itemPath, BluetoothResultCallback callback) override;
+	void playItem(const std::string &itemPath, BluetoothResultCallback callback) override;
+	BluetoothError addToNowPlaying(const std::string &itemPath) override;
 	void search(const std::string &searchString,
-				BluetoothAvrcpBrowseSearchListCallback callback);
+				BluetoothAvrcpBrowseSearchListCallback callback) override;
 
 private:
 	BluetoothAvrcpRequestId generateMetaDataRequestId() { return ++mMetaDataRequestId; }
 	BluetoothAvrcpRequestId generateMediaPlayStatusRequestId() { return ++mMediaPlayStatusRequestId; }
+	Bluez5MediaPlayer *findMediaPlayer(const std::string &playerPath) const;
+	// The addressed player of a device connected in the controller role, or NULL.
+	Bluez5MediaPlayer *controllerPlayer(const std::string &address) const;
 
 private:
 	BluetoothAvrcpRequestId mMetaDataRequestId;
 	BluetoothAvrcpRequestId mMediaPlayStatusRequestId;
-	/* TRUE if connected as controller */
-	bool mConnectedController;
-	/* TRUE if connected as target */
-	bool mConnectedTarget;
-	/* TRUE if either of the roles is connected. FALSE if both the roles are disconnected*/
-	bool mConnected;
-	std::string mConnectedDeviceAddress;
+	// Roles and addressed player per device. Calls that name no device (browsing, player application settings)
+	// go to the device whose player was addressed last.
+	AvrcpDevices mDevices;
 	GDBusObjectManager *mObjectManager;
 	std::list<Bluez5MediaPlayer *> mMediaPlayerList;
-	Bluez5MediaPlayer *mAddressedMediaPlayer;
 	guint mWatcherId;
 };
 

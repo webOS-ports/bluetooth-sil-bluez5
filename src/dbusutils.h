@@ -24,6 +24,8 @@
 #include <glib.h>
 #include <gio/gio.h>
 
+#include "asyncutils.h"
+
 
 
 namespace DBusUtils
@@ -44,6 +46,7 @@ namespace DBusUtils
 	private:
 		uint32_t mWatch;
 		StatusCallback mCallback;
+		enum class State { UNKNOWN, PRESENT, ABSENT } mState = State::UNKNOWN;	// as last reported
 
 		static void handleNameAppeared(GDBusConnection *conn, const gchar *name, const gchar *nameOwner, gpointer user_data);
 		static void handleNameDisappeared(GDBusConnection *conn, const gchar *name, gpointer user_data);
@@ -51,25 +54,36 @@ namespace DBusUtils
 
 	typedef std::function<void (const std::string &)> InterfaceStatusCallback;
 
+	// Tells when interfaces of the object at path go, or the whole object ("all") because its owner left the bus.
+	// Signal subscriptions only: no call waits for an answer. A GDBusObjectManagerClient for this read all of
+	// obexd's objects (GetManagedObjects) synchronously for every session. busName is the owner's unique name.
 	class ObjectWatch
 	{
 	public:
-		ObjectWatch(GBusType busType, const std::string &busName, const std::string &path);
+		ObjectWatch(GDBusConnection *connection, const std::string &busName, const std::string &path);
 		~ObjectWatch();
 
 		ObjectWatch(const ObjectWatch&) = delete;
 		ObjectWatch& operator = (const ObjectWatch&) = delete;
 
 		void watchInterfaceRemoved(InterfaceStatusCallback callback);
+		bool isWatching() const { return mConnection != nullptr; }	// false without a connection or unique name
 
 	private:
 		std::string mPath;
-		GDBusObjectManager *mObjectManager;
+		std::string mBusName;
+		GDBusConnection *mConnection;
+		guint mRemovedSubscription;
+		guint mOwnerSubscription;
 		InterfaceStatusCallback mInterfaceRemovedCallback;
+		LifetimeGuard mLifetime;	// a callback can delete the watch
 
-		static void handleInterfaceRemoved(GDBusObjectManager *manager, GDBusObject *object, GDBusInterface *interface,
+		static void handleInterfacesRemoved(GDBusConnection *connection, const gchar *sender, const gchar *path,
+		                                    const gchar *interface, const gchar *signal, GVariant *parameters,
+		                                    gpointer user_data);
+		static void handleNameOwnerChanged(GDBusConnection *connection, const gchar *sender, const gchar *path,
+		                                   const gchar *interface, const gchar *signal, GVariant *parameters,
 		                                   gpointer user_data);
-		static void handleObjectRemoved(GDBusObjectManager *manager, GDBusObject *object, gpointer user_data);
 	};
 }
 

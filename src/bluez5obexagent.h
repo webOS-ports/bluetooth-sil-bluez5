@@ -19,6 +19,8 @@
 
 #include <string>
 #include "dbusutils.h"
+#include "asyncutils.h"
+#include "obexpush.h"
 
 extern "C" {
 #include "freedesktop-interface.h"
@@ -61,7 +63,10 @@ private:
 	BluezObexAgent1* mAgentInterface;
 	DBusUtils::NameWatch mNameWatch;
 	Bluez5SIL *mSIL;
+	unsigned int mPushId = 0;	// the incoming push being looked up; a newer one or a Cancel changes it
+	LifetimeGuard mLifetime;
 
+	void releaseAgentInterface();
 	void connectWithObex();
 	void createObexAgentManagerProxy();
 	void deleteObexAgentManagerProxy();
@@ -69,6 +74,8 @@ private:
 	void createAgentInterface(const std::string &objectPath);
 	gboolean handleAuthorizePush(BluezObexAgent1 *object, GDBusMethodInvocation *invocation,
 								 const gchar *arg_path);
+	void dispatchPush(BluezObexAgent1 *object, GDBusMethodInvocation *invocation, const ObexPushRequest &request,
+	                  const ObexPeer &peer);
 	gboolean handleCancel(BluezObexAgent1 *object, GDBusMethodInvocation *invocation);
 	gboolean handleRelease(BluezObexAgent1 *object,GDBusMethodInvocation *invocation);
 };

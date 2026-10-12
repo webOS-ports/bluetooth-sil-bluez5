@@ -83,7 +83,7 @@ public:
 								  int32_t waitTime = 0);
 
 private:
-	GDBusObjectManager *mObjectManager;
+	[[maybe_unused]] GDBusObjectManager *mObjectManager;
 	Bluez5MeshAdv *mMeshAdv;
 };
 

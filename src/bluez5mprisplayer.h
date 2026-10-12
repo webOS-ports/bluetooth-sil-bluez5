@@ -21,18 +21,18 @@
 #include <glib.h>
 #include <bluetooth-sil-api.h>
 
+#include "asyncutils.h"
+
 extern "C" {
 #include "freedesktop-interface.h"
 #include "bluez-interface.h"
 }
 
-class Bluez5Adapter;
-class Bluez5SIL;
-
 class Bluez5MprisPlayer
 {
 public:
-	Bluez5MprisPlayer(BluezMedia1* media, Bluez5Adapter* adapter);
+	// The player is exported and registered under adapterPath + "/mpris/MediaPlayer2".
+	Bluez5MprisPlayer(BluezMedia1* media, const std::string &adapterPath);
 
 	~Bluez5MprisPlayer();
 
@@ -40,10 +40,20 @@ public:
 	Bluez5MprisPlayer& operator = (const Bluez5MprisPlayer&) = delete;
 
 	static void handleBusAcquired(GDBusConnection *connection, const gchar *name, gpointer user_data);
-	void setConnection(GDBusConnection *connection) { mConn = connection; }
+	// Its own reference: the bus-acquired callback only lends the shared system bus connection.
+	void setConnection(GDBusConnection *connection)
+	{
+		if (connection)
+			g_object_ref(connection);
+		if (mConn)
+			g_object_unref(mConn);
+		mConn = connection;
+	}
 	void createInterface();
+	// Both asynchronous: they return before bluetoothd has answered.
 	void registerPlayer();
-	gboolean unRegisterPlayer();
+	void unRegisterPlayer();
+	bool isRegistered() const { return mRegistered; }
 
 	bool setMediaPlayStatus(const BluetoothMediaPlayStatus &status);
 	bool setMediaMetaData(const BluetoothMediaMetaData &metaData);
@@ -65,7 +75,7 @@ public:
 private:
 	guint mBusId;
 	GDBusConnection *mConn;
-	Bluez5Adapter *mAdapter;
+	std::string mPlayerPath;
 	BluezMedia1 *mMediaProxy;
 	BluezOrgMprisMediaPlayer2Player *mPlayerInterface;
 	std::string mTitle;
@@ -74,6 +84,8 @@ private:
 	std::string mGenre;
 	int32_t mTrackNumber;
 	uint64_t mLength;
+	bool mRegistered;	// bluetoothd accepted RegisterPlayer
+	LifetimeGuard mLifetime;	// last: replies after the player went see it expire first
 };
 
 #endif

@@ -17,6 +17,7 @@
 #ifndef BLUEZ5PROFILEFTP_H
 #define BLUEZ5PROFILEFTP_H
 
+#include <set>
 #include <string>
 #include <map>
 #include <glib.h>
@@ -24,6 +25,7 @@
 #include <bluetooth-sil-api.h>
 
 #include "bluez5profilebase.h"
+#include "obexpush.h"
 
 class Bluez5Adapter;
 class Bluez5Device;
@@ -52,6 +54,7 @@ public:
 	void cancelTransfer(BluetoothFtpTransferId id, BluetoothResultCallback callback);
 
 private:
+	std::set<std::string> mPendingSessions;	// addresses with a session being created
 	std::map<std::string, Bluez5ObexSession*> mSessions;
 	std::map<BluetoothFtpTransferId, Bluez5ObexTransfer*> mTransfers;
 	uint64_t mTranfserIdCounter;
@@ -60,13 +63,13 @@ private:
 
 	void createSession(const std::string &address, BluetoothResultCallback callback);
 	void removeSession(const std::string &address);
-	void storeSession(const std::string &address, Bluez5ObexSession *session);
+	bool storeSession(const std::string &address, Bluez5ObexSession *session);
 	void notifySessionStatus(const std::string &address, bool createdOrRemoved);
 	void handleFailedToCreateSession(const std::string &address, BluetoothResultCallback callback);
 	Bluez5ObexSession* findSession(const std::string &address);
 	Bluez5ObexTransfer* findTransfer(BluetoothFtpTransferId id);
 	std::vector<BluetoothFtpElement> buildElementList(GVariant *entries);
-	void startTransfer(BluetoothFtpTransferId id, const std::string &objectPath, BluetoothFtpTransferResultCallback callback);
+	void startTransfer(BluetoothFtpTransferId id, const std::string &objectPath, const ObexPeer &peer, BluetoothFtpTransferResultCallback callback);
 	void updateActiveTransfer(BluetoothFtpTransferId id, Bluez5ObexTransfer *transfer, BluetoothFtpTransferResultCallback callback);
 	void removeTransfer(BluetoothFtpTransferId id);
 

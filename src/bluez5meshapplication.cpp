@@ -13,6 +13,7 @@
 // limitations under the License.
 //
 // SPDX-License-Identifier: Apache-2.0
+#include <cinttypes>
 #include "bluez5meshapplication.h"
 #include "bluez5profilemesh.h"
 #include "bluez5meshadv.h"
@@ -34,7 +35,7 @@ Bluez5MeshApplication::~Bluez5MeshApplication()
 
 }
 
-void Bluez5MeshApplication::registerApplicationInterface(GDBusObjectManagerServer *objectManagerServer, GDBusObjectSkeleton *meshAppSkeleton, Bluez5MeshAdv *meshAdv)
+void Bluez5MeshApplication::registerApplicationInterface(GDBusObjectManagerServer */*objectManagerServer*/, GDBusObjectSkeleton *meshAppSkeleton, Bluez5MeshAdv *meshAdv)
 {
 	BluezMeshApplication1 *appInterface = bluez_mesh_application1_skeleton_new();
 	uint16_t cid = 0x05f1;
@@ -49,6 +50,7 @@ void Bluez5MeshApplication::registerApplicationInterface(GDBusObjectManagerServe
 	g_signal_connect(appInterface, "handle_join_failed", G_CALLBACK(handleJoinFailed), meshAdv);
 
 	g_dbus_object_skeleton_add_interface(meshAppSkeleton, G_DBUS_INTERFACE_SKELETON(appInterface));
+	g_object_unref(appInterface);	// the object holds its own reference: this one leaked on every meshd start
 }
 
 gboolean Bluez5MeshApplication::handleJoinComplete(BluezMeshApplication1 *object,
@@ -57,17 +59,24 @@ gboolean Bluez5MeshApplication::handleJoinComplete(BluezMeshApplication1 *object
 {
 	Bluez5MeshAdv *meshAdv = static_cast<Bluez5MeshAdv *>(userData);
 	meshAdv->mToken = argToken;
-	DEBUG("handleJoinCompletem mToken: %llu", meshAdv->mToken);
+	DEBUG("handleJoinCompletem mToken: %" PRIu64, meshAdv->mToken);
 	bluez_mesh_application1_complete_join_complete(object, invocation);
-	meshAdv->attach();
+	BluetoothError error = meshAdv->attach();
 	meshAdv->updateNetworkId();
+	if (error != BLUETOOTH_ERROR_NONE)	// not started; a started attach reports its own result
+		meshAdv->mMesh->getMeshObserver()->attachResult(error,
+			convertAddressToLowerCase(meshAdv->mAdapter->getAddress()));
 	return true;
 }
 
+// Answered: returning TRUE leaves the invocation to the handler, and it leaked. Only logged: meshd calls
+// JoinFailed for a Join(), which this SIL never makes (it creates its network with CreateNetwork, whose failure is
+// the reply to that call and goes to createNetworkResult).
 gboolean Bluez5MeshApplication::handleJoinFailed(BluezMeshApplication1 *object,
 										GDBusMethodInvocation *invocation,
-										const gchar *argReason, gpointer userData)
+										const gchar *argReason, gpointer /*userData*/)
 {
-	DEBUG("handleJoinFailed, reason: %s", argReason);
+	ERROR(MSGID_MESH_PROFILE_ERROR, 0, "Mesh join failed: %s", argReason);
+	bluez_mesh_application1_complete_join_failed(object, invocation);
 	return true;
 }

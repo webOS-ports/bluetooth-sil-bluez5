@@ -19,6 +19,7 @@
 #include "logging.h"
 #include "bluez5adapter.h"
 #include "bluez5device.h"
+#include "leadvfilter.h"
 #include "bluez5agent.h"
 #include "bluez5obexclient.h"
 #include "bluez5obexagent.h"
@@ -66,7 +67,7 @@ Bluez5Adapter::Bluez5Adapter(const std::string &objectPath) :
 	mCurrentPairingDevice(0),
 	mCurrentPairingCallback(0),
 	mObexClient(0),
-	mCancelDiscCallback(0),
+	mCancelDiscTimeoutSource(0),
 	mAdvertising(false),
 	mPlayer(nullptr),
 	mMediaManager(nullptr)
@@ -136,6 +137,13 @@ Bluez5Adapter::Bluez5Adapter(const std::string &objectPath) :
 
 Bluez5Adapter::~Bluez5Adapter()
 {
+	// Their callbacks run on this adapter.
+	resetDiscoveryTimeout();
+	if (mCancelDiscTimeoutSource)
+		g_source_remove(mCancelDiscTimeoutSource);
+	if (mRepowerTimeoutSource)
+		g_source_remove(mRepowerTimeoutSource);
+
 	for(auto profile = mProfiles.begin(); profile != mProfiles.end(); profile++)
 	{
 		delete profile->second;
@@ -181,10 +189,10 @@ void Bluez5Adapter::addMediaManager(std::string objectPath)
 		return;
 	}
 
-	mPlayer = new Bluez5MprisPlayer(mMediaManager, this);
+	mPlayer = new Bluez5MprisPlayer(mMediaManager, getObjectPath());
 }
 
-void Bluez5Adapter::removeMediaManager(const std::string &objectPath)
+void Bluez5Adapter::removeMediaManager(const std::string &/*objectPath*/)
 {
 	if (!mMediaManager)
 		return;
@@ -225,14 +233,14 @@ uint32_t Bluez5Adapter::nextScanId()
 	return nextScanId++;
 }
 
-void Bluez5Adapter::handleAdapterPropertiesChanged(BluezAdapter1 *, gchar *interface,  GVariant *changedProperties,
-												   GVariant *invalidatedProperties, gpointer userData)
+void Bluez5Adapter::handleAdapterPropertiesChanged(BluezAdapter1 *, gchar */*interface*/,  GVariant *changedProperties,
+												   GVariant */*invalidatedProperties*/, gpointer userData)
 {
 	auto adapter = static_cast<Bluez5Adapter*>(userData);
 	BluetoothPropertiesList properties;
 	bool changed = false;
 
-	for (int n = 0; n < g_variant_n_children(changedProperties); n++)
+	for (size_t n = 0; n < g_variant_n_children(changedProperties); n++)
 	{
 		GVariant *propertyVar = g_variant_get_child_value(changedProperties, n);
 		GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -319,7 +327,9 @@ bool Bluez5Adapter::addPropertyFromVariant(BluetoothPropertiesList& properties, 
 	}
 	else if (key == "DeviceType")
 	{
-		BluetoothDeviceType typeOfDevice = (BluetoothDeviceType)g_variant_get_uint32(valueVar);
+		// As a uint32_t, like the device's own (bluez5device.cpp): the service reads it with getValue<uint32_t>(),
+		// which throws for a value stored as BluetoothDeviceType.
+		uint32_t typeOfDevice = g_variant_get_uint32(valueVar);
 		properties.push_back(BluetoothProperty(BluetoothProperty::Type::TYPE_OF_DEVICE, typeOfDevice));
 		changed = true;
 	}
@@ -367,15 +377,20 @@ bool Bluez5Adapter::addPropertyFromVariant(BluetoothPropertiesList& properties, 
 		{
 			mDiscovering = discovering;
 			getObserver()->discoveryStateChanged(mDiscovering);
-			if (mCancelDiscCallback)
-				mCancelDiscCallback(BLUETOOTH_ERROR_NONE);
+			// Only when it stops, and once: the callback ran on every later change, for a request it had already
+			// answered (the service releases its message in it).
+			if (!mDiscovering)
+			{
+				resetDiscoveryTimeout();
+				completeCancelDiscovery();
+			}
 		}
 	}
 	else if (key == "UUIDs")
 	{
 		mUuids.clear();
 
-		for (int m = 0; m < g_variant_n_children(valueVar); m++)
+		for (size_t m = 0; m < g_variant_n_children(valueVar); m++)
 		{
 			GVariant *uuidVar = g_variant_get_child_value(valueVar, m);
 
@@ -393,22 +408,26 @@ bool Bluez5Adapter::addPropertyFromVariant(BluetoothPropertiesList& properties, 
 
 void Bluez5Adapter::getAdapterProperties(BluetoothPropertiesResultCallback callback)
 {
-	auto propertiesGetCallback = [this, callback](GAsyncResult *result) {
-		GVariant *propsVar;
+	// The adapter is deleted when its controller goes away, which can be before the reply: reproduced in the VM
+	// with btvirt killed during pairing (ASan heap-use-after-free on mPropertiesProxy and the members below).
+	auto propertiesGetCallback = [this, alive = mLifetime.token(), callback](GObject *source, GAsyncResult *result) {
+		GVariant *propsVar = nullptr;
 		GError *error = 0;
 		gboolean ret;
 
-		ret = free_desktop_dbus_properties_call_get_all_finish(mPropertiesProxy, &propsVar, result, &error);
-		if (error)
+		ret = free_desktop_dbus_properties_call_get_all_finish(FREE_DESKTOP_DBUS_PROPERTIES(source), &propsVar, result, &error);
+		if (alive.expired() || !ret || error)
 		{
-			g_error_free(error);
+			g_clear_error(&error);
+			if (propsVar)
+				g_variant_unref(propsVar);
 			callback(BLUETOOTH_ERROR_FAIL, BluetoothPropertiesList());
 			return;
 		}
 
 		BluetoothPropertiesList properties;
 
-		for (int n = 0; n < g_variant_n_children(propsVar); n++)
+		for (size_t n = 0; n < g_variant_n_children(propsVar); n++)
 		{
 			GVariant *propertyVar = g_variant_get_child_value(propsVar, n);
 			GVariant *keyVar = g_variant_get_child_value(propertyVar, 0);
@@ -428,6 +447,7 @@ void Bluez5Adapter::getAdapterProperties(BluetoothPropertiesResultCallback callb
 		properties.push_back(BluetoothProperty(BluetoothProperty::Type::DISCOVERY_TIMEOUT, mDiscoveryTimeout));
 		properties.push_back(BluetoothProperty(BluetoothProperty::Type::STACK_NAME, std::string("bluez5")));
 		properties.push_back(BluetoothProperty(BluetoothProperty::Type::UUIDS, mUuids));
+		g_variant_unref(propsVar);	// leaked on every read
 
 		callback(BLUETOOTH_ERROR_NONE, properties);
 	};
@@ -481,14 +501,8 @@ std::string Bluez5Adapter::propertyTypeToString(BluetoothProperty::Type type)
 
 void Bluez5Adapter::getAdapterProperty(BluetoothProperty::Type type, BluetoothPropertyResultCallback callback)
 {
-	std::string propertyName = propertyTypeToString(type);
-
-	if (propertyName.length() == 0)
-	{
-		callback(BLUETOOTH_ERROR_PARAM_INVALID, BluetoothProperty());
-		return;
-	}
-
+	// Ours, not BlueZ's: answered before the name lookup, which has no BlueZ name for STACK_NAME (it was
+	// refused as invalid, so its branch never ran).
 	if (type == BluetoothProperty::Type::DISCOVERY_TIMEOUT)
 	{
 		callback(BLUETOOTH_ERROR_NONE, BluetoothProperty(type, mDiscoveryTimeout));
@@ -497,6 +511,14 @@ void Bluez5Adapter::getAdapterProperty(BluetoothProperty::Type type, BluetoothPr
 	else if (type == BluetoothProperty::Type::STACK_NAME)
 	{
 		callback(BLUETOOTH_ERROR_NONE, BluetoothProperty(type, std::string("bluez5")));
+		return;
+	}
+
+	std::string propertyName = propertyTypeToString(type);
+
+	if (propertyName.length() == 0)
+	{
+		callback(BLUETOOTH_ERROR_PARAM_INVALID, BluetoothProperty());
 		return;
 	}
 
@@ -636,30 +658,26 @@ bool Bluez5Adapter::setAdapterPropertySync(const BluetoothProperty& property)
 	return true;
 }
 
+// An empty callback is allowed on every path: it was checked only on success.
 void Bluez5Adapter::setAdapterProperty(const BluetoothProperty& property, BluetoothResultCallback callback)
 {
-	if (!setAdapterPropertySync(property))
-	{
-		callback(BLUETOOTH_ERROR_FAIL);
-		return;
-	}
-
+	bool ok = setAdapterPropertySync(property);
 	if (callback)
-		callback(BLUETOOTH_ERROR_NONE);
+		callback(ok ? BLUETOOTH_ERROR_NONE : BLUETOOTH_ERROR_FAIL);
 }
 
 void Bluez5Adapter::setAdapterProperties(const BluetoothPropertiesList& properties, BluetoothResultCallback callback)
 {
+	bool ok = true;
 	for (auto property : properties)
-	{
 		if (!setAdapterPropertySync(property))
 		{
-			callback(BLUETOOTH_ERROR_FAIL);
-			return;
+			ok = false;
+			break;
 		}
-	}
 
-	callback(BLUETOOTH_ERROR_NONE);
+	if (callback)
+		callback(ok ? BLUETOOTH_ERROR_NONE : BLUETOOTH_ERROR_FAIL);
 }
 
 bool Bluez5Adapter::setAdapterDelayReport(bool delayReporting)
@@ -767,39 +785,65 @@ void Bluez5Adapter::setDeviceProperties(const std::string& address, const Blueto
 	callback(BLUETOOTH_ERROR_NONE);
 }
 
+// Power-cycles the controller once it appears (added by webOS for bluetoothd and bluetooth-meshd running side by
+// side). It used to be two sync Set calls with sleep(1) between them on the only main loop. Now each step runs from
+// the previous one's reply. An enable() or disable() meanwhile ends the cycle, so a saved "off" applied by the service
+// at startup is not switched back on by the second half.
 BluetoothError Bluez5Adapter::forceRepower()
 {
-	GVariant *valueVar = g_variant_new_boolean(FALSE);
-	GError *error = 0;
-
-	free_desktop_dbus_properties_call_set_sync(mPropertiesProxy, "org.bluez.Adapter1",
-						"Powered", g_variant_new_variant(valueVar),
-						NULL, &error);
-	if (error)
-	{
-		g_error_free(error);
-		return BLUETOOTH_ERROR_FAIL;
-	}
-
-	sleep(1);
-
-	valueVar = g_variant_new_boolean(TRUE);
-	free_desktop_dbus_properties_call_set_sync(mPropertiesProxy, "org.bluez.Adapter1",
-						"Powered", g_variant_new_variant(valueVar),
-						NULL, &error);
-	if (error)
-	{
-		g_error_free(error);
-		return BLUETOOTH_ERROR_FAIL;
-	}
-
-	mAdvertise->assignAdvertiseManager(mObjectPath);
-
+	mRepowerPending = true;
+	setPoweredAsync(false, [this](bool ok) {
+		if (!ok || !mRepowerPending)
+		{
+			mRepowerPending = false;
+			mAdvertise->assignAdvertiseManager(mObjectPath);
+			return;
+		}
+		mRepowerTimeoutSource = g_timeout_add_seconds(1, handleRepowerTimeout, this);
+	});
 	return BLUETOOTH_ERROR_NONE;
+}
+
+gboolean Bluez5Adapter::handleRepowerTimeout(gpointer user_data)
+{
+	Bluez5Adapter *self = static_cast<Bluez5Adapter*>(user_data);
+	self->mRepowerTimeoutSource = 0;
+
+	if (!self->mRepowerPending)
+	{
+		self->mAdvertise->assignAdvertiseManager(self->mObjectPath);
+		return G_SOURCE_REMOVE;
+	}
+
+	self->setPoweredAsync(true, [self](bool) {
+		self->mRepowerPending = false;
+		self->mAdvertise->assignAdvertiseManager(self->mObjectPath);
+	});
+	return G_SOURCE_REMOVE;
+}
+
+// done runs only while this adapter exists.
+void Bluez5Adapter::setPoweredAsync(bool powered, std::function<void(bool ok)> done)
+{
+	auto setCallback = [alive = mLifetime.token(), done](GObject *source, GAsyncResult *result) {
+		GError *error = 0;
+
+		gboolean ret = free_desktop_dbus_properties_call_set_finish(FREE_DESKTOP_DBUS_PROPERTIES(source), result, &error);
+		bool ok = ret && !error;
+		g_clear_error(&error);
+		if (alive.expired())
+			return;
+		done(ok);
+	};
+
+	free_desktop_dbus_properties_call_set(mPropertiesProxy, "org.bluez.Adapter1", "Powered",
+					g_variant_new_variant(g_variant_new_boolean(powered)), NULL,
+					glibAsyncMethodWrapper, new GlibAsyncFunctionWrapper(setCallback));
 }
 
 BluetoothError Bluez5Adapter::enable()
 {
+	mRepowerPending = false;	// the caller decides from here on
 	if (mPowered)
 		return BLUETOOTH_ERROR_NONE;
 
@@ -820,6 +864,7 @@ BluetoothError Bluez5Adapter::enable()
 
 BluetoothError Bluez5Adapter::disable()
 {
+	mRepowerPending = false;	// the caller decides from here on
 	if (!mPowered)
 		return BLUETOOTH_ERROR_NONE;
 
@@ -844,7 +889,8 @@ gboolean Bluez5Adapter::handleDiscoveryTimeout(gpointer user_data)
 
 	DEBUG("Discovery has timed out. Stopping it.");
 
-	self->cancelDiscovery([](BluetoothError error) { });
+	self->mDiscoveryTimeoutSource = 0;	// this source ends here; its id was kept and removed again later
+	self->cancelDiscovery([](BluetoothError) { });
 
 	return FALSE;
 }
@@ -929,10 +975,37 @@ void Bluez5Adapter::cancelDiscovery(BluetoothResultCallback callback)
 			}
 			mUseBluezFilter = false;
 		}
-		mCancelDiscCallback = callback;
+		mCancelDiscCallbacks.push_back(callback);
+		if (!mCancelDiscTimeoutSource)
+			mCancelDiscTimeoutSource = g_timeout_add_seconds(5, handleCancelDiscoveryTimeout, this);
 	}
 	else
 		callback(BLUETOOTH_ERROR_NONE);
+}
+
+void Bluez5Adapter::completeCancelDiscovery()
+{
+	if (mCancelDiscTimeoutSource)
+	{
+		g_source_remove(mCancelDiscTimeoutSource);
+		mCancelDiscTimeoutSource = 0;
+	}
+
+	// Taken first: a callback may start or cancel discovery again.
+	std::vector<BluetoothResultCallback> callbacks;
+	callbacks.swap(mCancelDiscCallbacks);
+	for (auto &callback : callbacks)
+		if (callback)
+			callback(BLUETOOTH_ERROR_NONE);
+}
+
+gboolean Bluez5Adapter::handleCancelDiscoveryTimeout(gpointer user_data)
+{
+	Bluez5Adapter *self = static_cast<Bluez5Adapter*>(user_data);
+	self->mCancelDiscTimeoutSource = 0;
+	DEBUG("Discovery still reported active after StopDiscovery; answering the pending requests");
+	self->completeCancelDiscovery();
+	return G_SOURCE_REMOVE;
 }
 
 bool Bluez5Adapter::isServiceUuidValid(const BluetoothLeDiscoveryFilter &filter)
@@ -1126,14 +1199,15 @@ BluetoothError Bluez5Adapter::removeLeDiscoveryFilter(uint32_t scanId)
 	{
 		removeFilterType(scanId);
 		mLeScanFilters.erase(scanIter);
+		// Its devices too: the entries were kept, with raw device pointers that dangle once a device goes.
+		mLeDevicesByScanId.erase(scanId);
 		return BLUETOOTH_ERROR_NONE;
 	}
 }
 
 void Bluez5Adapter::removeFilterType(uint32_t scanId)
 {
-	auto tmpIter = mLeScanFilterTypes.find(scanId);
-	mLeScanFilterTypes.erase(tmpIter);
+	mLeScanFilterTypes.erase(scanId);	// erase(end()) if the two maps ever disagreed
 }
 
 BluetoothError Bluez5Adapter::prepareFilterForDiscovery()
@@ -1341,10 +1415,12 @@ void Bluez5Adapter::addDevice(const std::string &objectPath)
 
 void Bluez5Adapter::removeDevice(const std::string &objectPath)
 {
-	std::string leaddress, address;
+	std::string address;
 
 	for ( auto it = mLeScanFilters.begin(); it != mLeScanFilters.end(); ++it)
 	{
+		// Per scan: it was kept from an earlier scan, and scans that never saw the device were told it went.
+		std::string leaddress;
 		uint32_t scanId;
 		scanId = it->first;
 		auto devicesIter = mLeDevicesByScanId.find(scanId);
@@ -1376,6 +1452,10 @@ void Bluez5Adapter::removeDevice(const std::string &objectPath)
 				if (gattprofile)
 					gattprofile->updateDeviceProperties(address);
 			}
+			if (mAgent)
+				mAgent->stopPairingForDevice(device);	// its pairing info pointed at it
+			if (mCurrentPairingDevice == device)
+				mCurrentPairingDevice = nullptr;
 			mDevices.erase(iter);
 			delete device;
 			break;
@@ -1617,143 +1697,22 @@ bool Bluez5Adapter::bluezFilterUsageCriteria(unsigned char mFilterType)
 	return false;
 }
 
+// The filter comes from an app, the data from whatever device advertises; the matching is in leadvfilter.cpp.
 bool Bluez5Adapter::checkServiceUuid(const BluetoothLeDiscoveryFilter &filter, Bluez5Device *device)
 {
-	if (!filter.getServiceUuid().getMask().empty())
-	{
-		auto uuids = device->getUuids();
-		std::string srvcUuidMasksStr = filter.getServiceUuid().getMask();
-		for(int i = 0; i < uuids.size(); i++)
-		{
-			uuids[i] = convertToLowerCase(uuids[i]);
-			std::string srvcUuidStr = filter.getServiceUuid().getUuid();
-			srvcUuidStr = convertToLowerCase(srvcUuidStr);
-			int srvcUuidSize = filter.getServiceUuid().getUuid().size();
-			bool isMatching = true;
-			for(int j=0; (j < srvcUuidSize) && isMatching; j++)
-			{
-				if (srvcUuidMasksStr[j] == '1')
-				{
-					if(srvcUuidStr[j] != uuids[i][j])
-					{
-						isMatching = false;
-					}
-				}
-
-				if (j == srvcUuidSize-1)
-					return true;
-			}
-		}
-		return false;
-	}
-	else
-	{
-		auto uuids = device->getUuids();
-		std::string srvcUuidStr = filter.getServiceUuid().getUuid();
-		srvcUuidStr = convertToLowerCase(srvcUuidStr);
-		for(int i = 0; i < uuids.size(); i++)
-		{
-			uuids[i] = convertToLowerCase(uuids[i]);
-			if (uuids[i] == srvcUuidStr)
-				return true;
-		}
-	}
-	return false;
+	return matchServiceUuid(filter.getServiceUuid().getUuid(), filter.getServiceUuid().getMask(), device->getUuids());
 }
 
 bool Bluez5Adapter::checkServiceData(const BluetoothLeDiscoveryFilter &filter, Bluez5Device *device)
 {
-	std::string srvcData_Uuid = device->getServiceDataUuid();
-	std::string srvcUuidStr = filter.getServiceData().getUuid();
-	srvcData_Uuid = convertToLowerCase(srvcData_Uuid);
-	srvcUuidStr = convertToLowerCase(srvcUuidStr);
-	if (srvcData_Uuid == srvcUuidStr)
-	{
-		if (!filter.getServiceData().getMask().empty())
-		{
-			std::vector<uint8_t> srvcDataMask = filter.getServiceData().getMask();
-			std::vector<uint8_t> srvcData = filter.getServiceData().getData();
-			std::vector<uint8_t> srvcDeviceData = device->getScanRecord();
-			int srvcDataSize = filter.getServiceData().getData().size();
-			for(int j=0; j < srvcDataSize; j++)
-			{
-				if (srvcDataMask[j] == 1)
-				{
-					if(srvcData[j] == srvcDeviceData[j])
-					{
-						continue;
-					}
-					else
-					{
-						return false;
-					}
-				}
-			}
-			return true;
-		}
-		else
-		{
-			if ((filter.getServiceData().getData()) == device->getScanRecord())
-				return true;
-		}
-	}
-
-	return false;
+	return matchServiceData(filter.getServiceData().getUuid(), filter.getServiceData().getData(),
+	                        filter.getServiceData().getMask(), device->getServiceDataUuid(), device->getScanRecord());
 }
 
 bool Bluez5Adapter::checkManufacturerData(const BluetoothLeDiscoveryFilter &filter, Bluez5Device *device)
 {
-	if (device->getManufactureData().size() > 2)
-	{
-		std::vector<uint8_t> manufData = device->getManufactureData();
-		uint16_t devManufacturerId = 0;
-		uint16_t manufacturerId = (uint16_t)filter.getManufacturerData().getId();
-
-		uint16_t lsb = manufData[1] & 0XFFFF;
-		uint16_t msb = manufData[0] << 8;
-		devManufacturerId = msb | lsb;
-		if (manufacturerId == devManufacturerId)
-		{
-			std::vector<uint8_t> manuDataMask = filter.getManufacturerData().getMask();
-			std::vector<uint8_t> manuData = filter.getManufacturerData().getData();
-			std::vector<uint8_t> deviceData = device->getManufactureData();
-			int dataSize = filter.getManufacturerData().getData().size();
-			if (!filter.getManufacturerData().getMask().empty())
-			{
-				for(int j=0; j < dataSize; j++)
-				{
-					if (manuDataMask[j] == 1)
-					{
-						if(manuData[j] == deviceData[j + 2])
-						{
-							continue;
-						}
-						else
-						{
-							return false;
-						}
-					}
-				}
-				return true;
-			}
-			else
-			{
-				for(int j=0; j < dataSize; j++)
-				{
-					if(manuData[j] == deviceData[j + 2])
-					{
-						continue;
-					}
-					else
-					{
-						return false;
-					}
-				}
-				return true;
-			}
-		}
-	}
-	return false;
+	return matchManufacturerData((uint16_t)filter.getManufacturerData().getId(), filter.getManufacturerData().getData(),
+	                             filter.getManufacturerData().getMask(), device->getManufactureData());
 }
 
 Bluez5Device* Bluez5Adapter::findDeviceByObjectPath(const std::string &objectPath)
@@ -1769,7 +1728,7 @@ Bluez5Device* Bluez5Adapter::findDeviceByObjectPath(const std::string &objectPat
 	return 0;
 }
 
-void Bluez5Adapter::reportPairingResult(bool success)
+void Bluez5Adapter::reportPairingResult(bool /*success*/)
 {
 }
 
@@ -1878,14 +1837,14 @@ void Bluez5Adapter::unpair(const std::string &address, BluetoothResultCallback c
 		return;
 	}
 
-	auto unPairCallback = [this, callback, address](GAsyncResult *result) {
+	auto unPairCallback = [this, alive = mLifetime.token(), callback, address](GObject *source, GAsyncResult *result) {
 		GError *error = 0;
 		gboolean ret;
 
-		ret = bluez_adapter1_call_remove_device_finish(mAdapterProxy, result, &error);
-		if (error)
+		ret = bluez_adapter1_call_remove_device_finish(BLUEZ_ADAPTER1(source), result, &error);
+		if (alive.expired() || !ret || error)	// the adapter was deleted meanwhile, see getAdapterProperties
 		{
-			g_error_free(error);
+			g_clear_error(&error);
 			callback(BLUETOOTH_ERROR_FAIL);
 			return;
 		}
@@ -1945,18 +1904,18 @@ void Bluez5Adapter::cancelPairing(const std::string &address, BluetoothResultCal
 	}
 }
 
-void Bluez5Adapter::configureAdvertisement(bool connectable, bool includeTxPower, bool includeName,
-                                           BluetoothLowEnergyData manufacturerData, BluetoothLowEnergyServiceList services,
-                                           BluetoothResultCallback callback, uint8_t TxPower, BluetoothUuid solicitedService128)
+void Bluez5Adapter::configureAdvertisement(bool /*connectable*/, bool /*includeTxPower*/, bool /*includeName*/,
+                                           BluetoothLowEnergyData /*manufacturerData*/, BluetoothLowEnergyServiceList /*services*/,
+                                           BluetoothResultCallback callback, uint8_t /*TxPower*/, BluetoothUuid /*solicitedService128*/)
 {
 	callback(BLUETOOTH_ERROR_UNSUPPORTED);
 	return;
 }
 
-void Bluez5Adapter::configureAdvertisement(bool connectable, bool includeTxPower, bool includeName, bool isScanResponse,
-                                           BluetoothLowEnergyData manufacturerData, BluetoothLowEnergyServiceList services,
-                                           ProprietaryDataList dataList,
-                                           BluetoothResultCallback callback, uint8_t TxPower, BluetoothUuid solicitedService128)
+void Bluez5Adapter::configureAdvertisement(bool /*connectable*/, bool /*includeTxPower*/, bool /*includeName*/, bool /*isScanResponse*/,
+                                           BluetoothLowEnergyData /*manufacturerData*/, BluetoothLowEnergyServiceList /*services*/,
+                                           ProprietaryDataList /*dataList*/,
+                                           BluetoothResultCallback callback, uint8_t /*TxPower*/, BluetoothUuid /*solicitedService128*/)
 {
 	callback(BLUETOOTH_ERROR_UNSUPPORTED);
 	return;
@@ -2039,20 +1998,20 @@ void Bluez5Adapter::unregisterAdvertiser(uint8_t advertiserId, AdvertiserStatusC
 		callback(BLUETOOTH_ERROR_FAIL);
 }
 
-void Bluez5Adapter::disableAdvertiser(uint8_t advertiserId, AdvertiserStatusCallback callback)
+void Bluez5Adapter::disableAdvertiser(uint8_t /*advertiserId*/, AdvertiserStatusCallback callback)
 {
 	callback(BLUETOOTH_ERROR_NONE);
 }
 
-BluetoothError Bluez5Adapter::updateFirmware(const std::string &deviceName,
-		const std::string &fwFileName,
-		const std::string &miniDriverName,
-		bool isShared)
+BluetoothError Bluez5Adapter::updateFirmware(const std::string &/*deviceName*/,
+		const std::string &/*fwFileName*/,
+		const std::string &/*miniDriverName*/,
+		bool /*isShared*/)
 {
 	return BLUETOOTH_ERROR_UNSUPPORTED;
 }
 
-BluetoothError Bluez5Adapter::resetModule(const std::string &deviceName, bool isShared)
+BluetoothError Bluez5Adapter::resetModule(const std::string &/*deviceName*/, bool /*isShared*/)
 {
 	return BLUETOOTH_ERROR_UNSUPPORTED;
 }

@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "bluez5sil.h"
+#include "dbuspath.h"
 #include "bluez5adapter.h"
 #include "bluez5device.h"
 #include "bluez5agent.h"
@@ -44,8 +45,16 @@ Bluez5SIL::Bluez5SIL(BluetoothPairingIOCapability capability) :
 
 Bluez5SIL::~Bluez5SIL()
 {
-	if (mAgent)
-		delete mAgent;
+	/* Stops watching a name: first, so that its callbacks do not run on what is being torn down */
+	if (nameWatch)
+	{
+		g_bus_unwatch_name(nameWatch);
+		nameWatch = 0;
+	}
+
+	releaseObjectManager();
+	removeAgentManager(std::string());	// deletes the agent
+	removeProfileManager(std::string());
 
 	if (mObexAgent)
 		delete mObexAgent;
@@ -56,14 +65,10 @@ Bluez5SIL::~Bluez5SIL()
 		    delete *iter;
 	}
 	mAdapters.clear();
-
-	/* Stops watching a name */
-	if (nameWatch)
-		g_bus_unwatch_name(nameWatch);
 }
 
-void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *name,
-											  const gchar *nameOwner, gpointer user_data)
+void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar */*name*/,
+											  const gchar */*nameOwner*/, gpointer user_data)
 {
 	Bluez5SIL *sil = static_cast<Bluez5SIL*>(user_data);
 
@@ -72,6 +77,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 		return;
 
 	GError *error = 0;
+	sil->releaseObjectManager();	// one manager at a time (see handleBluezServiceStopped)
 	sil->mObjectManager = g_dbus_object_manager_client_new_sync(conn, G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
 										  "org.bluez", "/", NULL, NULL, NULL, NULL, &error);
 	if (error)
@@ -90,7 +96,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 	/*Objects may come in any order, first device object then adapter so
 	 better to traverse all objects to adapter then other interfaces*/
 
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
 		auto objectPath = g_dbus_object_get_object_path(object);
@@ -99,6 +105,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 		if (adapterInterface)
 		{
 			sil->createAdapter(std::string(objectPath));
+			g_object_unref(adapterInterface);	// a new reference: leaked
 		}
 	}
 
@@ -120,7 +127,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 	}
 
 
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
 		auto objectPath = g_dbus_object_get_object_path(object);
@@ -133,7 +140,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 		}
 	}
 
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
 		auto objectPath = g_dbus_object_get_object_path(object);
@@ -142,10 +149,11 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 		if (mediaManager)
 		{
 			sil->createMediaManager(std::string(objectPath));
+			g_object_unref(mediaManager);
 		}
 	}
 
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		auto object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
 		g_object_unref(object);
@@ -153,7 +161,7 @@ void Bluez5SIL::handleBluezServiceStarted(GDBusConnection *conn, const gchar *na
 	g_list_free(objects);
 }
 
-void Bluez5SIL::handleBluezServiceStopped(GDBusConnection *conn, const gchar *name,
+void Bluez5SIL::handleBluezServiceStopped(GDBusConnection */*conn*/, const gchar */*name*/,
 											gpointer user_data)
 {
 	Bluez5SIL *sil = static_cast<Bluez5SIL*>(user_data);
@@ -164,6 +172,14 @@ void Bluez5SIL::handleBluezServiceStopped(GDBusConnection *conn, const gchar *na
 		return;
 
 	sil->mDefaultAdapter = 0;
+
+	// The object manager follows the name: kept, it added every object again when bluetoothd came back, next to
+	// the new manager made then, which doubled every adapter and device (the extra ones leaked, their handlers
+	// pointing at adapters deleted on the next restart). Everything bluetoothd held goes now, and comes back with
+	// it: the agent before the adapters it is assigned to.
+	sil->releaseObjectManager();
+	sil->removeAgentManager(std::string());
+	sil->removeProfileManager(std::string());
 
 	// Drop all adapters as they are invalid now. We will recreate them once
 	// bluez comes back.
@@ -180,7 +196,7 @@ void Bluez5SIL::handleBluezServiceStopped(GDBusConnection *conn, const gchar *na
 	sil->deleteObexAgent();
 }
 
-void Bluez5SIL::handleObjectAdded(GDBusObjectManager *objectManager, GDBusObject *object, void *user_data)
+void Bluez5SIL::handleObjectAdded(GDBusObjectManager */*objectManager*/, GDBusObject *object, void *user_data)
 {
 	Bluez5SIL *sil = static_cast<Bluez5SIL*>(user_data);
 
@@ -208,7 +224,7 @@ void Bluez5SIL::handleObjectAdded(GDBusObjectManager *objectManager, GDBusObject
 	}
 }
 
-void Bluez5SIL::handleObjectRemoved(GDBusObjectManager *objectManager, GDBusObject *object, void *user_data)
+void Bluez5SIL::handleObjectRemoved(GDBusObjectManager */*objectManager*/, GDBusObject *object, void *user_data)
 {
 	Bluez5SIL *sil = static_cast<Bluez5SIL*>(user_data);
 
@@ -245,10 +261,9 @@ void Bluez5SIL::handleObjectRemoved(GDBusObjectManager *objectManager, GDBusObje
 
 GDBusObject* Bluez5SIL::findInterface(GList* objects, const gchar *interfaceName)
 {
-	for (int n = 0; n < g_list_length(objects); n++)
+	for (size_t n = 0; n < g_list_length(objects); n++)
 	{
 		GDBusObject* object = static_cast<GDBusObject*>(g_list_nth(objects, n)->data);
-		const gchar * objectPath = g_dbus_object_get_object_path(object);
 		auto interface = g_dbus_object_get_interface(object, interfaceName);
 		if (interface)
 		{
@@ -270,9 +285,25 @@ void Bluez5SIL::assignNewDefaultAdapter()
 	}
 }
 
+void Bluez5SIL::releaseObjectManager()
+{
+	if (!mObjectManager)
+		return;
+
+	g_signal_handlers_disconnect_by_data(mObjectManager, this);
+	g_object_unref(mObjectManager);
+	mObjectManager = nullptr;
+}
+
 void Bluez5SIL::createAdapter(const std::string &objectPath)
 {
 	DEBUG("New adapter on path %s", objectPath.c_str());
+
+	for (auto existing : mAdapters)
+	{
+		if (existing->getObjectPath() == objectPath)
+			return;	// known: a second one would power-cycle the controller and duplicate its devices
+	}
 
 	Bluez5Adapter *adapter = new Bluez5Adapter(std::string(objectPath));
 
@@ -333,8 +364,7 @@ Bluez5Adapter* Bluez5SIL::findAdapterForObjectPath(const std::string &objectPath
 {
 	for (auto adapter : mAdapters)
 	{
-		auto adapterPath = adapter->getObjectPath();
-		if (!objectPath.compare(0, adapterPath.length(), adapterPath))
+		if (isObjectPathUnder(objectPath, adapter->getObjectPath()))
 			return adapter;
 	}
 
@@ -384,7 +414,7 @@ void Bluez5SIL::createAgentManager(const std::string &objectPath)
 		adapter->assignAgent(mAgent);
 }
 
-void Bluez5SIL::removeAgentManager(const std::string &objectPath)
+void Bluez5SIL::removeAgentManager(const std::string &/*objectPath*/)
 {
 	if (!mAgentManager)
 		return;
@@ -422,7 +452,7 @@ void Bluez5SIL::createProfileManager(const std::string &objectPath)
 		adapter->assignProfileManager(mProfileManager);
 }
 
-void Bluez5SIL::removeProfileManager(const std::string &objectPath)
+void Bluez5SIL::removeProfileManager(const std::string &/*objectPath*/)
 {
 	if (!mProfileManager)
 		return;
@@ -488,8 +518,7 @@ Bluez5Adapter * Bluez5SIL::getBluez5Adapter(std::string objectPath)
 {
 	for (auto adapter: mAdapters)
 	{
-		std::size_t found = objectPath.find(adapter->getObjectPath());
-		if (found != std::string::npos)
+		if (isObjectPathUnder(objectPath, adapter->getObjectPath()))
 			return adapter;
 	}
 
@@ -513,7 +542,7 @@ BluetoothSIL* createBluetoothSIL(const int version, BluetoothPairingIOCapability
 	if (BLUETOOTH_SIL_API_VERSION != version)
 		return NULL;
 
-	g_type_init();
+	// g_type_init(): a no-op, and deprecated, since GLib 2.36.
 
 	PmLogErr error = PmLogGetContext(logContextName, &bluez5LogContext);
 	if (error != kPmLogErr_None)
