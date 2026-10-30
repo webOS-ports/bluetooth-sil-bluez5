@@ -143,6 +143,7 @@ file(GLOB SOURCES
      src/obexpaths.cpp
      src/gattlocal.cpp
      src/avrcpdevices.cpp
+     src/hfpuuid.cpp
      src/gattnotify.cpp
      src/gattdiscovery.cpp
      src/mediarole.cpp
