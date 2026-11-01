@@ -30,6 +30,7 @@ set(PARSER_SOURCES
     ${PROJECT_SOURCE_DIR}/src/gattlocal.cpp
     ${PROJECT_SOURCE_DIR}/src/meshconfig.cpp
     ${PROJECT_SOURCE_DIR}/src/avrcpdevices.cpp
+    ${PROJECT_SOURCE_DIR}/src/hfpuuid.cpp
     ${PROJECT_SOURCE_DIR}/src/gattnotify.cpp
     ${PROJECT_SOURCE_DIR}/src/gattdiscovery.cpp
 )
