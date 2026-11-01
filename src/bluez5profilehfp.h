@@ -20,6 +20,7 @@
 #include <bluetooth-sil-api.h>
 #include <bluez5profilebase.h>
 #include <gio/gio.h>
+#include <map>
 #include <string>
 
 extern "C" {
@@ -50,6 +51,8 @@ public:
 private:
 	std::string mConnectedDeviceAddress;
 	std::vector<std::string> mConnectedDevices;
+	// The remote UUID each connected device connected with, by lower-case address.
+	std::map<std::string, std::string> mConnectedUuids;
 };
 
 #endif

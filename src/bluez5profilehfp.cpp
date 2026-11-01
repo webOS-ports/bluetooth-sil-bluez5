@@ -16,6 +16,8 @@
 
 #include "bluez5profilehfp.h"
 #include "bluez5adapter.h"
+#include "bluez5device.h"
+#include "hfpuuid.h"
 #include "logging.h"
 #include "utils.h"
 #include <glib-2.0/glib/gvariant.h>
@@ -72,10 +74,23 @@ void Bluez5ProfileHfp::connect(const std::string &address, BluetoothResultCallba
 	};
 
 	auto it = std::find(mConnectedDevices.begin(), mConnectedDevices.end(), convertAddressToLowerCase(address));
-	if (it == mConnectedDevices.end())
-		Bluez5ProfileBase::connect(address, connectCallback);
-	else
+	if (it != mConnectedDevices.end())
+	{
 		callback(BLUETOOTH_ERROR_DEVICE_ALREADY_CONNECTED);
+		return;
+	}
+
+	Bluez5Device *device = mAdapter->findDevice(address);
+	if (!device)
+	{
+		callback(BLUETOOTH_ERROR_PARAM_INVALID);
+		return;
+	}
+
+	// A headset's hands-free unit where this is the phone, a phone's audio gateway where this is the headset.
+	const std::string uuid = hfpuuid::connectUuid(mAdapter->getAdapterSupportedUuid(), device->getUuids());
+	DEBUG("HFP connect %s with %s", address.c_str(), uuid.c_str());
+	device->connect(uuid, connectCallback);
 }
 
 void Bluez5ProfileHfp::disconnect(const std::string &address, BluetoothResultCallback callback)
@@ -90,11 +105,30 @@ void Bluez5ProfileHfp::disconnect(const std::string &address, BluetoothResultCal
 		callback(BLUETOOTH_ERROR_NONE);
 	};
 
-	Bluez5ProfileBase::disconnect(address, disConnectCallback);
+	Bluez5Device *device = mAdapter->findDevice(address);
+	if (!device)
+	{
+		DEBUG("Could not find device with address %s while trying to disconnect", address.c_str());
+		callback(BLUETOOTH_ERROR_PARAM_INVALID);
+		return;
+	}
+
+	// The end that connected, whichever side asked for it.
+	auto connected = mConnectedUuids.find(convertAddressToLowerCase(address));
+	const std::string uuid = hfpuuid::disconnectUuid(connected == mConnectedUuids.end() ? std::string() : connected->second,
+	                                                 mAdapter->getAdapterSupportedUuid(), device->getUuids());
+	device->disconnect(uuid, disConnectCallback);
 }
 
-void Bluez5ProfileHfp::updateConnectionStatus(const std::string &address, bool isConnected, const std::string &/*uuid*/)
+void Bluez5ProfileHfp::updateConnectionStatus(const std::string &address, bool isConnected, const std::string &uuid)
 {
+	// BlueZ names a profile in ConnectedUUIDS by its remote_uuid: 0x111e for oFono's audio gateway, 0x111f for a
+	// hands-free unit. Both are this profile (bluez5device.cpp profileIdUuidMap).
+	if (isConnected)
+		mConnectedUuids[convertAddressToLowerCase(address)] = uuid;
+	else
+		mConnectedUuids.erase(convertAddressToLowerCase(address));
+
 	BluetoothPropertiesList properties;
 	properties.push_back(BluetoothProperty(BluetoothProperty::Type::CONNECTED, isConnected));
 
