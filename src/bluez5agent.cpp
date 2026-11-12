@@ -345,12 +345,32 @@ gboolean Bluez5Agent::handleAuthorizeService(BluezAgent1 *proxy, GDBusMethodInvo
 	return TRUE;
 }
 
+/*
+ * BlueZ asks this for a pairing with no passkey to compare ("Just Works") that the
+ * remote device started, once the local side can show a dialog. The user allows or
+ * refuses it like a passkey confirmation, through supplyPairingConfirmation().
+ */
 gboolean Bluez5Agent::handleRequestAuthorization(BluezAgent1 */*proxy*/, GDBusMethodInvocation *invocation,
-                                                 const gchar */*address*/, gpointer /*user_data*/)
+                                                 const gchar *objectPath, gpointer user_data)
 {
-	DEBUG("Agent request authorize method was called");
-	// Still refused, as before, but answered once.
-	g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_AGENT_ERROR_NOT_IMPLEMENTED, "Not implemented yet");
+	DEBUG("Agent request authorization method was called: objectPath %s", objectPath);
+
+	Bluez5Agent *agent = static_cast<Bluez5Agent*>(user_data);
+	Bluez5AgentPairingInfo* pairingInfo = agent->initiatePairing(invocation, objectPath);
+
+	if (!pairingInfo)
+		return TRUE;	// initiatePairing() has answered it
+
+	cancelInvocation(pairingInfo->requestAuthorization, "Superseded by a new request");
+	pairingInfo->requestAuthorization = invocation;
+
+	BluetoothAdapterStatusObserver *observer = pairingInfo->adapter->getObserver();
+
+	if (observer)
+	{
+		DEBUG("Telling observer about authorization request");
+		observer->requestPairingAuthorization(pairingInfo->deviceAddress);
+	}
 
 	return TRUE;
 }
@@ -557,16 +577,24 @@ bool Bluez5Agent::supplyPairingConfirmation(Bluez5Adapter *adapter, const std::s
 
 	DEBUG("supplyPairingConfirmation: address %s accept %d", address.c_str(), accept);
 
-	if (!pairingInfo || !pairingInfo->requestConfirmation)
+	if (!pairingInfo || !(pairingInfo->requestConfirmation || pairingInfo->requestAuthorization))
 	{
 		DEBUG("Missing information to finish pairing attempt");
 		return false;
 	}
 
-	GDBusMethodInvocation *invocation = takeInvocation(pairingInfo->requestConfirmation);
+	// The answer to a passkey confirmation, or to a pairing without a passkey
+	// (RequestAuthorization); BlueZ asks one of them at a time.
+	const bool authorization = !pairingInfo->requestConfirmation;
+	GDBusMethodInvocation *invocation = authorization ? takeInvocation(pairingInfo->requestAuthorization)
+	                                                  : takeInvocation(pairingInfo->requestConfirmation);
 	if (!accept)
 	{
 		g_dbus_method_invocation_return_dbus_error(invocation, BLUEZ5_AGENT_ERROR_REJECTED, "User rejected confirmation");
+	}
+	else if (authorization)
+	{
+		bluez_agent1_complete_request_authorization(mInterface, invocation);
 	}
 	else
 	{
