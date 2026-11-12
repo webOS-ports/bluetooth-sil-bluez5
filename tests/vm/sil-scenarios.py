@@ -380,6 +380,47 @@ def pairing_with_nobody_there():
     check((device(a, b) or {}).get('paired'), 'pairing after the failed one did not pair: %r' % out)
 
 
+def wait_connected(adapter, address, wanted, timeout=15.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if (device(adapter, address) or {}).get('connected') is wanted:
+            return True
+        settle(0.5)
+    return False
+
+
+def device_connect_and_disconnect():
+    """A paired device is connected and disconnected as a whole (device/connect, device/disconnect), and
+    device/getStatus says so in "connected"; an address the adapter does not know is refused."""
+    a, b = pair_a_with_b()
+    discover(a, b)
+    pair(a, b)
+    settle(1.5)
+    check((device(a, b) or {}).get('paired'), 'A did not pair with B')
+    reply = call('device/disconnect', {'adapterAddress': a, 'address': b}, timeout=20.0)
+    check(reply and reply.get('returnValue'), 'disconnect after pairing failed: %r' % reply)
+    check(wait_connected(a, b, False), 'B still connected after disconnect: %r' % device(a, b))
+
+    reply = call('device/connect', {'adapterAddress': a, 'address': b}, timeout=40.0)
+    # btvirt's controllers share one bluetoothd and so its profiles: whether one of them connects depends on
+    # the image; the link itself must come up, or a profile error must come back.
+    if reply and reply.get('returnValue'):
+        check(reply.get('address') == b and reply.get('adapterAddress') == a, 'connect reply: %r' % reply)
+        check(wait_connected(a, b, True), 'connect answered but B is not connected: %r' % device(a, b))
+        reply = call('device/disconnect', {'adapterAddress': a, 'address': b}, timeout=20.0)
+        check(reply and reply.get('returnValue'), 'disconnect failed: %r' % reply)
+        check(wait_connected(a, b, False), 'B still connected after disconnect: %r' % device(a, b))
+    else:
+        check(reply and reply.get('errorCode') == 130, 'connect failed without the profile error: %r' % reply)
+        print('      (no profile to connect between the virtual controllers: %s)' % reply.get('errorText'))
+
+    for method in ('device/connect', 'device/disconnect'):
+        reply = call(method, {'adapterAddress': a, 'address': '00:aa:01:02:00:02'})
+        check(reply and not reply.get('returnValue'), '%s of an unknown device answered %r' % (method, reply))
+        reply = call(method, {'adapterAddress': a})
+        check(reply and not reply.get('returnValue'), '%s without an address answered %r' % (method, reply))
+
+
 def bluetoothd_killed_and_back():
     """bluetoothd killed (SIGKILL) twice with devices known: the service keeps running and gets both adapters back."""
     a, b = pair_a_with_b()
@@ -687,6 +728,7 @@ SCENARIOS = [
     pairing_just_works,
     pairing_again_after_unpair,
     pairing_with_nobody_there,
+    device_connect_and_disconnect,
     bluetoothd_killed_and_back,
     controllers_vanish_mid_pairing,
     opp_accept_reject_and_unanswered,

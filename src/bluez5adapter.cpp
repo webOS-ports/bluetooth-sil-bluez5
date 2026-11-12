@@ -1904,6 +1904,53 @@ void Bluez5Adapter::cancelPairing(const std::string &address, BluetoothResultCal
 	}
 }
 
+/*
+ * The device as a whole, as a user picks it from a list: BlueZ connects every
+ * profile both ends have that is set to auto-connect (Device1.Connect), and
+ * Disconnect takes all of them down. A single profile goes through its
+ * BluetoothProfile instead.
+ */
+void Bluez5Adapter::connectDevice(const std::string &address, BluetoothResultCallback callback)
+{
+	if (address.length() == 0)
+	{
+		callback(BLUETOOTH_ERROR_PARAM_INVALID);
+		return;
+	}
+
+	Bluez5Device *device = findDevice(address);
+	if (!device)
+	{
+		callback(BLUETOOTH_ERROR_UNKNOWN_DEVICE_ADDR);
+		return;
+	}
+
+	device->connect([alive = mLifetime.token(), callback](BluetoothError error) {
+		// the adapter was deleted meanwhile, see getAdapterProperties
+		callback(alive.expired() ? BLUETOOTH_ERROR_FAIL : error);
+	});
+}
+
+void Bluez5Adapter::disconnectDevice(const std::string &address, BluetoothResultCallback callback)
+{
+	if (address.length() == 0)
+	{
+		callback(BLUETOOTH_ERROR_PARAM_INVALID);
+		return;
+	}
+
+	Bluez5Device *device = findDevice(address);
+	if (!device)
+	{
+		callback(BLUETOOTH_ERROR_UNKNOWN_DEVICE_ADDR);
+		return;
+	}
+
+	device->disconnect([alive = mLifetime.token(), callback](BluetoothError error) {
+		callback(alive.expired() ? BLUETOOTH_ERROR_FAIL : error);
+	});
+}
+
 void Bluez5Adapter::configureAdvertisement(bool /*connectable*/, bool /*includeTxPower*/, bool /*includeName*/,
                                            BluetoothLowEnergyData /*manufacturerData*/, BluetoothLowEnergyServiceList /*services*/,
                                            BluetoothResultCallback callback, uint8_t /*TxPower*/, BluetoothUuid /*solicitedService128*/)
