@@ -16,6 +16,8 @@
 
 #include <gio/gio.h>
 
+#include <set>
+
 #include <bluetooth-sil-api.h>
 
 #include "bluez5adapter.h"
@@ -290,6 +292,14 @@ gboolean Bluez5Agent::handleCancel(BluezAgent1 */*proxy*/, GDBusMethodInvocation
 
 	Bluez5Agent *agent = static_cast<Bluez5Agent*>(user_data);
 
+	// The adapters to tell that their pairing ended: each one with an incoming pairing ended here (a prompt nobody
+	// answered in time; the service keeps showing it otherwise), and the default one if it is pairing, as before.
+	// Collected before the loop below, which clears their pairing state.
+	std::set<Bluez5Adapter*> canceled;
+	Bluez5Adapter *defaultAdapter = agent->mSIL->getDefaultBluez5Adapter();
+	if (defaultAdapter && defaultAdapter->isPairing())
+		canceled.insert(defaultAdapter);
+
 	// BlueZ no longer waits for any request: answer what is pending, and end incoming pairings, which nothing
 	// else ends (outgoing ones end with the reply to Pair).
 	for (auto iter = agent->mDevicePairings.begin(); iter != agent->mDevicePairings.end(); )
@@ -298,6 +308,8 @@ gboolean Bluez5Agent::handleCancel(BluezAgent1 */*proxy*/, GDBusMethodInvocation
 		cancelPendingRequests(pairingInfo, "Canceled by BlueZ");
 		if (pairingInfo->incoming)
 		{
+			if (pairingInfo->adapter->isPairing())
+				canceled.insert(pairingInfo->adapter);
 			pairingInfo->adapter->setPairing(false);
 			delete pairingInfo;
 			iter = agent->mDevicePairings.erase(iter);
@@ -306,11 +318,9 @@ gboolean Bluez5Agent::handleCancel(BluezAgent1 */*proxy*/, GDBusMethodInvocation
 			++iter;
 	}
 
-	//TODO how to handle this? We don't know which adapter pairing cancel
-	Bluez5Adapter *defaultAdapter = agent->mSIL->getDefaultBluez5Adapter();
-	if (defaultAdapter && defaultAdapter->isPairing())
+	for (Bluez5Adapter *adapter : canceled)
 	{
-		BluetoothAdapterStatusObserver *observer = defaultAdapter->getObserver();
+		BluetoothAdapterStatusObserver *observer = adapter->getObserver();
 		if (observer)
 			observer->pairingCanceled();
 	}

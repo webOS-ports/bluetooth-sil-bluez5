@@ -421,6 +421,74 @@ def device_connect_and_disconnect():
         check(reply and not reply.get('returnValue'), '%s without an address answered %r' % (method, reply))
 
 
+def service_bus_name():
+    """The service's unique name on the system bus, where its BlueZ agent is."""
+    pid = main_pid()
+    out = subprocess.run(['busctl', '--system', '--no-legend', 'list'], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) > 1 and fields[0].startswith(':') and fields[1] == pid:
+            return fields[0]
+    raise Failure('the service (pid %s) has no name on the system bus' % pid)
+
+
+def ask_agent(name, method, *arguments):
+    """Calls the service's agent as bluetoothd would; the call waits for its answer."""
+    return subprocess.Popen(['busctl', '--system', '--timeout=60', 'call', name, '/', 'org.bluez.Agent1', method] +
+                            list(arguments), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def incoming_prompt_canceled_by_bluez():
+    """A device's pairing that nobody answers: bluetoothd gives up and cancels the agent's request, and the
+    awaitPairingRequests subscriber hears that it ended, so the prompt it shows goes. btvirt pairs without asking,
+    so the agent is asked here as bluetoothd asks it (RequestConfirmation, then Cancel)."""
+    a, b = pair_a_with_b()
+    set_state(a, discoverable=True, discoverableTimeout=0)
+    discover(b, a)
+    incoming = client('adapter/awaitPairingRequests', {'adapterAddress': b, 'subscribe': True})
+    try:
+        check(incoming.wait(1), 'awaitPairingRequests did not answer')
+        name = service_bus_name()
+        iface = next(i for i, x in adapters().items() if x['adapterAddress'] == b)
+        path = '/org/bluez/%s/dev_%s' % (iface, a.upper().replace(':', '_'))
+
+        def asked(count, timeout=10.0):
+            end = time.time() + timeout
+            while True:
+                prompts = [r for r in incoming.all() if r.get('request') == 'confirmPasskey']
+                if len(prompts) >= count or time.time() >= end:
+                    return prompts
+                settle(0.1)
+
+        question = ask_agent(name, 'RequestConfirmation', 'ou', path, '998975')
+        prompts = asked(1)
+        check(prompts and str(prompts[-1].get('address')).lower() == a.lower() and prompts[-1].get('passkey') == 998975,
+              'no confirmPasskey for %s: %r' % (a, incoming.all()))
+
+        cancel = subprocess.run(['busctl', '--system', 'call', name, '/', 'org.bluez.Agent1', 'Cancel'],
+                                capture_output=True, text=True, timeout=10)
+        check(cancel.returncode == 0, 'Cancel failed: %s' % cancel.stderr.strip())
+        ended = incoming.wait(timeout=10, until=lambda r: r.get('request') == 'endPairing')
+        ends = [r for r in ended if r.get('request') == 'endPairing']
+        check(ends, 'the subscriber did not hear the pairing end: %r' % ended)
+        check(ends[-1].get('returnValue') is False and ends[-1].get('errorCode') == 124,
+              'endPairing after a cancel: %r' % ends[-1])
+        _, err = question.communicate(timeout=10)
+        check(question.returncode != 0 and 'canceled' in err.lower(), 'the request was not answered as canceled: %r' % err)
+
+        # The pairing ended for the service too: the next one is asked, and refusing it is BlueZ's answer.
+        question = ask_agent(name, 'RequestConfirmation', 'ou', path, '4711')
+        prompts = asked(2)
+        check(len(prompts) >= 2 and prompts[-1].get('passkey') == 4711,
+              'the next pairing was not asked: %r' % incoming.all())
+        reply = call('adapter/supplyPasskeyConfirmation', {'adapterAddress': b, 'address': a, 'accept': False})
+        check(reply and reply.get('returnValue'), 'refusing the next pairing failed: %r' % reply)
+        _, err = question.communicate(timeout=10)
+        check(question.returncode != 0 and 'rejected' in err.lower(), 'the refusal did not reach BlueZ: %r' % err)
+    finally:
+        incoming.stop()
+
+
 def bluetoothd_killed_and_back():
     """bluetoothd killed (SIGKILL) twice with devices known: the service keeps running and gets both adapters back."""
     a, b = pair_a_with_b()
@@ -729,6 +797,7 @@ SCENARIOS = [
     pairing_again_after_unpair,
     pairing_with_nobody_there,
     device_connect_and_disconnect,
+    incoming_prompt_canceled_by_bluez,
     bluetoothd_killed_and_back,
     controllers_vanish_mid_pairing,
     opp_accept_reject_and_unanswered,
