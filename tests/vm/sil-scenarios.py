@@ -380,6 +380,115 @@ def pairing_with_nobody_there():
     check((device(a, b) or {}).get('paired'), 'pairing after the failed one did not pair: %r' % out)
 
 
+def wait_connected(adapter, address, wanted, timeout=15.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if (device(adapter, address) or {}).get('connected') is wanted:
+            return True
+        settle(0.5)
+    return False
+
+
+def device_connect_and_disconnect():
+    """A paired device is connected and disconnected as a whole (device/connect, device/disconnect), and
+    device/getStatus says so in "connected"; an address the adapter does not know is refused."""
+    a, b = pair_a_with_b()
+    discover(a, b)
+    pair(a, b)
+    settle(1.5)
+    check((device(a, b) or {}).get('paired'), 'A did not pair with B')
+    reply = call('device/disconnect', {'adapterAddress': a, 'address': b}, timeout=20.0)
+    check(reply and reply.get('returnValue'), 'disconnect after pairing failed: %r' % reply)
+    check(wait_connected(a, b, False), 'B still connected after disconnect: %r' % device(a, b))
+
+    reply = call('device/connect', {'adapterAddress': a, 'address': b}, timeout=40.0)
+    # btvirt's controllers share one bluetoothd and so its profiles: whether one of them connects depends on
+    # the image; the link itself must come up, or a profile error must come back.
+    if reply and reply.get('returnValue'):
+        check(reply.get('address') == b and reply.get('adapterAddress') == a, 'connect reply: %r' % reply)
+        check(wait_connected(a, b, True), 'connect answered but B is not connected: %r' % device(a, b))
+        reply = call('device/disconnect', {'adapterAddress': a, 'address': b}, timeout=20.0)
+        check(reply and reply.get('returnValue'), 'disconnect failed: %r' % reply)
+        check(wait_connected(a, b, False), 'B still connected after disconnect: %r' % device(a, b))
+    else:
+        check(reply and reply.get('errorCode') == 130, 'connect failed without the profile error: %r' % reply)
+        print('      (no profile to connect between the virtual controllers: %s)' % reply.get('errorText'))
+
+    for method in ('device/connect', 'device/disconnect'):
+        reply = call(method, {'adapterAddress': a, 'address': '00:aa:01:02:00:02'})
+        check(reply and not reply.get('returnValue'), '%s of an unknown device answered %r' % (method, reply))
+        reply = call(method, {'adapterAddress': a})
+        check(reply and not reply.get('returnValue'), '%s without an address answered %r' % (method, reply))
+
+
+def service_bus_name():
+    """The service's unique name on the system bus, where its BlueZ agent is."""
+    pid = main_pid()
+    out = subprocess.run(['busctl', '--system', '--no-legend', 'list'], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) > 1 and fields[0].startswith(':') and fields[1] == pid:
+            return fields[0]
+    raise Failure('the service (pid %s) has no name on the system bus' % pid)
+
+
+def ask_agent(name, method, *arguments):
+    """Calls the service's agent as bluetoothd would; the call waits for its answer."""
+    return subprocess.Popen(['busctl', '--system', '--timeout=60', 'call', name, '/', 'org.bluez.Agent1', method] +
+                            list(arguments), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def incoming_prompt_canceled_by_bluez():
+    """A device's pairing that nobody answers: bluetoothd gives up and cancels the agent's request, and the
+    awaitPairingRequests subscriber hears that it ended, so the prompt it shows goes. btvirt pairs without asking,
+    so the agent is asked here as bluetoothd asks it (RequestConfirmation, then Cancel)."""
+    a, b = pair_a_with_b()
+    set_state(a, discoverable=True, discoverableTimeout=0)
+    discover(b, a)
+    incoming = client('adapter/awaitPairingRequests', {'adapterAddress': b, 'subscribe': True})
+    try:
+        check(incoming.wait(1), 'awaitPairingRequests did not answer')
+        name = service_bus_name()
+        iface = next(i for i, x in adapters().items() if x['adapterAddress'] == b)
+        path = '/org/bluez/%s/dev_%s' % (iface, a.upper().replace(':', '_'))
+
+        def asked(count, timeout=10.0):
+            end = time.time() + timeout
+            while True:
+                prompts = [r for r in incoming.all() if r.get('request') == 'confirmPasskey']
+                if len(prompts) >= count or time.time() >= end:
+                    return prompts
+                settle(0.1)
+
+        question = ask_agent(name, 'RequestConfirmation', 'ou', path, '998975')
+        prompts = asked(1)
+        check(prompts and str(prompts[-1].get('address')).lower() == a.lower() and prompts[-1].get('passkey') == 998975,
+              'no confirmPasskey for %s: %r' % (a, incoming.all()))
+
+        cancel = subprocess.run(['busctl', '--system', 'call', name, '/', 'org.bluez.Agent1', 'Cancel'],
+                                capture_output=True, text=True, timeout=10)
+        check(cancel.returncode == 0, 'Cancel failed: %s' % cancel.stderr.strip())
+        ended = incoming.wait(timeout=10, until=lambda r: r.get('request') == 'endPairing')
+        ends = [r for r in ended if r.get('request') == 'endPairing']
+        check(ends, 'the subscriber did not hear the pairing end: %r' % ended)
+        check(ends[-1].get('returnValue') is False and ends[-1].get('errorCode') == 124,
+              'endPairing after a cancel: %r' % ends[-1])
+        _, err = question.communicate(timeout=10)
+        check(question.returncode != 0 and 'canceled' in err.lower(), 'the request was not answered as canceled: %r' % err)
+
+        # The pairing ended for the service too: the next one is asked, and refusing it is BlueZ's answer.
+        question = ask_agent(name, 'RequestConfirmation', 'ou', path, '4711')
+        prompts = asked(2)
+        check(len(prompts) >= 2 and prompts[-1].get('passkey') == 4711,
+              'the next pairing was not asked: %r' % incoming.all())
+        reply = call('adapter/supplyPasskeyConfirmation', {'adapterAddress': b, 'address': a, 'accept': False})
+        check(reply and reply.get('returnValue'), 'refusing the next pairing failed: %r' % reply)
+        _, err = question.communicate(timeout=10)
+        check(question.returncode != 0 and 'rejected' in err.lower(), 'the refusal did not reach BlueZ: %r' % err)
+    finally:
+        incoming.stop()
+
+
 def bluetoothd_killed_and_back():
     """bluetoothd killed (SIGKILL) twice with devices known: the service keeps running and gets both adapters back."""
     a, b = pair_a_with_b()
@@ -540,6 +649,7 @@ def opp_same_name_kept_and_dotfile_refused():
         if os.path.exists(p):
             os.remove(p)
     contents = []
+    names = []
     try:
         for _ in range(2):
             data = os.urandom(32 * 1024)
@@ -548,7 +658,10 @@ def opp_same_name_kept_and_dotfile_refused():
                 f.write(data)
             request, reply = push_accepted(a, '/tmp/' + name)
             check(request and reply and reply.get('returnValue'), 'push not accepted: %r %r' % (request, reply))
+            names.append(request.get('fileName'))
             settle(2.0)
+        # Asked about, and reported, under the name it is stored under.
+        check(names == [name, 'sil-opp-dup (1).bin'], 'requests named %r' % names)
         check(os.path.exists(first) and open(first, 'rb').read() == contents[0], 'the first file was replaced')
         check(os.path.exists(second) and open(second, 'rb').read() == contents[1],
               'the second push did not land under a free name')
@@ -687,6 +800,8 @@ SCENARIOS = [
     pairing_just_works,
     pairing_again_after_unpair,
     pairing_with_nobody_there,
+    device_connect_and_disconnect,
+    incoming_prompt_canceled_by_bluez,
     bluetoothd_killed_and_back,
     controllers_vanish_mid_pairing,
     opp_accept_reject_and_unanswered,

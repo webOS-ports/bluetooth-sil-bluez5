@@ -925,8 +925,19 @@ BluetoothError Bluez5Adapter::startDiscovery()
 	bluez_adapter1_call_start_discovery_sync(mAdapterProxy, NULL, &error);
 	if (error)
 	{
+		// bluetoothd refuses a StartDiscovery from a client that already has a discovery, or whose start is still
+		// pending, with org.bluez.Error.InProgress (src/adapter.c start_discovery in BlueZ 5.86, its only
+		// InProgress there). Discovering is not set yet, so that is our own start under way: bluetoothd answered the
+		// last StartDiscovery before its Discovering=true reached us, and two adapter/startDiscovery in the same
+		// second failed the second with 115. The discovery asked for is there; the first start's timeout runs, as
+		// when Discovering is already set. The error name decides; any other error fails.
+		gchar *name = g_dbus_error_get_remote_error(error);
+		const bool ourStartUnderWay = g_strcmp0(name, "org.bluez.Error.InProgress") == 0;
+		g_free(name);
+		if (ourStartUnderWay)
+			DEBUG("StartDiscovery: %s; discovery is starting", error->message);
 		g_error_free(error);
-		return BLUETOOTH_ERROR_FAIL;
+		return ourStartUnderWay ? BLUETOOTH_ERROR_NONE : BLUETOOTH_ERROR_FAIL;
 	}
 
 	startDiscoveryTimeout();
@@ -962,10 +973,26 @@ void Bluez5Adapter::cancelDiscovery(BluetoothResultCallback callback)
 		bluez_adapter1_call_stop_discovery_sync(mAdapterProxy, NULL, &error);
 		if (error)
 		{
+			// bluetoothd keeps a discovery per D-Bus client and refuses a StopDiscovery from a client without one
+			// with org.bluez.Error.Failed, "No discovery started" (src/adapter.c stop_discovery in BlueZ 5.86, its
+			// only Failed there). Discovering is still set, so a stop is under way: bluetoothd answered the last
+			// StopDiscovery before its Discovering=false reached us. bluetooth2's pair cancels discovery again
+			// right after Settings did, and was told "Failed to stop discovery". Such a request waits for discovery
+			// to end with the others; when another client keeps it going, the timeout answers it.
+			// The error name decides, not its text; any other error (NotReady, InProgress, no reply) fails.
+			gchar *name = g_dbus_error_get_remote_error(error);
+			const bool noDiscoveryOfOurs = g_strcmp0(name, "org.bluez.Error.Failed") == 0;
+			g_free(name);
+			if (!noDiscoveryOfOurs)
+			{
+				g_error_free(error);
+				callback(BLUETOOTH_ERROR_FAIL);
+				return;
+			}
+			DEBUG("StopDiscovery: %s; waiting for discovery to end", error->message);
 			g_error_free(error);
-			callback(BLUETOOTH_ERROR_FAIL);
-			return;
 		}
+		// After a Failed too: a BlueZ filter of ours is set whether or not bluetoothd still had our discovery.
 		if (mUseBluezFilter)
 		{
 			if (!clearPreviousFilter())
@@ -1902,6 +1929,53 @@ void Bluez5Adapter::cancelPairing(const std::string &address, BluetoothResultCal
 			callback(BLUETOOTH_ERROR_FAIL);
 		}
 	}
+}
+
+/*
+ * The device as a whole, as a user picks it from a list: BlueZ connects every
+ * profile both ends have that is set to auto-connect (Device1.Connect), and
+ * Disconnect takes all of them down. A single profile goes through its
+ * BluetoothProfile instead.
+ */
+void Bluez5Adapter::connectDevice(const std::string &address, BluetoothResultCallback callback)
+{
+	if (address.length() == 0)
+	{
+		callback(BLUETOOTH_ERROR_PARAM_INVALID);
+		return;
+	}
+
+	Bluez5Device *device = findDevice(address);
+	if (!device)
+	{
+		callback(BLUETOOTH_ERROR_UNKNOWN_DEVICE_ADDR);
+		return;
+	}
+
+	device->connect([alive = mLifetime.token(), callback](BluetoothError error) {
+		// the adapter was deleted meanwhile, see getAdapterProperties
+		callback(alive.expired() ? BLUETOOTH_ERROR_FAIL : error);
+	});
+}
+
+void Bluez5Adapter::disconnectDevice(const std::string &address, BluetoothResultCallback callback)
+{
+	if (address.length() == 0)
+	{
+		callback(BLUETOOTH_ERROR_PARAM_INVALID);
+		return;
+	}
+
+	Bluez5Device *device = findDevice(address);
+	if (!device)
+	{
+		callback(BLUETOOTH_ERROR_UNKNOWN_DEVICE_ADDR);
+		return;
+	}
+
+	device->disconnect([alive = mLifetime.token(), callback](BluetoothError error) {
+		callback(alive.expired() ? BLUETOOTH_ERROR_FAIL : error);
+	});
 }
 
 void Bluez5Adapter::configureAdvertisement(bool /*connectable*/, bool /*includeTxPower*/, bool /*includeName*/,

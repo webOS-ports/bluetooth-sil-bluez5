@@ -91,6 +91,8 @@ public:
 	BluetoothError supplyPairingSecret(const std::string &address, BluetoothPasskey passkey);
 	void unpair(const std::string &address, BluetoothResultCallback callback);
 	void cancelPairing(const std::string &address, BluetoothResultCallback callback);
+	void connectDevice(const std::string &address, BluetoothResultCallback callback);
+	void disconnectDevice(const std::string &address, BluetoothResultCallback callback);
 
 	void addDevice(const std::string &objectPath);
 	void removeDevice(const std::string &objectPath);
