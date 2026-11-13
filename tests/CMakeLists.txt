@@ -81,6 +81,14 @@ target_link_libraries(bluez5-sil-gatt-tests ${GTEST_MAIN_LIBRARY} ${GTEST_LIBRAR
 target_compile_options(bluez5-sil-gatt-tests PRIVATE -fno-sanitize=vptr)
 add_test(NAME bluez5-sil-gatt COMMAND bluez5-sil-gatt-tests)
 
+# The adapter's startDiscovery and cancelDiscovery against a fake bluetoothd on a private bus (needs dbus-daemon at
+# run time). The adapter reaches into most of the SIL, so the test links all of its sources.
+add_executable(bluez5-sil-adapter-tests ${CMAKE_CURRENT_SOURCE_DIR}/adapter/test_adapterdiscovery.cpp ${SOURCES})
+target_include_directories(bluez5-sil-adapter-tests PRIVATE ${PROJECT_SOURCE_DIR}/src ${GDBUS_IF_DIR})
+target_link_libraries(bluez5-sil-adapter-tests ${GTEST_MAIN_LIBRARY} ${GTEST_LIBRARY}
+    ${GLIB2_LDFLAGS} ${GIO2_LDFLAGS} ${GIO-UNIX_LDFLAGS} ${PMLOG_LDFLAGS} ${UUID_LDFLAGS} pthread)
+add_test(NAME bluez5-sil-adapter COMMAND bluez5-sil-adapter-tests)
+
 # libFuzzer targets (clang only, -DBUILD_FUZZING=ON).
 option(BUILD_FUZZING "Build the libFuzzer targets (clang)" OFF)
 if(BUILD_FUZZING)
