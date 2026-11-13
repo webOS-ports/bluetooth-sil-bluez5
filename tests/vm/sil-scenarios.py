@@ -649,6 +649,7 @@ def opp_same_name_kept_and_dotfile_refused():
         if os.path.exists(p):
             os.remove(p)
     contents = []
+    names = []
     try:
         for _ in range(2):
             data = os.urandom(32 * 1024)
@@ -657,7 +658,10 @@ def opp_same_name_kept_and_dotfile_refused():
                 f.write(data)
             request, reply = push_accepted(a, '/tmp/' + name)
             check(request and reply and reply.get('returnValue'), 'push not accepted: %r %r' % (request, reply))
+            names.append(request.get('fileName'))
             settle(2.0)
+        # Asked about, and reported, under the name it is stored under.
+        check(names == [name, 'sil-opp-dup (1).bin'], 'requests named %r' % names)
         check(os.path.exists(first) and open(first, 'rb').read() == contents[0], 'the first file was replaced')
         check(os.path.exists(second) and open(second, 'rb').read() == contents[1],
               'the second push did not land under a free name')

@@ -201,7 +201,6 @@ void Bluez5ProfileOpp::agentTransferConfirmationRequested(BluezObexAgent1 *inter
 	mPushPeer = peer;
 	mPendingTransferId = transferId;
 	mTransferObjPath = request.transferPath;
-	mFileName = request.name;
 	mStoredName = storedName;
 	mStoredSize = request.size;
 
@@ -231,7 +230,9 @@ void Bluez5ProfileOpp::agentTransferConfirmationRequested(BluezObexAgent1 *inter
 	}
 	mTransfersMap[transferId] = 0;
 	std::string lowerCaseAddress = convertAddressToLowerCase(request.source);
-	getOppObserver()->transferConfirmationRequested(transferId, lowerCaseAddress, deviceAddress, device->getName(), mFileName,
+	// The name the file is stored under: with one of the sender's name already there, that is the free name, and
+	// the user is asked about, and later finds, that file rather than the one already there.
+	getOppObserver()->transferConfirmationRequested(transferId, lowerCaseAddress, deviceAddress, device->getName(), mStoredName,
 	                                                request.size);
 }
 
